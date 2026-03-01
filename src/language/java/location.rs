@@ -132,14 +132,6 @@ fn handle_member_access(ctx: &JavaContextExtractor, node: Node) -> (CursorLocati
             let arguments = if node.kind() == "method_invocation" {
                 node.child_by_field_name("arguments")
                     .map(|n| ctx.node_text(n).to_string())
-            } else if let Some(parent) = node.parent() {
-                if parent.kind() == "method_invocation" {
-                    parent
-                        .child_by_field_name("arguments")
-                        .map(|n| ctx.node_text(n).to_string())
-                } else {
-                    None
-                }
             } else {
                 None
             };
@@ -221,14 +213,6 @@ fn handle_member_access(ctx: &JavaContextExtractor, node: Node) -> (CursorLocati
     let arguments = if node.kind() == "method_invocation" {
         node.child_by_field_name("arguments")
             .map(|n| ctx.node_text(n).to_string())
-    } else if let Some(parent) = node.parent() {
-        if parent.kind() == "method_invocation" {
-            parent
-                .child_by_field_name("arguments")
-                .map(|n| ctx.node_text(n).to_string())
-        } else {
-            None
-        }
     } else {
         None
     };
