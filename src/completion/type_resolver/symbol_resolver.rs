@@ -116,7 +116,7 @@ impl<'a> SymbolResolver<'a> {
             if !named_candidates.is_empty() {
                 let summaries: Vec<&MethodSummary> =
                     named_candidates.iter().map(|m| m.as_ref()).collect();
-                let best_summary = resolver.select_overload(&summaries, arg_count, &arg_types);
+                let best_summary = resolver.select_overload(&summaries, arg_count, &arg_types)?;
 
                 if let Some(found_arc) = named_candidates
                     .iter()

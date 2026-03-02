@@ -143,7 +143,7 @@ impl<'idx> TypeResolver<'idx> {
                 continue;
             }
 
-            let method = self.select_overload(&candidates, arg_count, arg_types);
+            let method = self.select_overload(&candidates, arg_count, arg_types)?;
             let sig = method
                 .generic_signature
                 .as_deref()
@@ -177,13 +177,13 @@ impl<'idx> TypeResolver<'idx> {
         candidates: &[&'a MethodSummary],
         arg_count: i32,
         arg_types: &[TypeName],
-    ) -> &'a MethodSummary {
+    ) -> Option<&'a MethodSummary> {
         if candidates.is_empty() {
-            return candidates[0];
+            return None;
         }
 
         if candidates.len() == 1 {
-            return candidates[0];
+            return Some(candidates[0]);
         }
 
         let by_count: Vec<&MethodSummary> = candidates
@@ -197,11 +197,11 @@ impl<'idx> TypeResolver<'idx> {
                 arg_count,
                 "no method matches parameter count, falling back to candidates[0]"
             );
-            return candidates[0];
+            return Some(candidates[0]);
         }
 
         if by_count.len() == 1 {
-            return by_count[0];
+            return Some(by_count[0]);
         }
 
         let mut best_score = -1;
@@ -226,7 +226,7 @@ impl<'idx> TypeResolver<'idx> {
         match best_match {
             Some(m) if best_score >= 0 => {
                 tracing::debug!(selected = %m.descriptor, score = best_score, "selected best match");
-                m
+                Some(m)
             }
             _ => {
                 // 如果所有 1 参数方法都匹配失败了，至少返回 by_count 的第一个
@@ -234,7 +234,7 @@ impl<'idx> TypeResolver<'idx> {
                 tracing::warn!(
                     "all overloads failed type scoring, falling back to first count-matched method"
                 );
-                by_count[0]
+                Some(by_count[0])
             }
         }
     }
@@ -1377,7 +1377,7 @@ mod tests {
         let args = vec![TypeName::new("java/lang/String")];
         let best = resolver.select_overload(&candidates, 1, &args);
 
-        assert_eq!(best.descriptor.as_ref(), "(Ljava/lang/String;)V");
+        assert_eq!(best.unwrap().descriptor.as_ref(), "(Ljava/lang/String;)V");
     }
 
     #[test]
@@ -1449,11 +1449,14 @@ mod tests {
         // 传入 int，应该优先匹配 process(int) 而不是 process(Integer)
         let args_prim = vec![TypeName::new("int")];
         let best_prim = resolver.select_overload(&candidates, 1, &args_prim);
-        assert_eq!(best_prim.descriptor.as_ref(), "(I)V");
+        assert_eq!(best_prim.unwrap().descriptor.as_ref(), "(I)V");
 
         // 传入 java/lang/Integer，应该优先匹配 process(Integer)
         let args_wrapper = vec![TypeName::new("java/lang/Integer")];
         let best_wrapper = resolver.select_overload(&candidates, 1, &args_wrapper);
-        assert_eq!(best_wrapper.descriptor.as_ref(), "(Ljava/lang/Integer;)V");
+        assert_eq!(
+            best_wrapper.unwrap().descriptor.as_ref(),
+            "(Ljava/lang/Integer;)V"
+        );
     }
 }
