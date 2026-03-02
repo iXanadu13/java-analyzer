@@ -39,6 +39,45 @@ impl<'idx> TypeResolver<'idx> {
     ) -> Option<TypeName> {
         let expr = expr.trim();
 
+        // `new` constructor: new pkg.Cls(...), new Cls(...), new int[3], new String[]{...}
+        if let Some(rest) = expr.strip_prefix("new ") {
+            let rest = rest.trim();
+
+            // Find type boundaries: stop when encountering '(', '<', '[', '{')
+            let boundary = rest.find(['(', '<', '[', '{']).unwrap_or(rest.len());
+            let raw_ty = rest[..boundary].trim();
+
+            if raw_ty.is_empty() {
+                return None;
+            }
+
+            // primitive new int[...]
+            let mut base = match raw_ty {
+                "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" => {
+                    TypeName::new(raw_ty)
+                }
+                _ => {
+                    if raw_ty.contains('.') {
+                        TypeName::new(raw_ty.replace('.', "/"))
+                    } else {
+                        TypeName::new(raw_ty) // will be expended later
+                    }
+                }
+            };
+
+            // matrix: new String[3][] / new int[3]
+            let after = rest[boundary..].trim_start();
+            if after.starts_with('[') || after.starts_with('{') {
+                let brace_idx = after.find('{').unwrap_or(after.len());
+                let dims = after[..brace_idx].matches('[').count();
+                for _ in 0..dims {
+                    base = base.wrap_array();
+                }
+            }
+
+            return Some(base);
+        }
+
         // array init
         if expr.ends_with(']')
             && let Some(bracket_idx) = expr.rfind('[')
