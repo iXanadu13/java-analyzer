@@ -1,5 +1,5 @@
 use crate::language::java::utils::{
-    find_ancestor, is_comment_kind, is_in_name_position, is_in_type_position,
+    find_ancestor, find_string_ancestor, is_comment_kind, is_in_name_position, is_in_type_position,
 };
 use tree_sitter::Node;
 
@@ -30,6 +30,15 @@ fn determine_location_impl(
         None => return (CursorLocation::Unknown, String::new()),
     };
     let mut current = node;
+    if let Some(str_node) = find_string_ancestor(node) {
+        let prefix = extract_string_prefix(ctx, str_node);
+        return (
+            CursorLocation::StringLiteral {
+                prefix: prefix.clone(),
+            },
+            prefix,
+        );
+    }
     loop {
         match current.kind() {
             "marker_annotation" | "annotation" => {
@@ -60,6 +69,48 @@ fn determine_location_impl(
         }
     }
     (CursorLocation::Unknown, String::new())
+}
+
+fn extract_string_prefix(ctx: &JavaContextExtractor, str_node: Node) -> String {
+    let start = str_node.start_byte();
+    let end = str_node.end_byte();
+    let cut = ctx.offset.min(end);
+
+    if cut <= start {
+        return String::new();
+    }
+
+    let raw = &ctx.source[start..cut];
+
+    match str_node.kind() {
+        "string_literal" => {
+            // raw looks like: "\"abc" or "\"abc\""
+            // want: "abc" truncated at cursor, without quotes
+            // find first quote in raw, then take after it
+            if let Some(pos) = raw.find('"') {
+                let after = &raw[pos + 1..];
+                // 如果 cursor 已经过了 closing quote（少见但可能，比如点到末尾），剥掉末尾 quote
+                return after.strip_suffix('"').unwrap_or(after).to_string();
+            }
+            String::new()
+        }
+        "text_block" => {
+            // raw looks like: "\"\"\" ...", want content without the leading """
+            // 这里先做简单处理：去掉开头的 """（以及可能的首个换行）
+            let s = raw.to_string();
+            if let Some(rest) = s.strip_prefix("\"\"\"") {
+                let mut rest = rest;
+                // Java text block 通常允许紧跟一个换行
+                if rest.starts_with('\n') {
+                    rest = &rest[1..];
+                }
+                return rest.to_string();
+            }
+            // fallback
+            s
+        }
+        _ => raw.to_string(),
+    }
 }
 
 fn handle_import(ctx: &JavaContextExtractor, node: Node) -> (CursorLocation, String) {
@@ -447,6 +498,7 @@ fn location_has_newline(loc: &CursorLocation) -> bool {
         CursorLocation::TypeAnnotation { prefix } => prefix.contains('\n'),
         CursorLocation::Annotation { prefix } => prefix.contains('\n'),
         CursorLocation::Import { prefix } => prefix.contains('\n'),
+        CursorLocation::StringLiteral { prefix } => prefix.contains('\n'),
         _ => false,
     }
 }
@@ -745,5 +797,27 @@ class A {
             loc
         );
         assert_eq!(query, "matr");
+    }
+
+    #[test]
+    fn test_annotation_string_literal_location() {
+        let src = r#"class A {
+        @SuppressWarnings("not parsed as string lol")
+        void f() {}
+    }"#;
+
+        // cursor 放在 string 中间，比如 "not parsed| ..."
+        let offset = src.find("not parsed").unwrap() + "not parsed".len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::StringLiteral { .. }),
+            "Expected StringLiteral, got {:?}",
+            loc
+        );
+        assert_eq!(query, "not parsed");
     }
 }

@@ -143,6 +143,9 @@ pub(crate) fn strip_sentinel_from_location(loc: CursorLocation) -> CursorLocatio
         CursorLocation::TypeAnnotation { prefix } => CursorLocation::TypeAnnotation {
             prefix: strip_sentinel(&prefix),
         },
+        CursorLocation::StringLiteral { prefix } => CursorLocation::StringLiteral {
+            prefix: strip_sentinel(&prefix),
+        },
         CursorLocation::VariableName { type_name } => CursorLocation::VariableName { type_name },
         CursorLocation::Import { prefix } => CursorLocation::Import {
             prefix: strip_sentinel(&prefix),
@@ -391,6 +394,16 @@ pub fn is_in_name_position(id_node: Node, decl_node: Node) -> bool {
         }
     }
     false
+}
+
+pub(crate) fn find_string_ancestor<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
+    loop {
+        match node.kind() {
+            "string_literal" | "text_block" => return Some(node),
+            _ => {}
+        }
+        node = node.parent()?;
+    }
 }
 
 #[cfg(test)]

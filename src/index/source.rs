@@ -11,7 +11,7 @@ use crate::{
     index::{GlobalIndex, intern_str},
     language::{
         java::{
-            JavaContextExtractor,
+            JavaContextExtractor, make_java_parser,
             members::{extract_class_members_from_body, extract_javadoc},
             scope::extract_package,
             utils::parse_java_modifiers,
@@ -1068,13 +1068,6 @@ fn kotlin_type_to_descriptor(ty: &str) -> String {
 
 fn node_text<'a>(node: Node, bytes: &'a [u8]) -> &'a str {
     node.utf8_text(bytes).unwrap_or("")
-}
-
-fn make_java_parser() -> Parser {
-    let mut p = Parser::new();
-    p.set_language(&tree_sitter_java::LANGUAGE.into())
-        .expect("java grammar");
-    p
 }
 
 fn make_kotlin_parser() -> Parser {

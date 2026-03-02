@@ -1,8 +1,11 @@
 use super::Language;
 use crate::completion::{CompletionContext, context::CursorLocation};
+use crate::language::ClassifiedToken;
 use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::language::ts_utils::find_method_by_offset;
 use ropey::Rope;
+use smallvec::smallvec;
+use tower_lsp::lsp_types::{SemanticTokenModifier, SemanticTokenType};
 use tree_sitter::{Node, Parser};
 
 pub mod injection;
@@ -14,7 +17,7 @@ pub mod utils;
 
 const SENTINEL: &str = "__KIRO__";
 
-fn make_java_parser() -> Parser {
+pub fn make_java_parser() -> Parser {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_java::LANGUAGE.into())
@@ -24,6 +27,28 @@ fn make_java_parser() -> Parser {
 
 #[derive(Debug)]
 pub struct JavaLanguage;
+
+impl JavaLanguage {
+    fn is_static(&self, node: Node, bytes: &[u8]) -> bool {
+        node.child_by_field_name("modifiers")
+            .and_then(|m| m.utf8_text(bytes).ok())
+            .is_some_and(|text| text.contains("static"))
+    }
+
+    fn is_final(&self, node: Node, bytes: &[u8]) -> bool {
+        node.child_by_field_name("modifiers")
+            .and_then(|m| m.utf8_text(bytes).ok())
+            .is_some_and(|text| text.contains("final"))
+    }
+
+    fn is_field_declarator_identifier(&self, ident: Node) -> bool {
+        // identifier -> variable_declarator -> field_declaration
+        ident
+            .parent()
+            .and_then(|p| p.parent())
+            .is_some_and(|gp| gp.kind() == "field_declaration")
+    }
+}
 
 impl Language for JavaLanguage {
     fn id(&self) -> &'static str {
@@ -64,6 +89,120 @@ impl Language for JavaLanguage {
         let tree = parser.parse(extractor.source_str(), None)?;
         Some(extractor.extract(tree.root_node(), trigger_char))
     }
+
+    fn supports_semantic_tokens(&self) -> bool {
+        true
+    }
+
+    fn classify_semantic_token<'a>(
+        &self,
+        node: Node<'a>,
+        bytes: &'a [u8],
+    ) -> Option<ClassifiedToken> {
+        match node.kind() {
+            "type_identifier" => {
+                if is_annotation_name(node) {
+                    Some(ClassifiedToken {
+                        ty: SemanticTokenType::DECORATOR,
+                        modifiers: smallvec![],
+                    })
+                } else {
+                    Some(ClassifiedToken {
+                        ty: SemanticTokenType::CLASS,
+                        modifiers: smallvec![],
+                    })
+                }
+            }
+
+            "string_literal" => Some(ClassifiedToken {
+                ty: SemanticTokenType::STRING,
+                modifiers: smallvec![],
+            }),
+
+            "static" => Some(ClassifiedToken {
+                ty: SemanticTokenType::MODIFIER,
+                modifiers: smallvec![SemanticTokenModifier::STATIC],
+            }),
+            "final" => Some(ClassifiedToken {
+                ty: SemanticTokenType::MODIFIER,
+                modifiers: smallvec![SemanticTokenModifier::READONLY],
+            }),
+
+            "identifier" => {
+                if is_annotation_name(node) {
+                    return Some(ClassifiedToken {
+                        ty: SemanticTokenType::DECORATOR,
+                        modifiers: smallvec![],
+                    });
+                }
+
+                let parent = node.parent()?;
+                match parent.kind() {
+                    // Method declaration name
+                    "method_declaration" => {
+                        let mut mods = smallvec![];
+                        if self.is_static(parent, bytes) {
+                            mods.push(SemanticTokenModifier::STATIC);
+                        }
+                        Some(ClassifiedToken {
+                            ty: SemanticTokenType::METHOD,
+                            modifiers: mods,
+                        })
+                    }
+
+                    // The name of the method call (Note: in tree-sitter-java, the name in method_invocation is also an identifier)
+                    "method_invocation" => {
+                        // TODO: method_invocation 的 modifiers 不一定有意义，但如果你想把“静态调用”也标出来，
+                        // 得靠语义（index）推断；这里先不做。
+                        Some(ClassifiedToken {
+                            ty: SemanticTokenType::METHOD,
+                            modifiers: smallvec![],
+                        })
+                    }
+
+                    // The variable declaration (local/field) name is in the name field of variable_declarator.
+                    "variable_declarator" => {
+                        let is_field = self.is_field_declarator_identifier(node);
+                        if is_field {
+                            // readonly: You need to look at the modifiers of field_declaration (it is the parent of variable_declarator)
+                            let field_decl = parent.parent()?; // field_declaration
+                            let mut mods = smallvec![];
+                            if self.is_final(field_decl, bytes) {
+                                mods.push(SemanticTokenModifier::READONLY);
+                            }
+                            Some(ClassifiedToken {
+                                ty: SemanticTokenType::PROPERTY,
+                                modifiers: mods,
+                            })
+                        } else {
+                            Some(ClassifiedToken {
+                                ty: SemanticTokenType::VARIABLE,
+                                modifiers: smallvec![],
+                            })
+                        }
+                    }
+
+                    // Parameter name: name of formal_parameter
+                    "formal_parameter" => Some(ClassifiedToken {
+                        ty: SemanticTokenType::PARAMETER,
+                        modifiers: smallvec![],
+                    }),
+
+                    _ => None,
+                }
+            }
+
+            _ => None,
+        }
+    }
+}
+
+fn is_annotation_name(node: Node) -> bool {
+    node.parent().is_some_and(|p| {
+        (p.kind() == "annotation" || p.kind() == "marker_annotation")
+            && p.child_by_field_name("name")
+                .is_some_and(|name| name.id() == node.id())
+    })
 }
 
 pub struct JavaContextExtractor {

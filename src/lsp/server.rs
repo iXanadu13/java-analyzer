@@ -13,6 +13,7 @@ use crate::index::codebase::{index_codebase, index_source_text};
 use crate::language::LanguageRegistry;
 use crate::lsp::config::JavaAnalyzerConfig;
 use crate::lsp::handlers::goto_definition::handle_goto_definition;
+use crate::lsp::handlers::semantic_tokens::handle_semantic_tokens;
 use crate::workspace::{Workspace, document::Document};
 
 pub struct Backend {
@@ -346,7 +347,8 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensParams,
     ) -> LspResult<Option<SemanticTokensResult>> {
-        let response = super::handlers::semantic_tokens::handle_semantic_tokens_full(
+        let response = handle_semantic_tokens(
+            Arc::clone(&self.registry),
             Arc::clone(&self.workspace),
             params,
         )

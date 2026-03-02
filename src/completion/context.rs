@@ -55,9 +55,13 @@ impl CurrentClassMember {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CursorLocation {
     /// `import com.example.|`
-    Import { prefix: String },
+    Import {
+        prefix: String,
+    },
     /// `import static java.lang.Math.|`
-    ImportStatic { prefix: String },
+    ImportStatic {
+        prefix: String,
+    },
     /// `someObj.|` or `someObj.prefix|`
     MemberAccess {
         /// The inferred type of the accessed object (internal name, such as "java/lang/String")
@@ -81,15 +85,28 @@ pub enum CursorLocation {
     },
     /// Type annotation location: the type part of the variable declaration `Ma|in m;`
     // The class name should be completed, not the variable name.
-    TypeAnnotation { prefix: String },
+    TypeAnnotation {
+        prefix: String,
+    },
     /// Method call parameter location: `foo(aV|)` → Complete local variable
-    MethodArgument { prefix: String },
+    MethodArgument {
+        prefix: String,
+    },
     /// Location of a regular expression (which could be a local variable, static class name, or keyword)
-    Expression { prefix: String },
+    Expression {
+        prefix: String,
+    },
     /// Annotations, e.g @Override
-    Annotation { prefix: String },
+    Annotation {
+        prefix: String,
+    },
     /// Variable name position: `String |name|` — suggest variable names based on type
-    VariableName { type_name: String },
+    VariableName {
+        type_name: String,
+    },
+    StringLiteral {
+        prefix: String,
+    },
     /// Unrecognized location
     Unknown,
 }
