@@ -4,15 +4,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+use tower_lsp::lsp_types::Url;
 
-use crate::index::{ClassMetadata, GlobalIndex, index_jar};
+use crate::index::{ClassMetadata, WorkspaceIndex, index_jar};
+use crate::index::{IndexScope, ModuleId};
 use document::DocumentStore;
 
 pub mod document;
 
 pub struct Workspace {
     pub documents: DocumentStore,
-    pub index: Arc<RwLock<GlobalIndex>>,
+    pub index: Arc<RwLock<WorkspaceIndex>>,
     loaded_jars: RwLock<Vec<PathBuf>>,
 }
 
@@ -20,8 +22,14 @@ impl Workspace {
     pub fn new() -> Self {
         Self {
             documents: DocumentStore::new(),
-            index: Arc::new(RwLock::new(GlobalIndex::new())),
+            index: Arc::new(RwLock::new(WorkspaceIndex::new())),
             loaded_jars: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn scope_for_uri(&self, _uri: &Url) -> IndexScope {
+        IndexScope {
+            module: ModuleId::ROOT,
         }
     }
 
@@ -39,7 +47,10 @@ impl Workspace {
             "jar indexed"
         );
 
-        self.index.write().await.add_classes(classes);
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        self.index.write().await.add_jar_classes(scope, classes);
         self.loaded_jars.write().await.push(path);
         Ok(())
     }
@@ -80,7 +91,10 @@ impl Workspace {
         match result {
             Ok(classes) => {
                 info!(total = classes.len(), "all jars parsed, writing to index");
-                self.index.write().await.add_classes(classes);
+                let scope = IndexScope {
+                    module: ModuleId::ROOT,
+                };
+                self.index.write().await.add_jar_classes(scope, classes);
             }
             Err(e) => error!(error = %e, "jar indexing panicked"),
         }

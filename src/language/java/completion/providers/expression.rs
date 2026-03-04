@@ -3,7 +3,7 @@ use crate::{
         CandidateKind, CompletionCandidate, fuzzy, import_utils::is_import_needed,
         provider::CompletionProvider,
     },
-    index::GlobalIndex,
+    index::{IndexScope, WorkspaceIndex},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -15,7 +15,12 @@ impl CompletionProvider for ExpressionProvider {
         "expression"
     }
 
-    fn provide(&self, ctx: &SemanticContext, index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
+    fn provide(
+        &self,
+        scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &mut WorkspaceIndex,
+    ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::TypeAnnotation { prefix } => prefix.as_str(),
@@ -35,7 +40,7 @@ impl CompletionProvider for ExpressionProvider {
         let mut results = Vec::new();
 
         // Classes that have already been imported in current context
-        let imported = index.resolve_imports(&ctx.existing_imports);
+        let imported = index.resolve_imports(scope, &ctx.existing_imports);
         for meta in &imported {
             // Theoretically, it is not possible to import nested classes.
             if meta.inner_class_of.is_some() {
@@ -69,7 +74,7 @@ impl CompletionProvider for ExpressionProvider {
 
         // Same package
         if let Some(pkg) = current_pkg {
-            for meta in index.classes_in_package(pkg) {
+            for meta in index.classes_in_package(scope, pkg) {
                 if meta.inner_class_of.is_some() {
                     continue;
                 }
@@ -100,7 +105,7 @@ impl CompletionProvider for ExpressionProvider {
 
         // Other classes (global, require auto-import)
         if !prefix.is_empty() {
-            for meta in index.iter_all_classes() {
+            for meta in index.iter_all_classes(scope) {
                 // skip nested classes
                 if meta.inner_class_of.is_some() {
                     continue;
@@ -180,9 +185,13 @@ mod tests {
     use rust_asm::constants::ACC_PUBLIC;
 
     use super::*;
-    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex};
+    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId, WorkspaceIndex};
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use std::sync::Arc;
+
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
 
     fn make_cls(pkg: &str, name: &str) -> ClassMetadata {
         ClassMetadata {
@@ -201,8 +210,8 @@ mod tests {
         }
     }
 
-    fn make_index() -> GlobalIndex {
-        let mut idx = GlobalIndex::new();
+    fn make_index() -> WorkspaceIndex {
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_cls("org/cubewhy", "Main"),
             make_cls("org/cubewhy", "Main2"),
@@ -237,7 +246,7 @@ mod tests {
         let mut index = make_index();
         index.add_classes(vec![make_cls("com/other", "Main")]);
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(&ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
         // com/other/Main should appear (with auto-import)
         assert!(
             results.iter().any(|c| {
@@ -252,7 +261,7 @@ mod tests {
         // The class itself should appear in the completion (this can be used for type annotations, static access, etc.)
         let mut index = make_index();
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(&ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Main"),
             "enclosing class itself should appear as a completion candidate: {:?}",
@@ -265,7 +274,7 @@ mod tests {
         let mut index = make_index();
         index.add_classes(vec![make_cls("com/other", "Main")]);
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(&ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
         // Both Main (no import) and com/other/Main (requires import) in the same package should appear.
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Main"),
@@ -281,14 +290,14 @@ mod tests {
 
     #[test]
     fn test_nested_classes_are_filtered() {
-        let mut index = GlobalIndex::new();
+        let mut index = WorkspaceIndex::new();
         let mut nested_cls = make_cls("java/util", "Entry");
         nested_cls.inner_class_of = Some(Arc::from("java/util/Map"));
 
         index.add_classes(vec![nested_cls, make_cls("java/util", "Map")]);
 
         let ctx = ctx("Map", "Test", "app", vec![]);
-        let results = ExpressionProvider.provide(&ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
 
         // Map 应该出现，但 Map$Entry 不应该出现
         assert!(results.iter().any(|c| c.label.as_ref() == "Map"));
@@ -297,14 +306,14 @@ mod tests {
 
     #[test]
     fn test_duplicate_simple_names_from_different_packages() {
-        let mut index = GlobalIndex::new();
+        let mut index = WorkspaceIndex::new();
         index.add_classes(vec![
             make_cls("java/util", "List"),
             make_cls("java/awt", "List"),
         ]);
 
         let ctx = ctx("List", "Test", "app", vec![]);
-        let results = ExpressionProvider.provide(&ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
 
         // 验证两个 List 都存在
         let list_candidates: Vec<_> = results

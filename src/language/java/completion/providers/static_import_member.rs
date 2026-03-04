@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
-    index::{ClassMetadata, GlobalIndex},
+    index::{ClassMetadata, IndexScope, WorkspaceIndex},
     language::java::render,
     semantic::{
         context::{CursorLocation, SemanticContext},
@@ -18,7 +18,12 @@ impl CompletionProvider for StaticImportMemberProvider {
         "static_import_member"
     }
 
-    fn provide(&self, ctx: &SemanticContext, index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
+    fn provide(
+        &self,
+        scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &mut WorkspaceIndex,
+    ) -> Vec<CompletionCandidate> {
         if ctx.static_imports.is_empty() {
             return vec![];
         }
@@ -36,7 +41,7 @@ impl CompletionProvider for StaticImportMemberProvider {
             if s.ends_with(".*") {
                 // import static java.lang.Math.*
                 let class_path = s.trim_end_matches(".*").replace('.', "/");
-                if let Some(meta) = index.get_class(&class_path) {
+                if let Some(meta) = index.get_class(scope, &class_path) {
                     results.extend(all_static_members(
                         &meta,
                         &class_path,
@@ -44,6 +49,7 @@ impl CompletionProvider for StaticImportMemberProvider {
                         ctx,
                         self.name(),
                         index,
+                        scope,
                     ));
                 }
             } else {
@@ -58,7 +64,7 @@ impl CompletionProvider for StaticImportMemberProvider {
                 {
                     continue;
                 }
-                if let Some(meta) = index.get_class(&class_path) {
+                if let Some(meta) = index.get_class(scope, &class_path) {
                     results.extend(specific_static_member(
                         &meta,
                         &class_path,
@@ -66,6 +72,7 @@ impl CompletionProvider for StaticImportMemberProvider {
                         ctx,
                         self.name(),
                         index,
+                        scope,
                     ));
                 }
             }
@@ -81,9 +88,10 @@ fn all_static_members(
     query_lower: &str,
     ctx: &SemanticContext,
     source: &'static str,
-    index: &GlobalIndex,
+    index: &WorkspaceIndex,
+    scope: IndexScope,
 ) -> Vec<CompletionCandidate> {
-    let resolver = ContextualResolver::new(index, ctx);
+    let resolver = ContextualResolver::new(index, scope, ctx);
 
     let mut out = Vec::new();
     for method in &meta.methods {
@@ -144,9 +152,10 @@ fn specific_static_member(
     member_name: &str,
     ctx: &SemanticContext,
     source: &'static str,
-    index: &GlobalIndex,
+    index: &WorkspaceIndex,
+    scope: IndexScope,
 ) -> Vec<CompletionCandidate> {
-    let resolver = ContextualResolver::new(index, ctx);
+    let resolver = ContextualResolver::new(index, scope, ctx);
 
     let mut out = Vec::new();
     for method in &meta.methods {
@@ -203,15 +212,20 @@ fn specific_static_member(
 mod tests {
     use super::*;
     use crate::index::{
-        ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodParams, MethodSummary,
+        ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
+        WorkspaceIndex,
     };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
     use std::sync::Arc;
 
-    fn math_index() -> GlobalIndex {
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![ClassMetadata {
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
+
+    fn math_index() -> WorkspaceIndex {
+        let mut idx = WorkspaceIndex::new();
+        idx.add_jar_classes(root_scope(), vec![ClassMetadata {
             package: Some(Arc::from("java/lang")),
             name: Arc::from("Math"),
             internal_name: Arc::from("java/lang/Math"),
@@ -274,7 +288,7 @@ mod tests {
     fn test_wildcard_static_import_provides_all_static_members() {
         let mut idx = math_index();
         let ctx = expr_ctx("", vec![Arc::from("java.lang.Math.*")]);
-        let results = StaticImportMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticImportMemberProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"abs"), "abs should appear: {:?}", labels);
         assert!(labels.contains(&"pow"), "pow should appear: {:?}", labels);
@@ -285,7 +299,7 @@ mod tests {
     fn test_wildcard_static_import_filters_by_prefix() {
         let mut idx = math_index();
         let ctx = expr_ctx("ab", vec![Arc::from("java.lang.Math.*")]);
-        let results = StaticImportMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticImportMemberProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"abs"), "abs should match prefix 'ab'");
         assert!(!labels.contains(&"pow"), "pow should not match 'ab'");
@@ -295,7 +309,7 @@ mod tests {
     fn test_specific_static_import_provides_named_member() {
         let mut idx = math_index();
         let ctx = expr_ctx("", vec![Arc::from("java.lang.Math.abs")]);
-        let results = StaticImportMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticImportMemberProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             labels.contains(&"abs"),
@@ -313,7 +327,7 @@ mod tests {
         let ctx = expr_ctx("ab", vec![]);
         assert!(
             StaticImportMemberProvider
-                .provide(&ctx, &mut idx)
+                .provide(root_scope(), &ctx, &mut idx)
                 .is_empty()
         );
     }
@@ -335,7 +349,7 @@ mod tests {
         .with_static_imports(vec![Arc::from("java.lang.Math.*")]);
         assert!(
             StaticImportMemberProvider
-                .provide(&ctx, &mut idx)
+                .provide(root_scope(), &ctx, &mut idx)
                 .is_empty()
         );
     }

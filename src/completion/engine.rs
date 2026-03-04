@@ -1,7 +1,7 @@
 use crate::completion::CompletionCandidate;
 use crate::completion::post_processor;
 use crate::completion::provider::CompletionProvider;
-use crate::index::GlobalIndex;
+use crate::index::{IndexScope, WorkspaceIndex};
 use crate::language::Language;
 use crate::semantic::SemanticContext;
 
@@ -22,20 +22,21 @@ impl CompletionEngine {
 
     pub fn complete(
         &self,
+        scope: IndexScope,
         mut ctx: SemanticContext,
         lang: &dyn Language,
-        index: &mut GlobalIndex,
+        index: &mut WorkspaceIndex,
     ) -> Vec<CompletionCandidate> {
-        lang.enrich_completion_context(&mut ctx, index);
+        lang.enrich_completion_context(&mut ctx, scope, index);
 
         let mut candidates: Vec<CompletionCandidate> = lang
             .completion_providers()
             .iter()
-            .flat_map(|p| p.provide(&ctx, index))
+            .flat_map(|p| p.provide(scope, &ctx, index))
             .collect();
 
         for provider in &self.extra_providers {
-            candidates.extend(provider.provide(&ctx, index));
+            candidates.extend(provider.provide(scope, &ctx, index));
         }
 
         post_processor::process(candidates, &ctx.query)
@@ -53,13 +54,17 @@ mod tests {
     use super::*;
     use crate::{
         completion::parser::parse_chain_from_expr,
-        index::{ClassMetadata, ClassOrigin, MethodParams, MethodSummary},
+        index::{ClassMetadata, ClassOrigin, MethodParams, MethodSummary, ModuleId, WorkspaceIndex},
         language::{JavaLanguage, java::completion_context::ContextEnricher},
         semantic::types::{TypeResolver, type_name::TypeName},
         semantic::{CursorLocation, LocalVar, SemanticContext},
     };
     use rust_asm::constants::ACC_PUBLIC;
     use std::sync::Arc;
+
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
 
     fn seg_names(expr: &str) -> Vec<(String, Option<i32>)> {
         parse_chain_from_expr(expr)
@@ -118,8 +123,8 @@ mod tests {
         );
     }
 
-    fn make_index_with_random_class() -> GlobalIndex {
-        let mut idx = GlobalIndex::new();
+    fn make_index_with_random_class() -> WorkspaceIndex {
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy")),
             name: Arc::from("RandomClass"),
@@ -167,7 +172,7 @@ mod tests {
             Some(Arc::from("org/cubewhy/a")),
             vec!["org.cubewhy.RandomClass".into()],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(
                 receiver_type.as_deref(),
@@ -198,7 +203,7 @@ mod tests {
             Some(Arc::from("org/cubewhy/a")),
             vec!["org.cubewhy.*".into()],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(receiver_type.as_deref(), Some("org/cubewhy/RandomClass"),);
         }
@@ -226,7 +231,7 @@ mod tests {
             vec!["org.cubewhy.RandomClass".into()],
         );
         let engine = CompletionEngine::new();
-        let results = engine.complete(ctx, &JavaLanguage, &mut idx);
+        let results = engine.complete(root_scope(), ctx, &JavaLanguage, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "f"),
             "should find method f(): {:?}",
@@ -238,7 +243,7 @@ mod tests {
     fn test_chain_field_access_resolved() {
         use crate::index::{ClassMetadata, ClassOrigin, FieldSummary};
         use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             ClassMetadata {
                 package: Some(Arc::from("java/lang")),
@@ -293,7 +298,7 @@ mod tests {
             vec!["java.lang.System".into()], // 确保 System 能够被解析
         );
 
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
 
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(
@@ -310,7 +315,7 @@ mod tests {
     fn test_expected_type_ranks_first_in_constructor_completion() {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         for (pkg, name) in [
             ("org/cubewhy/a", "Main"),
             ("org/cubewhy/a", "Main2"),
@@ -352,7 +357,7 @@ mod tests {
             Some(Arc::from("org/cubewhy/a")),
             vec!["org.cubewhy.RandomClass".into()],
         );
-        let results = engine.complete(ctx, &JavaLanguage, &mut idx);
+        let results = engine.complete(root_scope(), ctx, &JavaLanguage, &mut idx);
         assert!(!results.is_empty(), "should have candidates");
         assert_eq!(
             results[0].label.as_ref(),
@@ -366,7 +371,7 @@ mod tests {
     fn test_var_method_return_type_resolved() {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: None,
             name: Arc::from("NestedClass"),
@@ -414,7 +419,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         let str_var = ctx
             .local_variables
             .iter()
@@ -427,7 +432,7 @@ mod tests {
     fn test_var_overload_resolved_by_long_arg() {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: None,
             name: Arc::from("NestedClass"),
@@ -488,7 +493,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         let str_var = ctx
             .local_variables
             .iter()
@@ -501,7 +506,7 @@ mod tests {
     fn test_var_bare_method_call_resolved() {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: None,
             name: Arc::from("Main"),
@@ -542,7 +547,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         let str_var = ctx
             .local_variables
             .iter()
@@ -555,7 +560,7 @@ mod tests {
     fn test_resolve_method_return_walks_mro() {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             ClassMetadata {
                 package: None,
@@ -594,14 +599,14 @@ mod tests {
                 origin: ClassOrigin::Unknown,
             },
         ]);
-        let resolver = TypeResolver::new(&idx);
+        let resolver = TypeResolver::new(&idx, root_scope());
         let result = resolver.resolve_method_return("Child", "getValue", 0, &[]);
         assert_eq!(result.as_deref(), Some("java/lang/String"));
     }
 
     #[test]
     fn test_complete_member_after_bare_method_call() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             ClassMetadata {
                 package: None,
@@ -663,13 +668,13 @@ mod tests {
             None,
             vec![],
         );
-        let results = engine.complete(ctx, &JavaLanguage, &mut idx);
+        let results = engine.complete(root_scope(), ctx, &JavaLanguage, &mut idx);
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
 
     #[test]
     fn test_var_array_element_type_resolved() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("java/lang")),
             name: Arc::from("String"),
@@ -709,7 +714,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         let a_var = ctx
             .local_variables
             .iter()
@@ -720,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_var_primitive_array_element_not_resolved() {
-        let idx = GlobalIndex::new();
+        let idx = WorkspaceIndex::new();
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
                 receiver_type: None,
@@ -746,7 +751,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         let x_var = ctx
             .local_variables
             .iter()
@@ -757,7 +762,7 @@ mod tests {
 
     #[test]
     fn test_enrich_context_array_access_receiver() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("java/lang")),
             name: Arc::from("String"),
@@ -798,7 +803,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(receiver_type.as_deref(), Some("java/lang/String"));
         }
@@ -806,9 +811,9 @@ mod tests {
 
     #[test]
     fn test_package_path_becomes_import_location() {
-        use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex};
+        use crate::index::{ClassMetadata, ClassOrigin, WorkspaceIndex};
         use rust_asm::constants::ACC_PUBLIC;
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("java/util")),
             name: Arc::from("ArrayList"),
@@ -837,7 +842,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         assert!(matches!(
             &ctx.location,
             CursorLocation::Import { prefix } if prefix == "java.util.ArrayL"
@@ -846,7 +851,7 @@ mod tests {
 
     #[test]
     fn test_unknown_receiver_stays_member_access() {
-        let idx = GlobalIndex::new();
+        let idx = WorkspaceIndex::new();
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
                 receiver_type: None,
@@ -861,7 +866,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         assert!(matches!(&ctx.location, CursorLocation::MemberAccess { .. }));
     }
 
@@ -870,7 +875,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("java/lang")),
             name: Arc::from("String"),
@@ -929,7 +934,7 @@ mod tests {
         // 注入默认 java.lang.* import 来确保 String 能正常被 resolve_simple_to_internal 解析
         ctx.existing_imports.push(Arc::from("java.lang.*"));
 
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
 
         // 校验 c (arr[0]) 被推断为 char
         let c_var = ctx
@@ -961,7 +966,7 @@ mod tests {
         // 验证 getArr()[0] 这种通过方法调用拿到数组再取下标的情况
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: None,
             name: Arc::from("Main"),
@@ -1003,7 +1008,7 @@ mod tests {
             None,
             vec![],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
         let item = ctx
             .local_variables
             .iter()
@@ -1017,7 +1022,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy")),
             name: Arc::from("Main"),
@@ -1052,7 +1057,7 @@ mod tests {
             vec![],
         );
 
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
 
         // 如果 var 优先被解析，这里就能推导出 receiver_expr 是 org/cubewhy/Main
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
@@ -1067,7 +1072,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("java/lang")),
             name: Arc::from("String"),
@@ -1102,7 +1107,7 @@ mod tests {
             vec![],
         );
 
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
 
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(
@@ -1120,7 +1125,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin, FieldSummary};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             ClassMetadata {
                 package: Some(Arc::from("org/cubewhy")),
@@ -1179,7 +1184,7 @@ mod tests {
             vec![],
         );
 
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, root_scope()).enrich(&mut ctx);
 
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(

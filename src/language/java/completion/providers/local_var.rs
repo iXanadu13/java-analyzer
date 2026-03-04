@@ -1,6 +1,6 @@
 use crate::{
     completion::{CandidateKind, CompletionCandidate, fuzzy, provider::CompletionProvider},
-    index::GlobalIndex,
+    index::{IndexScope, WorkspaceIndex},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -12,7 +12,12 @@ impl CompletionProvider for LocalVarProvider {
         "local_var"
     }
 
-    fn provide(&self, ctx: &SemanticContext, _index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
+    fn provide(
+        &self,
+        _scope: IndexScope,
+        ctx: &SemanticContext,
+        _index: &mut WorkspaceIndex,
+    ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::MethodArgument { prefix } => prefix.as_str(),
@@ -49,10 +54,14 @@ impl CompletionProvider for LocalVarProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::GlobalIndex;
+    use crate::index::{IndexScope, ModuleId, WorkspaceIndex};
     use crate::semantic::context::{CursorLocation, LocalVar, SemanticContext};
     use crate::semantic::types::type_name::TypeName;
     use std::sync::Arc;
+
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
 
     fn make_ctx(prefix: &str, vars: Vec<(&str, &str)>) -> SemanticContext {
         SemanticContext::new(
@@ -76,36 +85,39 @@ mod tests {
 
     #[test]
     fn test_prefix_match() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = make_ctx(
             "str",
             vec![("str", "java/lang/String"), ("aVar", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert!(results.iter().any(|c| c.label.as_ref() == "str"));
         assert!(results.iter().all(|c| c.label.as_ref() != "aVar"));
     }
 
     #[test]
     fn test_partial_prefix_match() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = make_ctx(
             "aV",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert!(results.iter().any(|c| c.label.as_ref() == "aVar"));
         assert!(results.iter().all(|c| c.label.as_ref() != "str"));
     }
 
     #[test]
     fn test_empty_prefix_returns_all_locals() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = make_ctx(
             "",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert_eq!(
             results.len(),
             2,
@@ -116,15 +128,17 @@ mod tests {
 
     #[test]
     fn test_case_insensitive() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = make_ctx("AVAR", vec![("aVar", "java/lang/String")]);
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert!(results.iter().any(|c| c.label.as_ref() == "aVar"));
     }
 
     #[test]
     fn test_method_argument_location() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = SemanticContext::new(
             CursorLocation::MethodArgument {
                 prefix: "aV".to_string(),
@@ -140,7 +154,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "should complete locals inside method arguments"
@@ -149,12 +163,13 @@ mod tests {
 
     #[test]
     fn test_fuzzy_match_var_finds_a_var() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = make_ctx(
             "var",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "fuzzy: 'var' should match 'aVar': {:?}",
@@ -164,15 +179,17 @@ mod tests {
 
     #[test]
     fn test_no_match_returns_empty() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = make_ctx("xyz", vec![("aVar", "java/lang/String")]);
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert!(results.is_empty(), "no fuzzy match should return empty");
     }
 
     #[test]
     fn test_member_access_does_not_return_locals() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
                 receiver_type: None,
@@ -191,7 +208,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert!(
             results.is_empty(),
             "LocalVarProvider should not return locals for MemberAccess: {:?}",
@@ -201,7 +218,8 @@ mod tests {
 
     #[test]
     fn test_type_annotation_location() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
+        let scope = root_scope();
         let ctx = SemanticContext::new(
             CursorLocation::TypeAnnotation {
                 prefix: "aV".to_string(),
@@ -217,7 +235,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "should complete locals inside TypeAnnotation context due to parsing ambiguity"

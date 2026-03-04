@@ -5,7 +5,7 @@ use crate::{
         CandidateKind, CompletionCandidate, fuzzy, import_utils::is_import_needed,
         provider::CompletionProvider,
     },
-    index::{ClassMetadata, GlobalIndex},
+    index::{ClassMetadata, IndexScope, WorkspaceIndex},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -17,7 +17,12 @@ impl CompletionProvider for AnnotationProvider {
         "annotation"
     }
 
-    fn provide(&self, ctx: &SemanticContext, index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
+    fn provide(
+        &self,
+        scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &mut WorkspaceIndex,
+    ) -> Vec<CompletionCandidate> {
         let (prefix, et) = match &ctx.location {
             CursorLocation::Annotation {
                 prefix,
@@ -30,7 +35,7 @@ impl CompletionProvider for AnnotationProvider {
         let mut results = Vec::new();
 
         // Annotations from imports
-        let imported = index.resolve_imports(&ctx.existing_imports);
+        let imported = index.resolve_imports(scope, &ctx.existing_imports);
         for meta in &imported {
             if !is_annotation_class(meta) {
                 continue;
@@ -62,7 +67,7 @@ impl CompletionProvider for AnnotationProvider {
 
         // Same package annotations
         if let Some(pkg) = ctx.enclosing_package.as_deref() {
-            for meta in index.classes_in_package(pkg) {
+            for meta in index.classes_in_package(scope, pkg) {
                 if imported_internals.contains(&meta.internal_name) {
                     continue;
                 }
@@ -90,7 +95,7 @@ impl CompletionProvider for AnnotationProvider {
         }
 
         // Global index — all annotation classes (require auto-import)
-        for meta in index.iter_all_classes() {
+        for meta in index.iter_all_classes(scope) {
             if imported_internals.contains(&meta.internal_name) {
                 continue;
             }
@@ -157,12 +162,17 @@ mod tests {
     use super::*;
     use crate::completion::CandidateKind;
     use crate::index::{
-        AnnotationSummary, AnnotationValue, ClassMetadata, ClassOrigin, GlobalIndex,
+        AnnotationSummary, AnnotationValue, ClassMetadata, ClassOrigin, IndexScope, ModuleId,
+        WorkspaceIndex,
     };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::{ACC_ANNOTATION, ACC_PUBLIC};
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
+
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
 
     fn make_annotation(pkg: &str, name: &str) -> ClassMetadata {
         ClassMetadata {
@@ -275,11 +285,11 @@ mod tests {
 
     #[test]
     fn test_non_annotation_class_excluded() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_class("com/example", "NotAnAnnotation")]);
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Not", vec![], "com/example");
-        let results = AnnotationProvider.provide(&ctx, &mut idx);
+        let results = AnnotationProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results
                 .iter()
@@ -290,11 +300,11 @@ mod tests {
 
     #[test]
     fn test_annotation_from_import_appears() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         idx.add_classes(vec![make_annotation("org/junit", "Test")]);
         let ctx = annotation_ctx("Te", vec!["org.junit.Test".into()], "com/example");
-        let results = AnnotationProvider.provide(&ctx, &mut idx);
+        let results = AnnotationProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Test"),
             "imported annotation should appear: {:?}",
@@ -304,11 +314,11 @@ mod tests {
 
     #[test]
     fn test_annotation_from_global_index_has_import() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_annotation("org/junit", "Test")]);
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Te", vec![], "com/example");
-        let results = AnnotationProvider.provide(&ctx, &mut idx);
+        let results = AnnotationProvider.provide(root_scope(), &ctx, &mut idx);
         let test_candidate = results.iter().find(|c| c.label.as_ref() == "Test");
         assert!(test_candidate.is_some(), "Test annotation should appear");
         assert_eq!(
@@ -320,10 +330,10 @@ mod tests {
 
     #[test]
     fn test_annotation_kind_is_annotation() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Over", vec![], "com/example");
-        let results = AnnotationProvider.provide(&ctx, &mut idx);
+        let results = AnnotationProvider.provide(root_scope(), &ctx, &mut idx);
         let c = results
             .iter()
             .find(|c| c.label.as_ref() == "Override")
@@ -336,10 +346,10 @@ mod tests {
 
     #[test]
     fn test_prefix_filter_case_insensitive() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("over", vec![], "com/example");
-        let results = AnnotationProvider.provide(&ctx, &mut idx);
+        let results = AnnotationProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Override"),
             "case-insensitive prefix should match Override"
@@ -348,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_target_filter_method_context() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         let mut type_only = make_annotation("com/example", "ClassOnly");
         type_only.annotations = vec![AnnotationSummary {
@@ -380,7 +390,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = AnnotationProvider.provide(&ctx, &mut idx);
+        let results = AnnotationProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(results.iter().all(|c| c.label.as_ref() != "ClassOnly"));
     }
 }

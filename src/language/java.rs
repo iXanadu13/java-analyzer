@@ -1,6 +1,6 @@
 use super::Language;
 use crate::completion::provider::CompletionProvider;
-use crate::index::GlobalIndex;
+use crate::index::{IndexScope, WorkspaceIndex};
 use crate::language::ClassifiedToken;
 use crate::language::java::completion::providers::{
     annotation::AnnotationProvider, constructor::ConstructorProvider,
@@ -130,8 +130,13 @@ impl Language for JavaLanguage {
         &JAVA_COMPLETION_PROVIDERS
     }
 
-    fn enrich_completion_context(&self, ctx: &mut SemanticContext, index: &GlobalIndex) {
-        completion_context::ContextEnricher::new(index).enrich(ctx);
+    fn enrich_completion_context(
+        &self,
+        ctx: &mut SemanticContext,
+        scope: IndexScope,
+        index: &WorkspaceIndex,
+    ) {
+        completion_context::ContextEnricher::new(index, scope).enrich(ctx);
     }
 
     fn supports_semantic_tokens(&self) -> bool {

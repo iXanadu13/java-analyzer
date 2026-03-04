@@ -6,7 +6,7 @@ use crate::index::{ClassMetadata, ClassOrigin};
 use crate::language::java::type_ctx::{SourceTypeCtx, build_java_descriptor};
 use crate::language::java::utils::extract_generic_signature;
 use crate::{
-    index::{GlobalIndex, intern_str},
+    index::{IndexScope, WorkspaceIndex, intern_str},
     language::{
         java::{
             JavaContextExtractor, make_java_parser,
@@ -143,7 +143,8 @@ pub fn find_symbol_range(
     target_internal: &str,
     member_name: Option<&str>,
     descriptor: Option<&str>,
-    index: &GlobalIndex,
+    index: &WorkspaceIndex,
+    scope: IndexScope,
 ) -> Option<tower_lsp::lsp_types::Range> {
     let ctx = JavaContextExtractor::for_indexing(content);
     let mut parser = make_java_parser();
@@ -151,7 +152,7 @@ pub fn find_symbol_range(
     let root = tree.root_node();
     let package = extract_package(&ctx, root);
     let imports = crate::language::java::scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::new(package, imports, Some(index.build_name_table()));
+    let type_ctx = SourceTypeCtx::new(package, imports, Some(index.build_name_table(scope)));
 
     let target_simple = target_internal
         .rsplit('/')

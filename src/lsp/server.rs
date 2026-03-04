@@ -9,7 +9,7 @@ use super::capabilities::server_capabilities;
 use super::handlers::completion::handle_completion;
 use crate::completion::engine::CompletionEngine;
 use crate::decompiler::cache::DecompilerCache;
-use crate::index::ClassOrigin;
+use crate::index::{ClassOrigin, IndexScope, ModuleId};
 use crate::index::codebase::{index_codebase, index_source_text};
 use crate::language::LanguageRegistry;
 use crate::language::rope_utils::rope_line_col_to_offset;
@@ -60,7 +60,7 @@ impl Backend {
                     match jdk_classes {
                         Ok(classes) if !classes.is_empty() => {
                             let msg = format!("✓ JDK: {} classes", classes.len());
-                            workspace.index.write().await.add_classes(classes);
+                            workspace.index.write().await.add_jdk_classes(classes);
                             client.log_message(MessageType::INFO, msg).await;
                             client.semantic_tokens_refresh().await.ok();
                         }
@@ -91,7 +91,10 @@ impl Backend {
             )
             .await;
 
-            let name_table = workspace.index.read().await.build_name_table();
+            let root_scope = IndexScope {
+                module: ModuleId::ROOT,
+            };
+            let name_table = workspace.index.read().await.build_name_table(root_scope);
 
             // Codebase
             with_progress(
@@ -111,7 +114,18 @@ impl Backend {
                                 result.file_count,
                                 result.classes.len()
                             );
-                            workspace.index.write().await.add_classes(result.classes);
+                            let scope = IndexScope {
+                                module: ModuleId::ROOT,
+                            };
+                            let mut index_guard = workspace.index.write().await;
+                            let mut by_origin: std::collections::HashMap<ClassOrigin, Vec<_>> =
+                                std::collections::HashMap::new();
+                            for class in result.classes {
+                                by_origin.entry(class.origin.clone()).or_default().push(class);
+                            }
+                            for (origin, classes) in by_origin {
+                                index_guard.update_source(scope, origin, classes);
+                            }
                             client.log_message(MessageType::INFO, msg).await;
                             client.semantic_tokens_refresh().await.ok();
                         }
@@ -225,14 +239,15 @@ impl LanguageServer for Backend {
 
         // 增量更新索引（保持你原逻辑不变）
         let uri_str = td.uri.to_string();
-        let name_table = self.workspace.index.read().await.build_name_table();
+        let scope = self.workspace.scope_for_uri(&td.uri);
+        let name_table = self.workspace.index.read().await.build_name_table(scope);
         let classes = index_source_text(&uri_str, &td.text, &td.language_id, Some(name_table));
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
         self.workspace
             .index
             .write()
             .await
-            .update_source(origin, classes);
+            .update_source(scope, origin, classes);
 
         self.client.semantic_tokens_refresh().await.ok();
     }
@@ -360,14 +375,15 @@ impl LanguageServer for Backend {
         };
 
         let uri_str = uri.to_string();
-        let name_table = self.workspace.index.read().await.build_name_table();
+        let scope = self.workspace.scope_for_uri(uri);
+        let name_table = self.workspace.index.read().await.build_name_table(scope);
         let classes = index_source_text(&uri_str, &content, &lang_id, Some(name_table));
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
         self.workspace
             .index
             .write()
             .await
-            .update_source(origin, classes);
+            .update_source(scope, origin, classes);
 
         self.client.semantic_tokens_refresh().await.ok();
     }
@@ -413,14 +429,15 @@ impl LanguageServer for Backend {
 
         // 重新索引（你原有逻辑）
         let uri_str = uri.to_string();
-        let name_table = self.workspace.index.read().await.build_name_table();
+        let scope = self.workspace.scope_for_uri(uri);
+        let name_table = self.workspace.index.read().await.build_name_table(scope);
         let classes = index_source_text(&uri_str, &content, &lang_id, Some(name_table));
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
         self.workspace
             .index
             .write()
             .await
-            .update_source(origin, classes);
+            .update_source(scope, origin, classes);
 
         // 刷新语义高亮
         self.client.semantic_tokens_refresh().await.ok();

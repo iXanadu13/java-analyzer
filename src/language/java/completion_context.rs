@@ -2,24 +2,25 @@ use std::sync::Arc;
 
 use crate::completion::import_utils::resolve_simple_to_internal;
 use crate::completion::parser::parse_chain_from_expr;
-use crate::index::GlobalIndex;
+use crate::index::{IndexScope, WorkspaceIndex};
 use crate::semantic::types::symbol_resolver::SymbolResolver;
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::types::{parse_single_type_to_internal, singleton_descriptor_to_type, ChainSegment, TypeResolver};
 use crate::semantic::{CursorLocation, LocalVar, SemanticContext};
 
 pub struct ContextEnricher<'a> {
-    index: &'a GlobalIndex,
+    index: &'a WorkspaceIndex,
+    scope: IndexScope,
 }
 
 impl<'a> ContextEnricher<'a> {
-    pub fn new(index: &'a GlobalIndex) -> Self {
-        Self { index }
+    pub fn new(index: &'a WorkspaceIndex, scope: IndexScope) -> Self {
+        Self { index, scope }
     }
 
     pub fn enrich(&self, ctx: &mut SemanticContext) {
         {
-            let resolver = TypeResolver::new(self.index);
+            let resolver = TypeResolver::new(self.index, self.scope);
             let to_resolve: Vec<(usize, String)> = ctx
                 .local_variables
                 .iter()
@@ -42,6 +43,7 @@ impl<'a> ContextEnricher<'a> {
                     &ctx.existing_imports,
                     ctx.enclosing_package.as_deref(),
                     self.index,
+                    self.scope,
                 ) {
                     ctx.local_variables[idx_in_vec].type_internal = resolved;
                 }
@@ -56,7 +58,7 @@ impl<'a> ContextEnricher<'a> {
             && receiver_type.is_none()
             && !receiver_expr.is_empty()
         {
-            let resolver = TypeResolver::new(self.index);
+            let resolver = TypeResolver::new(self.index, self.scope);
             let resolved = if looks_like_array_access(receiver_expr) {
                 resolve_array_access_type(
                     receiver_expr,
@@ -66,6 +68,7 @@ impl<'a> ContextEnricher<'a> {
                     &ctx.existing_imports,
                     ctx.enclosing_package.as_deref(),
                     self.index,
+                    self.scope,
                 )
             } else {
                 let chain = parse_chain_from_expr(receiver_expr);
@@ -92,6 +95,7 @@ impl<'a> ContextEnricher<'a> {
                         &ctx.existing_imports,
                         ctx.enclosing_package.as_deref(),
                         self.index,
+                        self.scope,
                     );
                     tracing::debug!(?r, "enrich_context: evaluate_chain returned");
                     r
@@ -113,6 +117,7 @@ impl<'a> ContextEnricher<'a> {
                         &ctx.existing_imports,
                         ctx.enclosing_package.as_deref(),
                         self.index,
+                        self.scope,
                     );
                     tracing::debug!(
                         ?r,
@@ -134,7 +139,7 @@ impl<'a> ContextEnricher<'a> {
                     && receiver_type.is_none()
                 {
                     let pkg_normalized = receiver_expr.replace('.', "/");
-                    if self.index.has_package(&pkg_normalized) {
+                    if self.index.has_package(self.scope, &pkg_normalized) {
                         let prefix = format!("{}.{}", receiver_expr, member_prefix);
                         let query = member_prefix.clone();
                         Some((CursorLocation::Import { prefix }, query))
@@ -153,7 +158,7 @@ impl<'a> ContextEnricher<'a> {
 
         // Resolve `var` local variables
         {
-            let resolver = TypeResolver::new(self.index);
+            let resolver = TypeResolver::new(self.index, self.scope);
             let to_resolve: Vec<(usize, String)> = ctx
                 .local_variables
                 .iter()
@@ -177,12 +182,13 @@ impl<'a> ContextEnricher<'a> {
                     &ctx.existing_imports,
                     ctx.enclosing_package.as_deref(),
                     self.index,
+                    self.scope,
                 ) {
                     ctx.local_variables[idx_in_vec].type_internal = resolved;
                 }
             }
 
-            let sym = SymbolResolver::new(self.index);
+            let sym = SymbolResolver::new(self.index, self.scope);
             let new_types: Vec<TypeName> = ctx
                 .local_variables
                 .iter()
@@ -237,7 +243,7 @@ fn expand_local_type_strict(
     let base = base.split('<').next().unwrap_or(base).trim();
 
     // 已经 internal 或 index 可命中：不展开
-    if base.contains('/') || sym.index.get_class(base).is_some() {
+    if base.contains('/') || sym.index.get_class(sym.scope, base).is_some() {
         return ty.clone();
     }
 
@@ -261,7 +267,8 @@ fn resolve_array_access_type(
     resolver: &TypeResolver,
     existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
-    index: &GlobalIndex,
+    index: &WorkspaceIndex,
+    scope: IndexScope,
 ) -> Option<TypeName> {
     let bracket = expr.rfind('[')?;
     if !expr.trim_end().ends_with(']') {
@@ -285,6 +292,7 @@ fn resolve_array_access_type(
             existing_imports,
             enclosing_package,
             index,
+            scope,
         )
     }?;
 
@@ -298,7 +306,8 @@ fn resolve_var_init_expr(
     resolver: &TypeResolver,
     existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
-    index: &GlobalIndex,
+    index: &WorkspaceIndex,
+    scope: IndexScope,
 ) -> Option<TypeName> {
     let expr = expr.trim();
     if let Some(rest) = expr.strip_prefix("new ") {
@@ -316,6 +325,7 @@ fn resolve_var_init_expr(
                 existing_imports,
                 enclosing_package,
                 index,
+                scope,
             )?),
         };
 
@@ -344,6 +354,7 @@ fn resolve_var_init_expr(
             existing_imports,
             enclosing_package,
             index,
+            scope,
         );
     }
 
@@ -355,6 +366,7 @@ fn resolve_var_init_expr(
         existing_imports,
         enclosing_package,
         index,
+        scope,
     )
 }
 
@@ -366,7 +378,8 @@ fn evaluate_chain(
     resolver: &TypeResolver,
     existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
-    index: &GlobalIndex,
+    index: &WorkspaceIndex,
+    scope: IndexScope,
 ) -> Option<TypeName> {
     let mut current: Option<TypeName> = None;
     for (i, seg) in chain.iter().enumerate() {
@@ -421,6 +434,7 @@ fn evaluate_chain(
                             existing_imports,
                             enclosing_package,
                             index,
+                            scope,
                         )
                         .map(TypeName::from);
                     }
@@ -435,7 +449,7 @@ fn evaluate_chain(
             } else {
                 let recv_str = recv.as_str();
                 let recv_full: TypeName =
-                    if recv_str.contains('/') || index.get_class(recv_str).is_some() {
+                    if recv_str.contains('/') || index.get_class(scope, recv_str).is_some() {
                         recv.clone()
                     } else {
                         resolve_simple_to_internal(
@@ -443,6 +457,7 @@ fn evaluate_chain(
                             existing_imports,
                             enclosing_package,
                             index,
+                            scope,
                         )?
                         .into()
                     };
@@ -465,7 +480,8 @@ fn evaluate_chain(
                         arg_types_ref,
                     );
                 } else {
-                    let (methods, fields) = index.collect_inherited_members(recv_full.as_str());
+                    let (methods, fields) =
+                        index.collect_inherited_members(scope, recv_full.as_str());
 
                     if let Some(f) = fields.iter().find(|f| f.name.as_ref() == base_name) {
                         if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
@@ -509,6 +525,7 @@ fn evaluate_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::ModuleId;
     use crate::completion::parser::parse_chain_from_expr;
     use crate::index::{ClassMetadata, ClassOrigin, MethodParams, MethodSummary};
     use rust_asm::constants::ACC_PUBLIC;
@@ -571,9 +588,9 @@ mod tests {
         );
     }
 
-    fn make_index_with_random_class() -> GlobalIndex {
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![ClassMetadata {
+    fn make_index_with_random_class() -> WorkspaceIndex {
+        let mut idx = WorkspaceIndex::new();
+        idx.add_jar_classes(IndexScope { module: ModuleId::ROOT }, vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy")),
             name: Arc::from("RandomClass"),
             internal_name: Arc::from("org/cubewhy/RandomClass"),
@@ -601,6 +618,7 @@ mod tests {
     #[test]
     fn test_enrich_context_resolves_simple_name_via_import() {
         let idx = make_index_with_random_class();
+        let scope = IndexScope { module: ModuleId::ROOT };
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
                 receiver_type: None,
@@ -620,7 +638,7 @@ mod tests {
             Some(Arc::from("org/cubewhy/a")),
             vec!["org.cubewhy.RandomClass".into()],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, scope).enrich(&mut ctx);
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(
                 receiver_type.as_deref(),
@@ -633,6 +651,7 @@ mod tests {
     #[test]
     fn test_enrich_context_resolves_simple_name_via_wildcard_import() {
         let idx = make_index_with_random_class();
+        let scope = IndexScope { module: ModuleId::ROOT };
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
                 receiver_type: None,
@@ -651,7 +670,7 @@ mod tests {
             Some(Arc::from("org/cubewhy/a")),
             vec!["org.cubewhy.*".into()],
         );
-        ContextEnricher::new(&idx).enrich(&mut ctx);
+        ContextEnricher::new(&idx, scope).enrich(&mut ctx);
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(receiver_type.as_deref(), Some("org/cubewhy/RandomClass"),);
         }

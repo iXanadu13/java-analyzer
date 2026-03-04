@@ -1,6 +1,6 @@
 use crate::{
     completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
-    index::GlobalIndex,
+    index::{IndexScope, WorkspaceIndex},
     language::java::completion::providers::name_suggestion::rules::{
         BASE_RULES, ParsedType, pluralize,
     },
@@ -17,7 +17,12 @@ impl CompletionProvider for NameSuggestionProvider {
         "name_suggestion"
     }
 
-    fn provide(&self, ctx: &SemanticContext, _index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
+    fn provide(
+        &self,
+        _scope: IndexScope,
+        ctx: &SemanticContext,
+        _index: &mut WorkspaceIndex,
+    ) -> Vec<CompletionCandidate> {
         let type_name = match &ctx.location {
             CursorLocation::VariableName { type_name } => type_name.as_str(),
             _ => return vec![],
@@ -106,8 +111,12 @@ fn is_valid_identifier(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::GlobalIndex;
+    use crate::index::{IndexScope, ModuleId, WorkspaceIndex};
     use crate::semantic::context::{CursorLocation, SemanticContext};
+
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
 
     fn ctx(type_name: &str) -> SemanticContext {
         SemanticContext::new(
@@ -125,8 +134,8 @@ mod tests {
 
     #[test]
     fn test_string_builder_suggestions() {
-        let mut idx = GlobalIndex::new();
-        let results = NameSuggestionProvider.provide(&ctx("StringBuilder"), &mut idx);
+        let mut idx = WorkspaceIndex::new();
+        let results = NameSuggestionProvider.provide(root_scope(), &ctx("StringBuilder"), &mut idx);
         let names: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             names.contains(&"sb"),
@@ -212,8 +221,8 @@ mod tests {
 
     #[test]
     fn test_empty_type_returns_empty() {
-        let mut idx = GlobalIndex::new();
-        let results = NameSuggestionProvider.provide(&ctx(""), &mut idx);
+        let mut idx = WorkspaceIndex::new();
+        let results = NameSuggestionProvider.provide(root_scope(), &ctx(""), &mut idx);
         assert!(results.is_empty());
     }
 

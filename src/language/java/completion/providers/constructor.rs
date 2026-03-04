@@ -5,7 +5,7 @@ use crate::{
         provider::CompletionProvider,
         scorer::AccessFilter,
     },
-    index::GlobalIndex,
+    index::{IndexScope, WorkspaceIndex},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -17,7 +17,12 @@ impl CompletionProvider for ConstructorProvider {
         "constructor"
     }
 
-    fn provide(&self, ctx: &SemanticContext, index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
+    fn provide(
+        &self,
+        scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &mut WorkspaceIndex,
+    ) -> Vec<CompletionCandidate> {
         let (class_prefix, expected_type) = match &ctx.location {
             CursorLocation::ConstructorCall {
                 class_prefix,
@@ -34,7 +39,7 @@ impl CompletionProvider for ConstructorProvider {
         };
 
         index
-            .fuzzy_search_classes(search_prefix, 50)
+            .fuzzy_search_classes(scope, search_prefix, 50)
             .into_iter()
             .flat_map(|meta| {
                 let fqn = fqn_of_meta(&meta);
@@ -202,13 +207,20 @@ pub fn jvm_type_to_readable(ty: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex, MethodParams, MethodSummary};
+    use crate::index::{
+        ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
+        WorkspaceIndex,
+    };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::ACC_PUBLIC;
     use std::sync::Arc;
 
-    fn make_index_with(pkg: &str, name: &str, has_init: bool) -> GlobalIndex {
-        let mut idx = GlobalIndex::new();
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
+
+    fn make_index_with(pkg: &str, name: &str, has_init: bool) -> WorkspaceIndex {
+        let mut idx = WorkspaceIndex::new();
         let methods = if has_init {
             vec![MethodSummary {
                 name: Arc::from("<init>"),
@@ -264,7 +276,7 @@ mod tests {
     fn test_empty_prefix_returns_candidates() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("", None, vec![]);
-        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             !results.is_empty(),
             "empty prefix should return constructor candidates"
@@ -275,7 +287,7 @@ mod tests {
     fn test_empty_prefix_includes_known_class() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("", None, vec![]);
-        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "RandomClass"),
             "RandomClass should appear with empty prefix: {:?}",
@@ -289,7 +301,7 @@ mod tests {
     fn test_no_import_when_already_exact_imported() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.RandomClass".into()]);
-        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "should not add import when already imported: {:?}",
@@ -304,7 +316,7 @@ mod tests {
     fn test_no_import_when_wildcard_imported() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.*".into()]);
-        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "should not add import under wildcard: {:?}",
@@ -320,7 +332,7 @@ mod tests {
         let mut idx = make_index_with("org/cubewhy/a", "Helper", true);
         // enclosing package is org/cubewhy/a — same as Helper
         let ctx = make_ctx("Helper", None, vec![]);
-        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "same-package class should not need import: {:?}",
@@ -335,7 +347,7 @@ mod tests {
     fn test_import_added_when_not_imported() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec![]);
-        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results
                 .iter()
@@ -352,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_expected_type_exact_match_scores_highest() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         // Add both String and StringBuilder
         for (pkg, name) in [("java/lang", "String"), ("java/lang", "StringBuilder")] {
             idx.add_classes(vec![ClassMetadata {
@@ -381,7 +393,7 @@ mod tests {
 
         // expected_type = "String" → String should score higher than StringBuilder
         let ctx = make_ctx("S", Some("String"), vec![]);
-        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
 
         let string_score = results
             .iter()
@@ -406,7 +418,7 @@ mod tests {
     fn test_no_expected_type_no_score_boost() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec![]);
-        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
         // score should be 0.0 (set by provider; Scorer adds on top in engine)
         assert!(
             results.iter().all(|c| c.score == 0.0),

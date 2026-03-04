@@ -71,8 +71,9 @@ pub async fn handle_completion(
     tracing::debug!(location = ?ctx.location, query = %ctx.query, "parsed context");
 
     // 4) completion engine（这里会 await，所以不能在 DashMap guard 里做）
+    let scope = workspace.scope_for_uri(uri);
     let mut index = workspace.index.write().await;
-    let candidates = engine.complete(ctx.clone(), lang, &mut index);
+    let candidates = engine.complete(scope, ctx.clone(), lang, &mut index);
     drop(index);
 
     if candidates.is_empty() {

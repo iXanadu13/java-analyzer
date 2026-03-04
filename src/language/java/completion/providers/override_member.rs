@@ -5,7 +5,7 @@ use rust_asm::constants::{ACC_FINAL, ACC_PRIVATE, ACC_STATIC};
 
 use crate::{
     completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
-    index::{GlobalIndex, MethodSummary},
+    index::{IndexScope, MethodSummary, WorkspaceIndex},
     semantic::{
         context::{CursorLocation, SemanticContext},
         types::ContextualResolver,
@@ -19,7 +19,12 @@ impl CompletionProvider for OverrideProvider {
         "override"
     }
 
-    fn provide(&self, ctx: &SemanticContext, index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
+    fn provide(
+        &self,
+        scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &mut WorkspaceIndex,
+    ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             _ => return vec![],
@@ -38,16 +43,16 @@ impl CompletionProvider for OverrideProvider {
         // current_class_members is a HashMap<name, member>, which only keeps the last overridden method
         // Therefore, it additionally retrieves the current class's own methods from the index for precise deduplication.
         let already_overridden: HashSet<(Arc<str>, Arc<str>)> =
-            self.collect_current_class_methods(enclosing, index);
+            self.collect_current_class_methods(enclosing, index, scope);
 
         // (name, descriptor) already appearing in this candidate list, to avoid the same method appearing repeatedly from multiple ancestors.
         let mut emitted: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
 
-        let mut mro = index.mro(enclosing);
+        let mut mro = index.mro(scope, enclosing);
         let has_object = mro
             .iter()
             .any(|c| c.internal_name.as_ref() == "java/lang/Object");
-        if !has_object && let Some(object_meta) = index.get_class("java/lang/Object") {
+        if !has_object && let Some(object_meta) = index.get_class(scope, "java/lang/Object") {
             mro.push(object_meta);
         }
 
@@ -87,7 +92,7 @@ impl CompletionProvider for OverrideProvider {
                     continue;
                 }
 
-                let resolver = ContextualResolver::new(index, ctx);
+                let resolver = ContextualResolver::new(index, scope, ctx);
 
                 let Some((params_source, return_type_source)) =
                     crate::semantic::types::parse_strict_method_signature(
@@ -105,6 +110,7 @@ impl CompletionProvider for OverrideProvider {
                     &class_meta.internal_name,
                     ctx,
                     index,
+                    scope,
                     self.name(),
                 );
                 candidates.push(candidate);
@@ -122,10 +128,11 @@ impl OverrideProvider {
     fn collect_current_class_methods(
         &self,
         enclosing: &str,
-        index: &GlobalIndex,
+        index: &WorkspaceIndex,
+        scope: IndexScope,
     ) -> HashSet<(Arc<str>, Arc<str>)> {
         let mut set: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
-        if let Some(meta) = index.get_class(enclosing) {
+        if let Some(meta) = index.get_class(scope, enclosing) {
             for m in &meta.methods {
                 set.insert((Arc::clone(&m.name), m.desc()));
             }
@@ -173,7 +180,8 @@ fn build_candidate(
     params_source: &[String],
     defining_class_internal: &Arc<str>,
     ctx: &SemanticContext,
-    index: &GlobalIndex,
+    index: &WorkspaceIndex,
+    scope: IndexScope,
     source: &'static str,
 ) -> CompletionCandidate {
     use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC};
@@ -224,7 +232,7 @@ fn build_candidate(
 
     // 查找展示名称，如果因为某些极端的并发原因没查到，做个兜底展示
     let defining_class_display = index
-        .get_source_type_name(defining_class_internal)
+        .get_source_type_name(scope, defining_class_internal)
         .unwrap_or_else(|| defining_class_internal.replace(['/', '$'], "."));
 
     let detail = format!("@Override — {}", defining_class_display);
@@ -245,11 +253,18 @@ fn build_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex, MethodParams, MethodSummary};
+    use crate::index::{
+        ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
+        WorkspaceIndex,
+    };
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
     use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC};
     use std::sync::Arc;
+
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
 
     fn method(name: &str, descriptor: &str, flags: u16) -> MethodSummary {
         MethodSummary {
@@ -351,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_basic_override_from_superclass() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -363,7 +378,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
 
         assert!(
@@ -375,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_insert_text_contains_override_annotation() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -387,7 +402,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let candidate = results.iter().find(|c| c.label.contains("doWork")).unwrap();
 
         assert!(
@@ -399,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_insert_text_contains_method_body_stub() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -411,7 +426,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let c = results.iter().find(|c| c.label.contains("doWork")).unwrap();
 
         assert!(c.insert_text.contains('{'), "should have opening brace");
@@ -420,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_already_overridden_excluded_via_index() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -438,7 +453,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
 
         assert!(
@@ -451,7 +466,7 @@ mod tests {
     #[test]
     fn test_already_overridden_excluded_via_source_members() {
         // Child is not compiled into the index, but current_class_members has doWork.
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_class(
             "com/example",
             "Parent",
@@ -475,7 +490,7 @@ mod tests {
         let ctx = ctx_with_prefix("pub", "com/example/Child")
             .with_class_members(std::iter::once(source_member));
 
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             labels.iter().all(|l| !l.contains("doWork")),
@@ -486,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_overloads_both_shown_when_none_overridden() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             make_class(
@@ -502,7 +517,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let compute_count = results
             .iter()
             .filter(|c| c.label.contains("compute"))
@@ -517,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_overloads_only_unoverridden_shown() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             make_class(
@@ -539,7 +554,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let compute: Vec<_> = results
             .iter()
             .filter(|c| c.label.contains("compute"))
@@ -562,7 +577,7 @@ mod tests {
     #[test]
     fn test_private_method_not_overridable() {
         use rust_asm::constants::ACC_PRIVATE;
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -574,7 +589,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| !c.label.contains("secret")),
             "private method must not appear"
@@ -583,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_static_method_not_overridable() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -595,7 +610,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| !c.label.contains("staticFn")),
             "static method must not appear"
@@ -604,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_final_method_not_overridable() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -616,7 +631,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| !c.label.contains("locked")),
             "final method must not appear"
@@ -625,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_synthetic_method_excluded() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -637,7 +652,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| !c.label.contains("access$")),
             "synthetic method must not appear"
@@ -646,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_constructor_excluded() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -658,7 +673,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| !c.label.contains("<init>")),
             "<init> must not appear"
@@ -667,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_no_enclosing_class_returns_empty() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         let ctx = SemanticContext::new(
             CursorLocation::Expression {
                 prefix: "pub".to_string(),
@@ -679,12 +694,12 @@ mod tests {
             None,
             vec![],
         );
-        assert!(OverrideProvider.provide(&ctx, &mut idx).is_empty());
+        assert!(OverrideProvider.provide(root_scope(), &ctx, &mut idx).is_empty());
     }
 
     #[test]
     fn test_protected_method_visibility_preserved() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -696,7 +711,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pro", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let c = results.iter().find(|c| c.label.contains("hook")).unwrap();
         assert!(
             c.insert_text.contains("protected"),
@@ -707,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_grandparent_method_appears() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -725,7 +740,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.contains("ancientMethod")),
             "grandparent method should be overridable: {:?}",
@@ -736,7 +751,7 @@ mod tests {
     #[test]
     fn test_no_duplicate_from_multiple_ancestors() {
         // GrandParent 和 Parent 都声明了同一方法（Parent 没有 override，走继承）
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -754,7 +769,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let count = results
             .iter()
             .filter(|c| c.label.contains("shared"))
@@ -769,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_wrong_location_returns_empty() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -794,13 +809,13 @@ mod tests {
             None,
             vec![],
         );
-        assert!(OverrideProvider.provide(&ctx, &mut idx).is_empty());
+        assert!(OverrideProvider.provide(root_scope(), &ctx, &mut idx).is_empty());
     }
 
     #[test]
     fn test_object_methods_appear_when_no_explicit_superclass() {
         // Object 的 toString / equals / hashCode 应当出现
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             // Object 本身
@@ -827,7 +842,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Plain");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
 
         assert!(
@@ -850,7 +865,7 @@ mod tests {
     #[test]
     fn test_object_methods_not_duplicated_when_already_in_mro() {
         // 如果 mro 里已经有 Object（通过显式继承链走到），不应重复
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             ClassMetadata {
@@ -872,7 +887,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let count = results
             .iter()
             .filter(|c| c.label.contains("toString"))
@@ -931,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_interface_abstract_method_shown() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_interface(
             "com/example",
             "Runnable",
@@ -943,7 +958,7 @@ mod tests {
         idx.add_classes(vec![cls]);
 
         let ctx = ctx_with_prefix("pub", "com/example/MyTask");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             labels.iter().any(|l| l.contains("run")),
@@ -954,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_interface_default_method_shown() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             make_interface(
@@ -968,7 +983,7 @@ mod tests {
         idx.add_classes(vec![cls]);
 
         let ctx = ctx_with_prefix("pub", "com/example/HelloGreeter");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.contains("greet")),
             "default interface method should be overridable: {:?}",
@@ -978,7 +993,7 @@ mod tests {
 
     #[test]
     fn test_interface_method_excluded_when_already_implemented_in_index() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_interface(
             "com/example",
             "Runnable",
@@ -996,7 +1011,7 @@ mod tests {
         idx.add_classes(vec![cls]);
 
         let ctx = ctx_with_prefix("pub", "com/example/MyTask");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| !c.label.contains("run")),
             "already implemented run() must not appear: {:?}",
@@ -1007,7 +1022,7 @@ mod tests {
     #[test]
     fn test_interface_method_excluded_via_source_members() {
         // 未编译，只有 source members
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_interface(
             "com/example",
             "Runnable",
@@ -1021,7 +1036,7 @@ mod tests {
         let ctx = ctx_with_prefix("pub", "com/example/MyTask")
             .with_class_members(std::iter::once(source_member));
 
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| !c.label.contains("run")),
             "run() in source members must be excluded: {:?}",
@@ -1031,7 +1046,7 @@ mod tests {
 
     #[test]
     fn test_multiple_interfaces_all_shown() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_interface(
                 "com/example",
@@ -1052,7 +1067,7 @@ mod tests {
         idx.add_classes(vec![cls]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Resource");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             labels.iter().any(|l| l.contains("run")),
@@ -1069,7 +1084,7 @@ mod tests {
     #[test]
     fn test_interface_method_not_duplicated_via_superclass_and_interface() {
         // Parent 实现了 Runnable，Child extends Parent —— run() 只应出现一次
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_interface(
             "com/example",
             "Runnable",
@@ -1081,7 +1096,7 @@ mod tests {
         idx.add_classes(vec![parent, child]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
         let count = results.iter().filter(|c| c.label.contains("run")).count();
         assert_eq!(
             count,

@@ -2,7 +2,7 @@ use crate::{
     completion::{
         CandidateKind, CompletionCandidate, provider::CompletionProvider, scorer::AccessFilter,
     },
-    index::GlobalIndex,
+    index::{IndexScope, WorkspaceIndex},
     language::java::render,
     semantic::{
         context::{CursorLocation, SemanticContext},
@@ -19,7 +19,12 @@ impl CompletionProvider for StaticMemberProvider {
         "static_member"
     }
 
-    fn provide(&self, ctx: &SemanticContext, index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
+    fn provide(
+        &self,
+        scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &mut WorkspaceIndex,
+    ) -> Vec<CompletionCandidate> {
         let (class_name_raw, member_prefix) = match &ctx.location {
             CursorLocation::StaticAccess {
                 class_internal_name,
@@ -40,10 +45,12 @@ impl CompletionProvider for StaticMemberProvider {
 
         // class_name_raw could be a simple name ("Main") or an internal name ("org/cubewhy/Main")
         // Try searching directly first, then search by simple name if it's not found
-        let class_meta = if let Some(m) = index.get_class(class_name_raw) {
+        let class_meta = if let Some(m) = index.get_class(scope, class_name_raw) {
             m
         } else {
-            let mut candidates = index.get_classes_by_simple_name(class_name_raw).to_vec();
+            let mut candidates = index
+                .get_classes_by_simple_name(scope, class_name_raw)
+                .to_vec();
             if candidates.is_empty() {
                 // class not in index at all — may be the currently-edited file;
                 // fall back to source members if we're accessing our own class
@@ -86,7 +93,7 @@ impl CompletionProvider for StaticMemberProvider {
         let class_name = class_meta.internal_name.as_ref();
         let mut results = Vec::new();
 
-        let resolver = ContextualResolver::new(index, ctx);
+        let resolver = ContextualResolver::new(index, scope, ctx);
 
         for method in &class_meta.methods {
             if method.name.as_ref() == "<init>" || method.name.as_ref() == "<clinit>" {
@@ -124,7 +131,7 @@ impl CompletionProvider for StaticMemberProvider {
             );
         }
 
-        let resolver = ContextualResolver::new(index, ctx);
+        let resolver = ContextualResolver::new(index, scope, ctx);
 
         for field in &class_meta.fields {
             if field.access_flags & ACC_STATIC == 0 {
@@ -249,13 +256,18 @@ mod tests {
 
     use super::*;
     use crate::index::{
-        ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodParams, MethodSummary,
+        ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
+        WorkspaceIndex,
     };
     use crate::language::java::make_java_parser;
     use crate::language::{JavaLanguage, Language};
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
     use std::sync::Arc;
+
+    fn root_scope() -> IndexScope {
+        IndexScope { module: ModuleId::ROOT }
+    }
 
     fn at(src: &str, line: u32, col: u32) -> SemanticContext {
         at_with_trigger(src, line, col, None)
@@ -295,8 +307,8 @@ mod tests {
         }
     }
 
-    fn make_index_with_main() -> GlobalIndex {
-        let mut idx = GlobalIndex::new();
+    fn make_index_with_main() -> WorkspaceIndex {
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy")),
             name: Arc::from("Main"),
@@ -343,7 +355,7 @@ mod tests {
     fn test_static_access_by_simple_name() {
         let mut index = make_index_with_main();
         let ctx = static_ctx("Main", "fun", "org/cubewhy");
-        let results = StaticMemberProvider.provide(&ctx, &mut index);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut index);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "func"),
             "should find func via simple name lookup: {:?}",
@@ -355,7 +367,7 @@ mod tests {
     fn test_static_access_by_internal_name() {
         let mut index = make_index_with_main();
         let ctx = static_ctx("org/cubewhy/Main", "fun", "org/cubewhy");
-        let results = StaticMemberProvider.provide(&ctx, &mut index);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut index);
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
 
@@ -363,7 +375,7 @@ mod tests {
     fn test_static_access_empty_prefix_returns_all_static() {
         let mut index = make_index_with_main();
         let ctx = static_ctx("Main", "", "org/cubewhy");
-        let results = StaticMemberProvider.provide(&ctx, &mut index);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut index);
         assert!(!results.is_empty());
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
@@ -372,8 +384,8 @@ mod tests {
 
     /// Build an index that contains Main with a private static field and a
     /// public static method, located in org/cubewhy/a.
-    fn make_index_with_self_class() -> GlobalIndex {
-        let mut idx = GlobalIndex::new();
+    fn make_index_with_self_class() -> WorkspaceIndex {
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy/a")),
             name: Arc::from("Main"),
@@ -437,7 +449,7 @@ mod tests {
         // Main.| from inside Main — private static field must appear
         let mut idx = make_index_with_self_class();
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
             "private static field should be visible when accessing own class: {:?}",
@@ -449,14 +461,14 @@ mod tests {
     fn test_self_class_static_public_field_visible() {
         let mut idx = make_index_with_self_class();
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(results.iter().any(|c| c.label.as_ref() == "publicField"));
     }
 
     #[test]
     fn test_self_class_only_static_members_no_instance() {
         // Even for same-class access, Cls.xxx must only show STATIC members
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy/a")),
             name: Arc::from("Main"),
@@ -489,7 +501,7 @@ mod tests {
             origin: ClassOrigin::Unknown,
         }]);
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "staticF"),
             "static field must appear"
@@ -505,7 +517,7 @@ mod tests {
     fn test_self_class_prefix_filter() {
         let mut idx = make_index_with_self_class();
         let ctx = self_static_ctx("rand");
-        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
             "prefix 'rand' should match 'randomField': {:?}",
@@ -521,7 +533,7 @@ mod tests {
     fn test_self_class_via_source_members_when_not_in_index() {
         // The current file is not compiled yet → class is absent from the index.
         // StaticMemberProvider must fall back to current_class_members.
-        let mut idx = GlobalIndex::new(); // empty — class not indexed
+        let mut idx = WorkspaceIndex::new(); // empty — class not indexed
 
         let members = vec![
             // randomField: static + private
@@ -561,7 +573,7 @@ mod tests {
         )
         .with_class_members(members);
 
-        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
 
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
@@ -582,7 +594,7 @@ mod tests {
     #[test]
     fn test_other_class_private_not_visible() {
         // Accessing a DIFFERENT class's static members → private must be hidden
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy/a")),
             name: Arc::from("Other"),
@@ -619,7 +631,7 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().all(|c| c.label.as_ref() != "secret"),
             "private field of another class must NOT be visible: {:?}",
@@ -733,10 +745,10 @@ mod tests {
 
     #[test]
     fn test_lowercase_class_name_static_access_via_provider() {
-        use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex};
+        use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, WorkspaceIndex};
         use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
 
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: None,
             name: Arc::from("myClass"),
@@ -775,7 +787,7 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "FIELD"),
             "lowercase class name static field should be found via provider, got: {:?}",
@@ -785,7 +797,7 @@ mod tests {
 
     #[test]
     fn test_static_member_prefix_starts_with() {
-        let mut idx = GlobalIndex::new();
+        let mut idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy/a")),
             name: Arc::from("Main"),
@@ -817,7 +829,7 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
         assert!(results.iter().any(|c| c.label.as_ref() == "main"));
         assert!(
             results

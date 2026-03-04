@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::semantic::context::CursorLocation;
 use crate::semantic::types::symbol_resolver::{ResolvedSymbol, SymbolResolver};
-use crate::index::{ClassOrigin, GlobalIndex};
+use crate::index::{ClassOrigin, IndexScope, WorkspaceIndex};
 use crate::language::java::class_parser::find_symbol_range;
 use crate::lsp::server::Backend;
 use tower_lsp::lsp_types::*;
@@ -44,11 +44,12 @@ pub async fn handle_goto_definition(
         )
     })??;
 
+    let scope = backend.workspace.scope_for_uri(uri);
     let index_guard = backend.workspace.index.read().await;
     let mut ctx = ctx;
 
     // enrich context
-    lang.enrich_completion_context(&mut ctx, &index_guard);
+    lang.enrich_completion_context(&mut ctx, scope, &index_guard);
 
     tracing::debug!(
         location = ?ctx.location,
@@ -87,10 +88,11 @@ pub async fn handle_goto_definition(
     if let CursorLocation::Import { prefix } = &ctx.location {
         let raw = prefix.trim().trim_end_matches(".*").trim();
         let internal = raw.replace('.', "/");
-        if index_guard.get_class(&internal).is_some() {
+        if index_guard.get_class(scope, &internal).is_some() {
             return goto_resolved_symbol(
                 backend,
                 &index_guard,
+                scope,
                 ResolvedSymbol::Class(Arc::from(internal)),
             )
             .await;
@@ -99,7 +101,7 @@ pub async fn handle_goto_definition(
     }
 
     // Index 符号解析
-    let resolver = SymbolResolver::new(&index_guard);
+    let resolver = SymbolResolver::new(&index_guard, scope);
     let symbol = match resolver.resolve(&ctx) {
         Some(s) => s,
         None => {
@@ -109,12 +111,13 @@ pub async fn handle_goto_definition(
     };
     tracing::debug!(symbol = ?symbol, "goto: resolved symbol");
 
-    goto_resolved_symbol(backend, &index_guard, symbol).await
+    goto_resolved_symbol(backend, &index_guard, scope, symbol).await
 }
 
 async fn goto_resolved_symbol(
     backend: &Backend,
-    index_guard: &GlobalIndex,
+    index_guard: &WorkspaceIndex,
+    scope: IndexScope,
     symbol: ResolvedSymbol,
 ) -> Option<GotoDefinitionResponse> {
     let (target_internal, member_name, descriptor, decl_kind) = match &symbol {
@@ -141,7 +144,7 @@ async fn goto_resolved_symbol(
         ),
     };
 
-    let meta = index_guard.get_class(&target_internal)?;
+    let meta = index_guard.get_class(scope, &target_internal)?;
     match &meta.origin {
         ClassOrigin::SourceFile(uri_str) => {
             let target_uri = Url::parse(uri_str).ok()?;
@@ -164,6 +167,7 @@ async fn goto_resolved_symbol(
                     Some(name),
                     descriptor.as_deref(),
                     index_guard,
+                    scope,
                 )
                 .or_else(|| find_declaration_range(&content, name, decl_kind))
             });
@@ -206,6 +210,7 @@ async fn goto_resolved_symbol(
                     Some(name),
                     descriptor.as_deref(),
                     index_guard,
+                    scope,
                 )
                 .or_else(|| find_declaration_range(&content, name, decl_kind))
             });
@@ -246,6 +251,7 @@ async fn goto_resolved_symbol(
                     Some(name),
                     descriptor.as_deref(),
                     index_guard,
+                    scope,
                 )
                 .or_else(|| find_declaration_range(&content, name, decl_kind))
             });

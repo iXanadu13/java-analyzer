@@ -20,6 +20,11 @@ pub mod cache;
 pub mod codebase;
 pub mod jdk;
 pub mod source;
+pub mod scope;
+pub mod workspace_index;
+
+pub use scope::{IndexScope, ModuleId};
+pub use workspace_index::WorkspaceIndex;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassMetadata {
