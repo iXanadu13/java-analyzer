@@ -3,6 +3,7 @@ use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{error, info};
+use tree_sitter::{InputEdit, Point};
 
 use super::capabilities::server_capabilities;
 use super::handlers::completion::handle_completion;
@@ -11,6 +12,7 @@ use crate::decompiler::cache::DecompilerCache;
 use crate::index::ClassOrigin;
 use crate::index::codebase::{index_codebase, index_source_text};
 use crate::language::LanguageRegistry;
+use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::lsp::config::JavaAnalyzerConfig;
 use crate::lsp::handlers::goto_definition::handle_goto_definition;
 use crate::lsp::handlers::semantic_tokens::handle_semantic_tokens;
@@ -209,13 +211,16 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let td = params.text_document;
-        if !Self::is_supported(&td.language_id) {
-            return;
-        }
+
+        // 用 registry 判断是否支持
+        let lang = match self.registry.find(&td.language_id) {
+            Some(l) => l,
+            None => return,
+        };
 
         info!(uri = %td.uri, lang = %td.language_id, "did_open");
 
-        // 存入文档
+        // 先存 document（Document::new 需要是 text+rope+tree=None 的新结构）
         self.workspace.documents.open(Document::new(
             td.uri.clone(),
             td.language_id.clone(),
@@ -223,7 +228,15 @@ impl LanguageServer for Backend {
             td.text.clone(),
         ));
 
-        // 增量更新索引
+        // 立刻 parse 一次，缓存 tree（避免 completion/semantic_tokens 每次 parse）
+        let mut parser = lang.make_parser();
+        let tree = parser.parse(&td.text, None);
+
+        self.workspace.documents.with_doc_mut(&td.uri, |doc| {
+            doc.tree = tree;
+        });
+
+        // 增量更新索引（保持你原逻辑不变）
         let uri_str = td.uri.to_string();
         let name_table = self.workspace.index.read().await.build_name_table();
         let classes = index_source_text(&uri_str, &td.text, &td.language_id, Some(name_table));
@@ -234,35 +247,131 @@ impl LanguageServer for Backend {
             .await
             .update_source(origin, classes);
 
-        // update syntax highlight
         self.client.semantic_tokens_refresh().await.ok();
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = &params.text_document.uri;
 
-        // 全量同步：取最后一次变更
-        let content = match params.content_changes.into_iter().last() {
-            Some(c) => c.text,
+        // 只处理已打开文档
+        let Some(lang_id) = self
+            .workspace
+            .documents
+            .with_doc(uri, |d| d.language_id.clone())
+        else {
+            return;
+        };
+
+        let lang = match self.registry.find(&lang_id) {
+            Some(l) => l,
             None => return,
         };
 
-        let lang_id = self
-            .workspace
-            .documents
-            .get(uri)
-            .map(|d| d.language_id.clone())
-            .unwrap_or_else(|| language_id_from_uri(uri).to_string());
+        // 在 doc 上完成：应用 edits -> tree.edit -> parse(Some(old))
+        // 注意：闭包里不能 await
+        let mut changed_text_for_index: Option<String> = None;
 
-        if !Self::is_supported(&lang_id) {
+        let ok = self.workspace.documents.with_doc_mut(uri, |doc| {
+            // 版本更新
+            doc.version = params.text_document.version;
+
+            // 如果 tree 还没有（比如之前没 parse 成功），先 full parse 一次兜底
+            if doc.tree.is_none() {
+                let mut parser = lang.make_parser();
+                doc.tree = parser.parse(&doc.text, None);
+            }
+
+            // 必须有 tree 才能增量
+            let Some(old_tree) = doc.tree.as_ref() else {
+                // 解析失败就只能退化：把 change 当 full 文本替换（这里按协议一般不会发生）
+                return;
+            };
+
+            let mut tree = old_tree.clone();
+
+            // 逐个应用 change（INCREMENTAL 可能一次发多个）
+            for ch in &params.content_changes {
+                let Some(range) = ch.range else {
+                    // 客户端可能发 full text（range=None），那就退化成 full replace + full parse
+                    doc.text = ch.text.clone();
+                    doc.rope = ropey::Rope::from_str(&doc.text);
+
+                    let mut parser = lang.make_parser();
+                    doc.tree = parser.parse(&doc.text, None);
+                    changed_text_for_index = Some(doc.text.clone());
+                    return;
+                };
+
+                // 1) 旧 rope 上算 byte offsets（你已有 rope_line_col_to_offset）
+                let start_byte = match rope_line_col_to_offset(
+                    &doc.rope,
+                    range.start.line,
+                    range.start.character,
+                ) {
+                    Some(x) => x,
+                    None => continue,
+                };
+                let old_end_byte =
+                    match rope_line_col_to_offset(&doc.rope, range.end.line, range.end.character) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+
+                // 2) old positions (tree-sitter Point 的 column 用“字节列”)
+                let start_line = range.start.line as usize;
+                let end_line = range.end.line as usize;
+
+                let start_line_byte = doc.rope.line_to_byte(start_line);
+                let end_line_byte = doc.rope.line_to_byte(end_line);
+
+                let start_position =
+                    Point::new(start_line, start_byte.saturating_sub(start_line_byte));
+                let old_end_position =
+                    Point::new(end_line, old_end_byte.saturating_sub(end_line_byte));
+
+                // 3) 更新 doc.text（byte range）
+                doc.text.replace_range(start_byte..old_end_byte, &ch.text);
+
+                // 4) 更新 rope（char range）
+                let start_char = doc.rope.byte_to_char(start_byte);
+                let old_end_char = doc.rope.byte_to_char(old_end_byte);
+                doc.rope.remove(start_char..old_end_char);
+                doc.rope.insert(start_char, &ch.text);
+
+                // 5) new end byte / new end point（按插入文本计算）
+                let new_end_byte = start_byte + ch.text.len();
+                let (new_end_row, new_end_col_bytes) =
+                    point_after_insert_bytes(start_position.row, start_position.column, &ch.text);
+                let new_end_position = Point::new(new_end_row, new_end_col_bytes);
+
+                // 6) tree.edit
+                tree.edit(&InputEdit {
+                    start_byte,
+                    old_end_byte,
+                    new_end_byte,
+                    start_position,
+                    old_end_position,
+                    new_end_position,
+                });
+            }
+
+            // 7) incremental parse（复用 edited old tree）
+            let mut parser = lang.make_parser();
+            let new_tree = parser.parse(&doc.text, Some(&tree));
+            doc.tree = new_tree;
+
+            changed_text_for_index = Some(doc.text.clone());
+        });
+
+        if ok.is_none() {
             return;
         }
 
-        self.workspace
-            .documents
-            .update(uri, params.text_document.version, content.clone());
+        // 下面可以 await：更新索引 + refresh
+        let Some(content) = changed_text_for_index else {
+            return;
+        };
 
-        // 增量更新索引（去抖动 TODO: 生产实现可加 500ms debounce）
         let uri_str = uri.to_string();
         let name_table = self.workspace.index.read().await.build_name_table();
         let classes = index_source_text(&uri_str, &content, &lang_id, Some(name_table));
@@ -273,36 +382,61 @@ impl LanguageServer for Backend {
             .await
             .update_source(origin, classes);
 
-        // update syntax highlight
         self.client.semantic_tokens_refresh().await.ok();
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        // Re-parse upon saving (if there is content).
-        if let Some(text) = params.text {
-            let uri = &params.text_document.uri;
-            let lang_id = self
-                .workspace
-                .documents
-                .get(uri)
-                .map(|d| d.language_id.clone())
-                .unwrap_or_else(|| language_id_from_uri(uri).to_string());
+        let uri = &params.text_document.uri;
 
-            if Self::is_supported(&lang_id) {
-                let uri_str = uri.to_string();
-                let name_table = self.workspace.index.read().await.build_name_table();
-                let classes = index_source_text(&uri_str, &text, &lang_id, Some(name_table));
-                let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
-                self.workspace
-                    .index
-                    .write()
-                    .await
-                    .update_source(origin, classes);
+        // 只处理已打开文档
+        let Some(lang_id) = self
+            .workspace
+            .documents
+            .with_doc(uri, |d| d.language_id.clone())
+        else {
+            return;
+        };
 
-                // update syntax highlight
-                self.client.semantic_tokens_refresh().await.ok();
+        let lang = match self.registry.find(&lang_id) {
+            Some(l) => l,
+            None => return,
+        };
+
+        // 在 doc 内更新内容 + rope + tree（闭包内不能 await）
+        // 最终用于索引更新的内容
+        let mut content_for_index: Option<String> = None;
+
+        self.workspace.documents.with_doc_mut(uri, |doc| {
+            if let Some(text) = params.text.as_ref() {
+                // 规范：如果 didSave 携带 text，以它为准（可能与内存不同步）
+                doc.text = text.clone();
+                doc.rope = ropey::Rope::from_str(&doc.text);
             }
-        }
+
+            // 保存时重建树：稳定可靠（不依赖 edit ranges）
+            let mut parser = lang.make_parser();
+            doc.tree = parser.parse(&doc.text, None);
+
+            content_for_index = Some(doc.text.clone());
+        });
+
+        let Some(content) = content_for_index else {
+            return;
+        };
+
+        // 重新索引（你原有逻辑）
+        let uri_str = uri.to_string();
+        let name_table = self.workspace.index.read().await.build_name_table();
+        let classes = index_source_text(&uri_str, &content, &lang_id, Some(name_table));
+        let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
+        self.workspace
+            .index
+            .write()
+            .await
+            .update_source(origin, classes);
+
+        // 刷新语义高亮
+        self.client.semantic_tokens_refresh().await.ok();
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -410,4 +544,29 @@ where
             })),
         })
         .await;
+}
+
+fn point_after_insert_bytes(
+    start_row: usize,
+    start_col_bytes: usize,
+    inserted: &str,
+) -> (usize, usize) {
+    if inserted.is_empty() {
+        return (start_row, start_col_bytes);
+    }
+
+    // tree-sitter Point.column 是“从行首开始的字节数”
+    let mut row = start_row;
+    let mut col = start_col_bytes;
+
+    // 按 '\n' 分行，column 取最后一行的字节数
+    // 注意：这里用 bytes 计数，和 tree-sitter 的定义一致
+    if let Some(last_nl) = inserted.rfind('\n') {
+        row += inserted.as_bytes().iter().filter(|&&b| b == b'\n').count();
+        col = inserted.as_bytes().len() - (last_nl + 1);
+    } else {
+        col += inserted.as_bytes().len();
+    }
+
+    (row, col)
 }

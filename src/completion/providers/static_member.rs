@@ -257,13 +257,23 @@ mod tests {
     use crate::index::{
         ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodParams, MethodSummary,
     };
+    use crate::language::java::make_java_parser;
     use crate::language::{JavaLanguage, Language};
     use std::sync::Arc;
 
     fn at(src: &str, line: u32, col: u32) -> CompletionContext {
+        at_with_trigger(src, line, col, None)
+    }
+
+    fn at_with_trigger(src: &str, line: u32, col: u32, trigger: Option<char>) -> CompletionContext {
+        let rope = ropey::Rope::from_str(src);
+
+        let mut parser = make_java_parser();
+        let tree = parser.parse(src, None).expect("failed to parse java");
+
         JavaLanguage
-            .parse_completion_context(src, line, col, None)
-            .unwrap()
+            .parse_completion_context_with_tree(src, &rope, tree.root_node(), line, col, trigger)
+            .expect("parse_completion_context_with_tree returned None")
     }
 
     fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {

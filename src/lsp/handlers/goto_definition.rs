@@ -5,7 +5,7 @@ use crate::completion::engine::ContextEnricher;
 use crate::completion::type_resolver::symbol_resolver::{ResolvedSymbol, SymbolResolver};
 use crate::index::{ClassOrigin, GlobalIndex};
 use crate::language::java::class_parser::find_symbol_range;
-use crate::lsp::server::{Backend, language_id_from_uri};
+use crate::lsp::server::Backend;
 use tower_lsp::lsp_types::*;
 use tracing::instrument;
 
@@ -17,12 +17,36 @@ pub async fn handle_goto_definition(
     let uri = &params.text_document_position_params.text_document.uri;
     let pos = params.text_document_position_params.position;
 
-    let doc = backend.workspace.documents.get(uri)?;
-    let lang = backend.registry.find(language_id_from_uri(uri))?;
-    let full_end = token_end_character(&doc.content, pos.line, pos.character);
+    // 读 language_id + 当前行 token end（需要 text）
+    let (lang_id, full_end) = backend.workspace.documents.with_doc(uri, |doc| {
+        let full_end = token_end_character(&doc.text, pos.line, pos.character);
+        Some((doc.language_id.clone(), full_end))
+    })??;
+
+    let lang = backend.registry.find(&lang_id)?;
+
+    // 确保 tree 缓存存在
+    backend.workspace.documents.with_doc_mut(uri, |doc| {
+        if doc.tree.is_none() {
+            doc.tree = lang.parse_tree(&doc.text, None);
+        }
+    })?;
+
+    // 解析 completion context（复用 tree + rope）
+    let ctx = backend.workspace.documents.with_doc(uri, |doc| {
+        let tree = doc.tree.as_ref()?;
+        lang.parse_completion_context_with_tree(
+            &doc.text,
+            &doc.rope,
+            tree.root_node(),
+            pos.line,
+            full_end,
+            None,
+        )
+    })??;
 
     let index_guard = backend.workspace.index.read().await;
-    let mut ctx = lang.parse_completion_context(&doc.content, pos.line, full_end, None)?;
+    let mut ctx = ctx;
 
     // enrich context
     ContextEnricher::new(&index_guard).enrich(&mut ctx);
@@ -36,13 +60,12 @@ pub async fn handle_goto_definition(
     );
 
     // ── 局部变量 / 参数跳转（在符号解析之前处理）─────────────────────────────
-    // Expression 或 MethodArgument 中，如果 token 与某个局部变量名匹配，
-    // 跳到当前文件中的声明处，不走 index。
     let local_token: Option<&str> = match &ctx.location {
         CursorLocation::Expression { prefix } if !prefix.is_empty() => Some(prefix.as_str()),
         CursorLocation::MethodArgument { prefix } if !prefix.is_empty() => Some(prefix.as_str()),
         _ => None,
     };
+
     if let Some(token) = local_token
         && let Some(lv) = ctx
             .local_variables
@@ -50,10 +73,15 @@ pub async fn handle_goto_definition(
             .find(|v| v.name.as_ref() == token)
     {
         tracing::debug!(token = %token, "goto: local variable jump");
-        let range = find_local_var_decl(&doc.content, lv.name.as_ref());
+
+        let range = backend
+            .workspace
+            .documents
+            .with_doc(uri, |doc| find_local_var_decl(&doc.text, lv.name.as_ref()));
+
         return Some(GotoDefinitionResponse::Scalar(Location {
             uri: uri.clone(),
-            range: range.unwrap_or_default(),
+            range: range.flatten().unwrap_or_default(),
         }));
     }
 
@@ -82,7 +110,7 @@ pub async fn handle_goto_definition(
     };
     tracing::debug!(symbol = ?symbol, "goto: resolved symbol");
 
-    return goto_resolved_symbol(backend, &index_guard, symbol).await;
+    goto_resolved_symbol(backend, &index_guard, symbol).await
 }
 
 async fn goto_resolved_symbol(
@@ -114,35 +142,23 @@ async fn goto_resolved_symbol(
         ),
     };
 
-    let meta = match index_guard.get_class(&target_internal) {
-        Some(m) => m,
-        None => {
-            tracing::debug!(internal = %target_internal, "goto: class not in index");
-            return None;
-        }
-    };
-
+    let meta = index_guard.get_class(&target_internal)?;
     match &meta.origin {
         ClassOrigin::SourceFile(uri_str) => {
-            let target_uri = match Url::parse(uri_str) {
-                Ok(u) => u,
-                Err(e) => {
-                    tracing::warn!(uri = %uri_str, error = %e, "goto: invalid source URI");
-                    return None;
-                }
-            };
+            let target_uri = Url::parse(uri_str).ok()?;
+
             let range = member_name.as_ref().and_then(|name| {
                 let content = backend
                     .workspace
                     .documents
-                    .get(&target_uri)
-                    .map(|d| d.content.to_string())
+                    .with_doc(&target_uri, |d| d.text.clone())
                     .or_else(|| {
                         target_uri
                             .to_file_path()
                             .ok()
                             .and_then(|p| std::fs::read_to_string(p).ok())
                     })?;
+
                 find_symbol_range(
                     &content,
                     &target_internal,
@@ -152,6 +168,7 @@ async fn goto_resolved_symbol(
                 )
                 .or_else(|| find_declaration_range(&content, name, decl_kind))
             });
+
             Some(GotoDefinitionResponse::Scalar(Location {
                 uri: target_uri,
                 range: range.unwrap_or_default(),
@@ -159,28 +176,13 @@ async fn goto_resolved_symbol(
         }
 
         ClassOrigin::Jar(jar_path) => {
-            let bytes = match extract_class_bytes(jar_path, &target_internal) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(error = %e, class = %target_internal, "goto: failed to read class bytes");
-                    return None;
-                }
-            };
+            let bytes = extract_class_bytes(jar_path, &target_internal).ok()?;
             let cache_path = backend.decompiler_cache.resolve(&target_internal, &bytes);
 
             if !cache_path.exists() {
                 tracing::info!(class = %target_internal, "goto: cache miss, decompiling");
                 let config = backend.config.read().await;
-                let decompiler_jar = match &config.decompiler_path {
-                    Some(p) => p.clone(),
-                    None => {
-                        tracing::warn!(
-                            class = %target_internal,
-                            "goto: decompiler_path not configured"
-                        );
-                        return None;
-                    }
-                };
+                let decompiler_jar = config.decompiler_path.clone()?;
                 let java_bin = config.get_java_bin();
                 let decompiler = config.decompiler_type.get_decompiler();
                 drop(config);
@@ -208,13 +210,8 @@ async fn goto_resolved_symbol(
                 )
                 .or_else(|| find_declaration_range(&content, name, decl_kind))
             });
-            let target_uri = match Url::from_file_path(&cache_path) {
-                Ok(u) => u,
-                Err(_) => {
-                    tracing::warn!(path = ?cache_path, "goto: invalid cache path");
-                    return None;
-                }
-            };
+
+            let target_uri = Url::from_file_path(&cache_path).ok()?;
             Some(GotoDefinitionResponse::Scalar(Location {
                 uri: target_uri,
                 range: range.unwrap_or_default(),
@@ -254,11 +251,7 @@ async fn goto_resolved_symbol(
                 .or_else(|| find_declaration_range(&content, name, decl_kind))
             });
 
-            let target_uri = match Url::from_file_path(&cache_path) {
-                Ok(u) => u,
-                Err(_) => return None,
-            };
-
+            let target_uri = Url::from_file_path(&cache_path).ok()?;
             Some(GotoDefinitionResponse::Scalar(Location {
                 uri: target_uri,
                 range: range.unwrap_or_default(),
@@ -306,7 +299,6 @@ fn find_declaration_range(content: &str, name: &str, kind: DeclKind) -> Option<R
     None
 }
 
-/// `class NAME` / `interface NAME` / `enum NAME`
 fn find_type_decl(line: &str, name: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     let has_kw = ["class ", "interface ", "enum ", "@interface "]
@@ -323,7 +315,6 @@ fn find_type_decl(line: &str, name: &str) -> Option<usize> {
         .then_some(col)
 }
 
-/// 方法声明：行含修饰符/返回类型，且 `name(` 作为整词出现。
 fn find_method_decl(line: &str, name: &str) -> Option<usize> {
     if !line.contains(name) {
         return None;
@@ -359,7 +350,6 @@ fn find_method_decl(line: &str, name: &str) -> Option<usize> {
         let abs = start + rel;
         let before_ok = abs == 0 || !is_ident_byte(lb[abs - 1]);
         let after_pos = abs + wb.len();
-        // name 后（跳过空格）必须是 '('
         if before_ok && line[after_pos..].trim_start().starts_with('(') {
             return Some(abs);
         }
@@ -367,7 +357,6 @@ fn find_method_decl(line: &str, name: &str) -> Option<usize> {
     }
 }
 
-/// 字段声明：行含修饰符/类型，且 `name` 不跟 '('。
 fn find_field_decl(line: &str, name: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     const HINTS: &[&str] = &[
@@ -398,7 +387,6 @@ fn find_field_decl(line: &str, name: &str) -> Option<usize> {
     Some(col)
 }
 
-/// 局部变量 / 参数声明：`Type name` 模式，name 不跟 '('，name 前是类型 token。
 fn find_local_var_decl(content: &str, var_name: &str) -> Option<Range> {
     for (line_idx, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -428,7 +416,6 @@ fn find_local_var_decl(content: &str, var_name: &str) -> Option<Range> {
     None
 }
 
-/// 单行内检测 `Type varName` 模式。
 fn find_var_decl_col(line: &str, var_name: &str) -> Option<usize> {
     let lb = line.as_bytes();
     let wb = var_name.as_bytes();
@@ -441,12 +428,10 @@ fn find_var_decl_col(line: &str, var_name: &str) -> Option<usize> {
         let after_ok = after_pos >= lb.len() || !is_ident_byte(lb[after_pos]);
 
         if before_ok && after_ok {
-            // 跟 '(' → 是方法调用，跳过
             if line[after_pos..].trim_start().starts_with('(') {
                 start = abs + 1;
                 continue;
             }
-            // 前面最后一个非空字符必须是类型 token 的末尾
             let before = line[..abs].trim_end();
             if let Some(&last) = before.as_bytes().last()
                 && (last.is_ascii_alphanumeric() || last == b'>' || last == b']' || last == b'_')
@@ -460,7 +445,6 @@ fn find_var_decl_col(line: &str, var_name: &str) -> Option<usize> {
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 
-/// 光标位置向右扩展到当前 token 末尾（UTF-16）。
 fn token_end_character(content: &str, line: u32, character: u32) -> u32 {
     let Some(line_str) = content.lines().nth(line as usize) else {
         return character;

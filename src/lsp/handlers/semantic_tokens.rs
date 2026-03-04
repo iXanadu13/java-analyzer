@@ -10,20 +10,28 @@ pub async fn handle_semantic_tokens(
     params: SemanticTokensParams,
 ) -> Option<SemanticTokensResult> {
     let uri = params.text_document.uri;
-    let doc = workspace.documents.get(&uri)?;
 
-    let lang = registry.find(&doc.language_id)?;
-    let mut parser = lang.make_parser();
+    let lang_id = workspace
+        .documents
+        .with_doc(&uri, |doc| doc.language_id.clone())?;
 
-    let tree = parser.parse(doc.content.as_ref(), None)?;
+    let lang = registry.find(&lang_id)?;
 
-    let rope = ropey::Rope::from_str(doc.content.as_ref());
+    workspace.documents.with_doc_mut(&uri, |doc| {
+        if doc.tree.is_none() {
+            doc.tree = lang.parse_tree(&doc.text, None);
+        }
+    })?;
 
-    let mut collector = TokenCollector::new(doc.content.as_bytes(), &rope, lang);
-    collector.collect(tree.root_node());
+    let data = workspace.documents.with_doc(&uri, |doc| {
+        let tree = doc.tree.as_ref()?;
+        let mut collector = TokenCollector::new(doc.text.as_bytes(), &doc.rope, lang);
+        collector.collect(tree.root_node());
+        Some(collector.finish())
+    })??;
 
     Some(SemanticTokensResult::Tokens(SemanticTokens {
         result_id: None,
-        data: collector.finish(),
+        data,
     }))
 }

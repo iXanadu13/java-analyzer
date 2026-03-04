@@ -68,17 +68,18 @@ impl Language for JavaLanguage {
         make_java_parser()
     }
 
-    fn parse_completion_context(
+    fn parse_completion_context_with_tree(
         &self,
         source: &str,
+        rope: &Rope,
+        root: Node,
         line: u32,
         character: u32,
         trigger_char: Option<char>,
     ) -> Option<CompletionContext> {
-        let rope = Rope::from_str(source);
-        let offset = rope_line_col_to_offset(&rope, line, character)?;
-        tracing::debug!(line, character, trigger = ?trigger_char, "java: parsing context");
-        let extractor = JavaContextExtractor::with_rope(source.to_string(), offset, rope);
+        let offset = rope_line_col_to_offset(rope, line, character)?;
+        tracing::debug!(line, character, trigger = ?trigger_char, "java: parsing context (cached tree)");
+        let extractor = JavaContextExtractor::with_rope(source.to_string(), offset, rope.clone());
         if extractor.is_in_comment() {
             return Some(CompletionContext::new(
                 CursorLocation::Unknown,
@@ -90,9 +91,7 @@ impl Language for JavaLanguage {
                 vec![],
             ));
         }
-        let mut parser = make_java_parser();
-        let tree = parser.parse(extractor.source_str(), None)?;
-        Some(extractor.extract(tree.root_node(), trigger_char))
+        Some(extractor.extract(root, trigger_char))
     }
 
     fn supports_semantic_tokens(&self) -> bool {
@@ -393,15 +392,24 @@ mod tests {
     };
 
     fn at(src: &str, line: u32, col: u32) -> CompletionContext {
-        JavaLanguage
-            .parse_completion_context(src, line, col, None)
-            .unwrap()
+        at_with_trigger(src, line, col, None)
+    }
+
+    fn at_with_trigger(src: &str, line: u32, col: u32, trigger: Option<char>) -> CompletionContext {
+        let rope = ropey::Rope::from_str(src);
+
+        let mut parser = super::make_java_parser();
+        let tree = parser.parse(src, None).expect("failed to parse java");
+
+        super::JavaLanguage
+            .parse_completion_context_with_tree(src, &rope, tree.root_node(), line, col, trigger)
+            .expect("parse_completion_context_with_tree returned None")
     }
 
     fn end_of(src: &str) -> CompletionContext {
         let lines: Vec<&str> = src.lines().collect();
-        let line = (lines.len() - 1) as u32;
-        let col = lines.last().unwrap().len() as u32;
+        let line = (lines.len().saturating_sub(1)) as u32;
+        let col = lines.last().map(|l| l.len()).unwrap_or(0) as u32;
         at(src, line, col)
     }
 
@@ -1154,9 +1162,7 @@ mod tests {
         let src = "// some random comments\n\npublic class ExampleClass {}";
         // Cursor at the end of the comment line
         let col = "// some random comments".len() as u32;
-        let ctx = JavaLanguage
-            .parse_completion_context(src, 0, col, None)
-            .unwrap();
+        let ctx = at(src, 0, col);
         assert!(
             matches!(ctx.location, CursorLocation::Unknown),
             "cursor inside line comment should give Unknown, got {:?}",
@@ -1168,9 +1174,7 @@ mod tests {
     fn test_cursor_on_empty_line_after_comment_is_expression() {
         let src = "// some random comments\n\npublic class ExampleClass {}";
         // The cursor is on line 1 (empty line).
-        let ctx = JavaLanguage
-            .parse_completion_context(src, 1, 0, None)
-            .unwrap();
+        let ctx = at(src, 0, 0);
         assert!(
             !matches!(ctx.location, CursorLocation::Unknown),
             "empty line after comment should not be Unknown, got {:?}",

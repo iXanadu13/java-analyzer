@@ -1,28 +1,40 @@
 use dashmap::DashMap;
+use ropey::Rope;
 use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
+use tree_sitter::Tree;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Document {
     pub uri: Url,
     pub language_id: String,
     pub version: i32,
-    pub content: Arc<str>,
+
+    pub text: String,
+    pub rope: Rope,
+
+    /// Cached tree for this doc's language (java/kotlin)
+    pub tree: Option<Tree>,
 }
 
 impl Document {
     pub fn new(uri: Url, language_id: String, version: i32, content: String) -> Self {
+        let rope = Rope::from_str(&content);
         Self {
             uri,
             language_id,
             version,
-            content: Arc::from(content.as_str()),
+            text: content,
+            rope,
+            tree: None,
         }
     }
 
     pub fn apply_full_change(&mut self, version: i32, new_content: String) {
         self.version = version;
-        self.content = Arc::from(new_content.as_str());
+        self.text = new_content;
+        self.rope = Rope::from_str(&self.text);
+        self.tree = None;
     }
 }
 
@@ -51,8 +63,14 @@ impl DocumentStore {
         self.docs.remove(uri);
     }
 
-    pub fn get(&self, uri: &Url) -> Option<Document> {
-        self.docs.get(uri).map(|d| d.clone())
+    /// Read-only access without cloning the whole doc
+    pub fn with_doc<R>(&self, uri: &Url, f: impl FnOnce(&Document) -> R) -> Option<R> {
+        self.docs.get(uri).map(|d| f(&*d))
+    }
+
+    /// Mutable access without cloning; do NOT .await inside f
+    pub fn with_doc_mut<R>(&self, uri: &Url, f: impl FnOnce(&mut Document) -> R) -> Option<R> {
+        self.docs.get_mut(uri).map(|mut d| f(&mut *d))
     }
 }
 

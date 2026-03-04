@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use tower_lsp::lsp_types::{
     DocumentSymbol, SemanticToken, SemanticTokenModifier, SemanticTokenType,
 };
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 pub(crate) mod rope_utils;
 pub(crate) mod ts_utils;
@@ -44,13 +44,38 @@ pub trait Language: Send + Sync + std::fmt::Debug {
 
     fn make_parser(&self) -> Parser;
 
+    /// parse a syntax tree (optionally incrementally, if old_tree is provided)
+    fn parse_tree(&self, source: &str, old_tree: Option<&Tree>) -> Option<Tree> {
+        let mut parser = self.make_parser();
+        parser.parse(source, old_tree)
+    }
+
+    #[deprecated]
     fn parse_completion_context(
         &self,
+        _source: &str,
+        _line: u32,
+        _character: u32,
+        _trigger_char: Option<char>,
+    ) -> Option<CompletionContext> {
+        None
+    }
+
+    #[allow(deprecated)]
+    /// build completion context using an existing syntax tree
+    fn parse_completion_context_with_tree(
+        &self,
         source: &str,
+        rope: &Rope,
+        root: Node,
         line: u32,
         character: u32,
         trigger_char: Option<char>,
-    ) -> Option<CompletionContext>;
+    ) -> Option<CompletionContext> {
+        // Default fallback: reparse (keeps other languages working)
+        let _ = (rope, root);
+        self.parse_completion_context(source, line, character, trigger_char)
+    }
 
     fn post_process_candidates(
         &self,

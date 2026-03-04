@@ -22,9 +22,11 @@ pub async fn handle_completion(
         .and_then(|ctx| ctx.trigger_character.as_deref())
         .and_then(|s| s.chars().next());
 
-    // load document
-    let doc = workspace.documents.get(uri)?;
-    let lang = registry.find(&doc.language_id)?;
+    let lang_id = workspace
+        .documents
+        .with_doc(uri, |doc| doc.language_id.clone())?;
+
+    let lang = registry.find(&lang_id)?;
 
     let uri_str = uri.as_str();
 
@@ -37,21 +39,36 @@ pub async fn handle_completion(
         "completion request"
     );
 
-    // Parse and complete the context
-    let ctx = lang
-        .parse_completion_context(&doc.content, position.line, position.character, trigger)?
-        .with_file_uri(Arc::from(uri_str));
+    // 2) 确保 doc.tree 已缓存（缺失则同步 parse 一次写回）
+    //    注意：闭包里不能 await，所以 parse 必须是同步的（tree-sitter parse 是同步）
+    workspace.documents.with_doc_mut(uri, |doc| {
+        if doc.tree.is_none() {
+            let mut parser = lang.make_parser();
+            doc.tree = parser.parse(&doc.text, None);
+        }
+    })?;
 
-    let ctx = if ctx.enclosing_package.is_none() {
-        // TODO: infer source root from build tools
-        ctx
-    } else {
-        ctx
-    };
+    // 3) 在 read 闭包里：直接用缓存 tree + rope 构造 CompletionContext
+    //    同时把 source clone 出来（后面生成 textEdit 需要 &str，且我们会 await index lock）
+    let (ctx, source_for_edits) = workspace.documents.with_doc(uri, |doc| {
+        let tree = doc.tree.as_ref()?;
+        let ctx = lang
+            .parse_completion_context_with_tree(
+                &doc.text,
+                &doc.rope,
+                tree.root_node(),
+                position.line,
+                position.character,
+                trigger,
+            )?
+            .with_file_uri(Arc::from(uri_str));
+
+        Some((ctx, doc.text.clone()))
+    })??;
 
     tracing::debug!(location = ?ctx.location, query = %ctx.query, "parsed context");
 
-    // Perform completion
+    // 4) completion engine（这里会 await，所以不能在 DashMap guard 里做）
     let mut index = workspace.index.write().await;
     let candidates = engine.complete(ctx.clone(), &mut index);
     drop(index);
@@ -61,23 +78,23 @@ pub async fn handle_completion(
         return None;
     }
 
-    // Language Specialization Post-processing
     let candidates = lang.post_process_candidates(candidates, &ctx);
 
-    // Convert to LSP format (limit the number to avoid an explosion)
+    // 5) 转 LSP items（用 source_for_edits，而不是旧的 doc.content）
     const MAX_ITEMS: usize = 100;
     let items: Vec<CompletionItem> = candidates
         .iter()
         .take(MAX_ITEMS)
         .map(|c| {
-            let mut item = candidate_to_lsp(c, &doc.content);
+            let mut item = candidate_to_lsp(c, &source_for_edits);
+
             if matches!(
                 ctx.location,
                 crate::completion::context::CursorLocation::Import { .. }
             ) {
                 if let Some(edit) = crate::completion::import_completion::make_import_text_edit(
                     &c.insert_text,
-                    &doc.content,
+                    &source_for_edits,
                     position,
                 ) {
                     item.text_edit = Some(edit);
@@ -93,14 +110,17 @@ pub async fn handle_completion(
                         | CursorLocation::MemberAccess { .. }
                 )
             {
-                if let Some(edit) = make_package_text_edit(&c.insert_text, &doc.content, position) {
+                if let Some(edit) =
+                    make_package_text_edit(&c.insert_text, &source_for_edits, position)
+                {
                     item.text_edit = Some(edit);
                     item.insert_text = None;
                     item.insert_text_format = None;
                 }
                 item.filter_text = Some(c.label.to_string());
             } else if c.source == "override" {
-                if let Some(edit) = make_override_text_edit(&c.insert_text, &doc.content, position)
+                if let Some(edit) =
+                    make_override_text_edit(&c.insert_text, &source_for_edits, position)
                 {
                     item.text_edit = Some(edit);
                     item.insert_text = None;
@@ -136,7 +156,6 @@ fn make_override_text_edit(
     let line = source.lines().nth(position.line as usize)?;
     let before_cursor = &line[..position.character as usize];
 
-    // 找到当前词的起始（连续字母构成 "pub" / "pro" / "protected" 等）
     let start_char = before_cursor
         .rfind(|c: char| !c.is_alphabetic())
         .map(|p| p + 1)
@@ -157,8 +176,6 @@ fn make_override_text_edit(
     }))
 }
 
-// TODO: move to package_completion.rs
-
 /// Expression/MemberAccess 场景下 Package 候选的 textEdit：
 /// 替换光标所在的整个"包路径词"（从行首非空白到光标）
 fn make_package_text_edit(
@@ -167,24 +184,11 @@ fn make_package_text_edit(
     position: Position,
 ) -> Option<CompletionTextEdit> {
     let line = source.lines().nth(position.line as usize)?;
-
-    // 找光标前最后一个不属于包路径字符（字母数字下划线点）的位置
-    // 从那里到光标就是需要替换的范围
     let before_cursor = &line[..position.character as usize];
     let start_char = before_cursor
         .rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
         .map(|p| p + 1)
         .unwrap_or(0) as u32;
-
-    let end_char = position.character;
-
-    // tracing::debug!(
-    //     insert_text,
-    //     before_cursor,
-    //     start_char,
-    //     end_char,
-    //     "make_package_text_edit"
-    // );
 
     Some(CompletionTextEdit::Edit(TextEdit {
         range: Range {
@@ -194,7 +198,7 @@ fn make_package_text_edit(
             },
             end: Position {
                 line: position.line,
-                character: end_char,
+                character: position.character,
             },
         },
         new_text: insert_text.to_string(),

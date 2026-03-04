@@ -10,17 +10,25 @@ pub async fn handle_document_symbol(
     params: DocumentSymbolParams,
 ) -> Option<DocumentSymbolResponse> {
     let uri = params.text_document.uri;
-    let doc = workspace.documents.get(&uri)?;
 
-    let lang = registry.find(&doc.language_id)?;
+    let lang_id = workspace
+        .documents
+        .with_doc(&uri, |doc| doc.language_id.clone())?;
 
-    if lang.supports_collecting_symbols() {
-        let mut parser = lang.make_parser();
-        let tree = parser.parse(doc.content.as_ref(), None)?;
+    let lang = registry.find(&lang_id)?;
+
+    workspace.documents.with_doc_mut(&uri, |doc| {
+        if doc.tree.is_none() {
+            doc.tree = lang.parse_tree(&doc.text, None);
+        }
+    })?;
+
+    let symbols = workspace.documents.with_doc(&uri, |doc| {
+        let tree = doc.tree.as_ref()?;
         let root = tree.root_node();
-        let symbols = lang.collect_symbols(root, doc.content.as_bytes())?;
-        Some(DocumentSymbolResponse::Nested(symbols))
-    } else {
-        None
-    }
+        let bytes = doc.text.as_bytes();
+        lang.collect_symbols(root, bytes)
+    })??;
+
+    Some(DocumentSymbolResponse::Nested(symbols))
 }
