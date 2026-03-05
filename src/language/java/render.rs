@@ -65,7 +65,7 @@ pub fn method_detail(
                 .unwrap_or_else(|| {
                     JvmType::parse(param_jvm_str)
                         .map(|(t, _)| Arc::from(t.to_signature_string()))
-                        .unwrap_or_else(|| Arc::from("void"))
+                        .unwrap_or_else(|| Arc::from(param_jvm_str))
                 });
 
                 param_types.push(
@@ -88,12 +88,11 @@ pub fn method_detail(
                 .param_names()
                 .get(i)
                 .cloned()
-                .unwrap_or_else(|| Arc::from(format!("arg{}", i).as_str()));
+                .unwrap_or_else(|| Arc::<str>::from(format!("arg{}", i)));
             format!("{} {}", type_name, param_name)
         })
         .collect();
 
-    // 3. 提取类名
     let base_class_name = receiver_internal
         .split('<')
         .next()
@@ -163,8 +162,6 @@ pub fn source_member_detail(
         .next()
         .unwrap_or(base_class_name);
 
-    // 安全网：专门处理 provider 无法解析 (返回 None) 的情况
-    // 确保即使 provider 匹配失败，也不泄漏 L...; 或 / 等 JVM 内部特征
     let clean_fallback = |jvm_sig: &str| -> String {
         let mut array_dims = 0;
         let mut base = jvm_sig.trim();
@@ -194,7 +191,6 @@ pub fn source_member_detail(
         let md = md.clone();
         let sig = member.descriptor();
 
-        // 1. 解析返回类型
         let ret_jvm = if let Some(ret_idx) = sig.find(')') {
             &sig[ret_idx + 1..]
         } else {
@@ -208,7 +204,6 @@ pub fn source_member_detail(
         let source_style_return = descriptor_to_source_type(&display_return, provider)
             .unwrap_or_else(|| clean_fallback(ret_jvm));
 
-        // 解析参数列表
         let mut param_types = Vec::new();
         if let Some(start) = sig.find('(')
             && let Some(end) = sig.find(')')
@@ -241,7 +236,7 @@ pub fn source_member_detail(
                     .param_names()
                     .get(i)
                     .cloned()
-                    .unwrap_or_else(|| Arc::from(format!("arg{}", i).as_str()));
+                    .unwrap_or_else(|| Arc::<str>::from(format!("arg{}", i)));
                 format!("{} {}", type_name, param_name)
             })
             .collect();
@@ -254,13 +249,11 @@ pub fn source_member_detail(
             full_params.join(", ")
         )
     } else {
-        // == 处理字段 ==
         let sig_to_use = member.descriptor();
         let display_type: Arc<str> = JvmType::parse(&sig_to_use)
             .map(|(t, _)| Arc::from(t.to_signature_string()))
             .unwrap_or_else(|| sig_to_use.clone());
 
-        // 核心：优先信任 provider！
         let source_style_type = descriptor_to_source_type(&display_type, provider)
             .unwrap_or_else(|| clean_fallback(&sig_to_use));
 
