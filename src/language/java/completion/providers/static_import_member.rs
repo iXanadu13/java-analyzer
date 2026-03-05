@@ -214,7 +214,6 @@ mod tests {
     use super::*;
     use crate::index::{
         ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
-        IndexView,
     };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
@@ -225,7 +224,7 @@ mod tests {
     }
 
     fn math_index() -> WorkspaceIndex {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_jar_classes(root_scope(), vec![ClassMetadata {
             package: Some(Arc::from("java/lang")),
             name: Arc::from("Math"),
@@ -287,7 +286,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_static_import_provides_all_static_members() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = expr_ctx("", vec![Arc::from("java.lang.Math.*")]);
         let results = StaticImportMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
@@ -298,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_static_import_filters_by_prefix() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = expr_ctx("ab", vec![Arc::from("java.lang.Math.*")]);
         let results = StaticImportMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
@@ -308,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_specific_static_import_provides_named_member() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = expr_ctx("", vec![Arc::from("java.lang.Math.abs")]);
         let results = StaticImportMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
@@ -324,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_no_static_imports_returns_empty() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = expr_ctx("ab", vec![]);
         assert!(
             StaticImportMemberProvider
@@ -335,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_wrong_location_returns_empty() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = SemanticContext::new(
             CursorLocation::Import {
                 prefix: "java.lang.Math".to_string(),

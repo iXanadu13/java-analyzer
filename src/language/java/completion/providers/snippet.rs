@@ -223,7 +223,7 @@ mod tests {
     use rust_asm::constants::ACC_PUBLIC;
 
     use super::*;
-    use crate::index::{IndexScope, MethodParams, MethodSummary, ModuleId, IndexView};
+    use crate::index::{IndexScope, MethodParams, MethodSummary, ModuleId};
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
     use std::sync::Arc;
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_package_snippet_not_shown_when_pkg_declared() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("pack", None, Some("org/cubewhy"), None);
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         assert!(results.iter().all(|r| r.label.as_ref() != "package"));
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_package_snippet_shown_with_inferred_pkg() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("pack", None, None, Some("org/cubewhy"));
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         let pkg = results
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_package_snippet_fallback_placeholder() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("pack", None, None, None);
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         let pkg = results
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_class_snippet_uses_file_stem() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("class", Some("file:///path/to/MyService.java"), None, None);
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         let cls = results
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_all_class_like_snippets_on_empty_prefix() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("", Some("file:///Foo.java"), None, None);
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         let labels: Vec<&str> = results.iter().map(|r| r.label.as_ref()).collect();
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_psvm_alias_main_matches() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         // "main" 应该触发 psvm snippet，label 显示为 "main"
         let c = ctx_full("main", None, None, None, Some("MyClass"));
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_psvm_label_also_matches() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx_full("psvm", None, None, None, Some("MyClass"));
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         assert!(
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_psvm_not_shown_outside_class() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         // enclosing_class = None → outside class
         let c = ctx("psvm", None, None, None);
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_sout_alias_println() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("println", None, None, None).with_enclosing_member(Some(
             CurrentClassMember::Method(Arc::new(make_method(
                 "randomMethod",
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_annotation_label() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("ann", Some("file:///MyAnno.java"), None, None);
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         assert!(
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_no_snippets_in_member_access() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let mut c = ctx("class", Some("file:///Foo.java"), None, None);
         c.location = CursorLocation::MemberAccess {
             receiver_type: None,
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_snippet_has_cursor_placeholder() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("class", Some("file:///Foo.java"), None, None);
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         let cls = results
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_prefix_filter() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let c = ctx("cl", Some("file:///Foo.java"), None, None);
         let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
         assert!(results.iter().any(|r| r.label.as_ref() == "class"));
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_empty_prefix_shows_all_valid() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         // 在 class 内，有 ast_pkg，空前缀
         let c = ctx_full(
             "",

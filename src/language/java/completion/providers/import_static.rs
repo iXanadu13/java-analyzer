@@ -118,7 +118,6 @@ mod tests {
     use super::*;
     use crate::index::{
         ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
-        IndexView,
     };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
@@ -129,7 +128,7 @@ mod tests {
     }
 
     fn math_index() -> WorkspaceIndex {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_jar_classes(IndexScope { module: ModuleId::ROOT }, vec![ClassMetadata {
             package: Some(Arc::from("java/lang")),
             name: Arc::from("Math"),
@@ -209,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_wrong_location_returns_empty() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = SemanticContext::new(
             CursorLocation::Expression {
                 prefix: "abs".to_string(),
@@ -226,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_class_path_stage_returns_class_candidates() {
-        let mut idx = math_index();
+        let idx = math_index();
         // "java.lang.Ma" - Not yet at the Math layer, should go through candidates_for_import
         let ctx = import_static_ctx("java.lang.Ma");
         let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
@@ -239,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_member_stage_empty_prefix_returns_all_static() {
-        let mut idx = math_index();
+        let idx = math_index();
         // "java.lang.Math." - Empty member prefix, returns all static members
         let ctx = import_static_ctx("java.lang.Math.");
         let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
@@ -251,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_member_stage_filters_by_prefix() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.a");
         let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
@@ -265,7 +264,7 @@ mod tests {
 
     #[test]
     fn test_member_stage_prefix_case_insensitive() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.p");
         let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
@@ -278,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_member_stage_excludes_non_static() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
         let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
@@ -296,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_member_stage_no_init_methods() {
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
         let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -310,7 +309,7 @@ mod tests {
     #[test]
     fn test_insert_text_has_no_parentheses() {
         // Parentheses should not be added when completing import static.
-        let mut idx = math_index();
+        let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
         let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let method = results.iter().find(|c| c.label.as_ref() == "abs").unwrap();
@@ -322,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_unknown_class_falls_back_to_path_completion() {
-        let mut idx = math_index();
+        let idx = math_index();
         // "com.example.Unknown." - The class does not exist;
         // you should call candidates_for_import (which returns an empty string or the package path).
         let ctx = import_static_ctx("com.example.Unknown.");

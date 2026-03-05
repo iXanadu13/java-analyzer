@@ -149,7 +149,7 @@ impl BucketIndex {
         inner
             .package_index
             .get(normalized.as_str())
-            .map_or(false, |v| !v.is_empty())
+            .is_some_and(|v| !v.is_empty())
     }
 
     pub fn resolve_imports(&self, imports: &[Arc<str>]) -> Vec<Arc<ClassMetadata>> {

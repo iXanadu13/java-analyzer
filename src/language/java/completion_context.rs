@@ -5,7 +5,9 @@ use crate::completion::parser::parse_chain_from_expr;
 use crate::index::IndexView;
 use crate::semantic::types::symbol_resolver::SymbolResolver;
 use crate::semantic::types::type_name::TypeName;
-use crate::semantic::types::{parse_single_type_to_internal, singleton_descriptor_to_type, ChainSegment, TypeResolver};
+use crate::semantic::types::{
+    ChainSegment, TypeResolver, parse_single_type_to_internal, singleton_descriptor_to_type,
+};
 use crate::semantic::{CursorLocation, LocalVar, SemanticContext};
 
 pub struct ContextEnricher<'a> {
@@ -302,7 +304,7 @@ fn resolve_var_init_expr(
 ) -> Option<TypeName> {
     let expr = expr.trim();
     if let Some(rest) = expr.strip_prefix("new ") {
-        // 寻找类型声明的边界：可能是普通构造函数 '('、泛型 '<'，或者是数组的 '['、'{' 
+        // 寻找类型声明的边界：可能是普通构造函数 '('、泛型 '<'，或者是数组的 '['、'{'
         let boundary_idx = rest.find(['(', '<', '[', '{']).unwrap_or(rest.len());
         let type_name = rest[..boundary_idx].trim();
 
@@ -434,18 +436,14 @@ fn evaluate_chain(
                 current = Some(recv.clone());
             } else {
                 let recv_str = recv.as_str();
-                let recv_full: TypeName =
-                    if recv_str.contains('/') || view.get_class(recv_str).is_some() {
-                        recv.clone()
-                    } else {
-                        resolve_simple_to_internal(
-                            recv_str,
-                            existing_imports,
-                            enclosing_package,
-                            view,
-                        )?
+                let recv_full: TypeName = if recv_str.contains('/')
+                    || view.get_class(recv_str).is_some()
+                {
+                    recv.clone()
+                } else {
+                    resolve_simple_to_internal(recv_str, existing_imports, enclosing_package, view)?
                         .into()
-                    };
+                };
 
                 if seg.arg_count.is_some() {
                     let arg_types: Vec<TypeName> = seg
@@ -509,9 +507,11 @@ fn evaluate_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::ModuleId;
     use crate::completion::parser::parse_chain_from_expr;
-    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, WorkspaceIndex};
+    use crate::index::ModuleId;
+    use crate::index::{
+        ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, WorkspaceIndex,
+    };
     use rust_asm::constants::ACC_PUBLIC;
 
     fn seg_names(expr: &str) -> Vec<(String, Option<i32>)> {
@@ -573,36 +573,43 @@ mod tests {
     }
 
     fn make_index_with_random_class() -> WorkspaceIndex {
-        let mut idx = WorkspaceIndex::new();
-        idx.add_jar_classes(IndexScope { module: ModuleId::ROOT }, vec![ClassMetadata {
-            package: Some(Arc::from("org/cubewhy")),
-            name: Arc::from("RandomClass"),
-            internal_name: Arc::from("org/cubewhy/RandomClass"),
-            super_name: None,
-            interfaces: vec![],
-            annotations: vec![],
-            methods: vec![MethodSummary {
-                name: Arc::from("f"),
-                params: MethodParams::empty(),
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            IndexScope {
+                module: ModuleId::ROOT,
+            },
+            vec![ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("RandomClass"),
+                internal_name: Arc::from("org/cubewhy/RandomClass"),
+                super_name: None,
+                interfaces: vec![],
                 annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("f"),
+                    params: MethodParams::empty(),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
                 access_flags: ACC_PUBLIC,
-                is_synthetic: false,
+                inner_class_of: None,
                 generic_signature: None,
-                return_type: None,
+                origin: ClassOrigin::Unknown,
             }],
-            fields: vec![],
-            access_flags: ACC_PUBLIC,
-            inner_class_of: None,
-            generic_signature: None,
-            origin: ClassOrigin::Unknown,
-        }]);
+        );
         idx
     }
 
     #[test]
     fn test_enrich_context_resolves_simple_name_via_import() {
         let idx = make_index_with_random_class();
-        let scope = IndexScope { module: ModuleId::ROOT };
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
         let view = idx.view(scope);
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
@@ -636,7 +643,9 @@ mod tests {
     #[test]
     fn test_enrich_context_resolves_simple_name_via_wildcard_import() {
         let idx = make_index_with_random_class();
-        let scope = IndexScope { module: ModuleId::ROOT };
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
         let view = idx.view(scope);
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {

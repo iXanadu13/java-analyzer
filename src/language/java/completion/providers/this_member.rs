@@ -239,7 +239,7 @@ mod tests {
 
     use super::*;
     use crate::index::{
-        FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId, IndexView,
+        FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
     };
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use std::sync::Arc;
@@ -324,7 +324,7 @@ mod tests {
             make_member("pri", true, true, true),
             make_member("other", true, false, false),
         ];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("fu", members);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
@@ -337,7 +337,7 @@ mod tests {
     fn test_private_method_visible() {
         // Private methods of the same type should be visible
         let members = vec![make_member("pri", true, true, true)];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("pr", members);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn test_private_static_method_visible() {
         let members = vec![make_member("pri", true, true, true)];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("pr", members);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "pri"));
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn test_field_no_paren() {
         let members = vec![make_member("count", false, false, true)];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("co", members);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let c = results
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn test_empty_prefix_returns_all() {
         let members = vec![make_member("func", true, false, false)];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("", members);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert_eq!(results.len(), 1);
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_no_members_returns_nothing() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("fu", vec![]);
         assert!(ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope())).is_empty());
     }
@@ -403,7 +403,7 @@ mod tests {
             make_member("afterMethod", true, false, false), // Defined after the cursor
             make_member("beforeMethod", true, false, false), // Defined before the cursor
         ];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("a", members);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn test_kind_static_field() {
         let members = vec![make_member("CONST", false, true, false)];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("CO", members);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(matches!(
@@ -444,7 +444,7 @@ mod tests {
             generic_signature: None,
             return_type: None,
         }));
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -467,7 +467,7 @@ mod tests {
             generic_signature: None,
             return_type: None,
         }));
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -489,7 +489,7 @@ mod tests {
             generic_signature: None,
             return_type: None,
         }));
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let mut ctx = ctx_with_members_static("", members, enclosing);
         ctx.location = CursorLocation::MemberAccess {
             receiver_type: None,
@@ -513,7 +513,7 @@ mod tests {
             make_member("CONST", false, true, false),  // static field
             make_member("count", false, false, false), // instance field
         ];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
 
         // Construct a static context
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
@@ -566,7 +566,7 @@ mod tests {
             make_member("pri", true, true, false),
             make_member("fun", true, false, false),
         ];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
 
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("main"),
@@ -603,7 +603,7 @@ mod tests {
     fn test_method_arg_empty_prefix_returns_locals_and_members() {
         // println(|) with an empty prefix should return local variables and class members
         let members = vec![make_member("pri", true, true, false)];
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
 
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("main"),
@@ -651,7 +651,7 @@ mod tests {
             generic_signature: None,
             return_type: None,
         }));
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing_method);
         let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -667,7 +667,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             ClassMetadata {
                 package: Some(Arc::from("org/cubewhy")),
@@ -752,7 +752,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC};
 
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             ClassMetadata {
                 package: None,

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    completion::CompletionCandidate,
-    completion::provider::CompletionProvider,
-    index::{IndexScope, IndexView},
+    completion::{CompletionCandidate, provider::CompletionProvider},
+    index::{IndexScope, IndexView, NameTable},
     lsp::semantic_tokens::{get_modifier_mask, get_type_idx},
     semantic::SemanticContext,
 };
@@ -74,6 +73,7 @@ pub trait Language: Send + Sync + std::fmt::Debug {
         line: u32,
         character: u32,
         trigger_char: Option<char>,
+        _env: &ParseEnv,
     ) -> Option<SemanticContext> {
         // Default fallback: reparse (keeps other languages working)
         let _ = (rope, root);
@@ -127,6 +127,11 @@ pub trait Language: Send + Sync + std::fmt::Debug {
     ) -> Option<Vec<DocumentSymbol>> {
         None
     }
+}
+
+#[derive(Clone, Default)]
+pub struct ParseEnv {
+    pub name_table: Option<Arc<NameTable>>,
 }
 
 pub struct LanguageRegistry {

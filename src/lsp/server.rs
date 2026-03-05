@@ -9,8 +9,8 @@ use super::capabilities::server_capabilities;
 use super::handlers::completion::handle_completion;
 use crate::completion::engine::CompletionEngine;
 use crate::decompiler::cache::DecompilerCache;
-use crate::index::{ClassOrigin, IndexScope, ModuleId};
 use crate::index::codebase::{index_codebase, index_source_text};
+use crate::index::{ClassOrigin, IndexScope, ModuleId};
 use crate::language::LanguageRegistry;
 use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::lsp::config::JavaAnalyzerConfig;
@@ -117,11 +117,14 @@ impl Backend {
                             let scope = IndexScope {
                                 module: ModuleId::ROOT,
                             };
-                            let mut index_guard = workspace.index.write().await;
+                            let index_guard = workspace.index.write().await;
                             let mut by_origin: std::collections::HashMap<ClassOrigin, Vec<_>> =
                                 std::collections::HashMap::new();
                             for class in result.classes {
-                                by_origin.entry(class.origin.clone()).or_default().push(class);
+                                by_origin
+                                    .entry(class.origin.clone())
+                                    .or_default()
+                                    .push(class);
                             }
                             for (origin, classes) in by_origin {
                                 index_guard.update_source(scope, origin, classes);

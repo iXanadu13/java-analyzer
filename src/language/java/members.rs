@@ -12,10 +12,7 @@ use crate::{
         },
         ts_utils::{capture_text, run_query},
     },
-    semantic::{
-        context::CurrentClassMember,
-        types::parse_return_type_from_descriptor,
-    },
+    semantic::{context::CurrentClassMember, types::parse_return_type_from_descriptor},
 };
 
 #[rustfmt::skip]
@@ -773,7 +770,7 @@ mod tests {
             .expect("failed to load java grammar");
         let tree = parser.parse(source, None).unwrap();
 
-        let ctx = JavaContextExtractor::new(source, source.len());
+        let ctx = JavaContextExtractor::new(source, source.len(), None);
         (ctx, tree)
     }
 

@@ -11,12 +11,9 @@ pub struct IndexScope {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum ClasspathId {
+    #[default]
     Main,
 }
 
-impl Default for ClasspathId {
-    fn default() -> Self {
-        ClasspathId::Main
-    }
-}

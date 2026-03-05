@@ -713,7 +713,6 @@ mod tests {
     use crate::completion::provider::CompletionProvider;
     use crate::index::{
         ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
-        IndexView,
     };
     use crate::language::java::completion::providers::member::MemberProvider;
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
@@ -765,7 +764,7 @@ mod tests {
     }
 
     fn make_index(methods: Vec<MethodSummary>, fields: Vec<FieldSummary>) -> WorkspaceIndex {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("com/example")),
             name: Arc::from("Foo"),
@@ -824,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_instance_method_found() {
-        let mut idx = make_index(
+        let idx = make_index(
             vec![make_method(
                 "getValue",
                 "()Ljava/lang/String;",
@@ -840,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_empty_prefix_returns_all_public() {
-        let mut idx = make_index(
+        let idx = make_index(
             vec![
                 make_method("getName", "()Ljava/lang/String;", ACC_PUBLIC, false),
                 make_method("setName", "(Ljava/lang/String;)V", ACC_PUBLIC, false),
@@ -855,7 +854,7 @@ mod tests {
 
     #[test]
     fn test_same_class_private_visible_via_this() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy/a")),
             name: Arc::from("Main"),
@@ -881,7 +880,7 @@ mod tests {
 
     #[test]
     fn test_this_dot_uses_source_members_including_private() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let members = vec![
             m("priFunc", ACC_PUBLIC, true), // is_private = true
             m("fun", ACC_PUBLIC, false),
@@ -898,7 +897,7 @@ mod tests {
 
     #[test]
     fn test_no_this_completion_in_static_method() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let members = vec![
             f("staticField", ACC_STATIC, false),
             f("instanceField", ACC_PUBLIC, false),
@@ -921,7 +920,7 @@ mod tests {
 
     #[test]
     fn test_bare_method_call_receiver_resolved() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             ClassMetadata {
                 package: None,

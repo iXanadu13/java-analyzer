@@ -26,7 +26,7 @@ pub fn parse_java_source(
     origin: ClassOrigin,
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> Vec<ClassMetadata> {
-    let ctx = JavaContextExtractor::for_indexing(source);
+    let ctx = JavaContextExtractor::for_indexing(source, name_table.clone());
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
@@ -101,7 +101,7 @@ fn parse_java_class(
 
     let body = node.child_by_field_name("body");
     let full_source = std::str::from_utf8(ctx.bytes()).unwrap_or("");
-    let ctx = JavaContextExtractor::for_indexing(full_source);
+    let ctx = JavaContextExtractor::for_indexing(full_source, ctx.name_table.clone());
     if let Some(b) = body {
         for member in extract_class_members_from_body(&ctx, b, type_ctx) {
             match member {
@@ -145,7 +145,7 @@ pub fn find_symbol_range(
     descriptor: Option<&str>,
     index: &IndexView,
 ) -> Option<tower_lsp::lsp_types::Range> {
-    let ctx = JavaContextExtractor::for_indexing(content);
+    let ctx = JavaContextExtractor::for_indexing(content, Some(index.build_name_table()));
     let mut parser = make_java_parser();
     let tree = parser.parse(content, None)?;
     let root = tree.root_node();
@@ -257,7 +257,7 @@ fn extract_java_access_flags(ctx: &JavaContextExtractor, node: Node) -> u16 {
 }
 
 pub fn discover_java_names(source: &str) -> Vec<Arc<str>> {
-    let ctx = JavaContextExtractor::for_indexing(source);
+    let ctx = JavaContextExtractor::for_indexing(source, None);
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
@@ -434,7 +434,7 @@ pub fn get_javadoc_on_the_fly(
         _ => return None,
     };
 
-    let ctx = JavaContextExtractor::for_indexing(&content);
+    let ctx = JavaContextExtractor::for_indexing(&content, None);
     let mut parser = make_java_parser();
     let tree = parser.parse(&content, None)?;
     let root = tree.root_node();

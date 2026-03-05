@@ -1,7 +1,8 @@
+use std::sync::Arc;
+
 use super::Language;
 use crate::completion::provider::CompletionProvider;
-use crate::index::{IndexScope, IndexView};
-use crate::language::ClassifiedToken;
+use crate::index::{IndexScope, IndexView, NameTable};
 use crate::language::java::completion::providers::{
     annotation::AnnotationProvider, constructor::ConstructorProvider,
     expression::ExpressionProvider, import::ImportProvider, import_static::ImportStaticProvider,
@@ -15,6 +16,7 @@ use crate::language::java::symbols::collect_java_symbols;
 use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::language::ts_utils::find_method_by_offset;
+use crate::language::{ClassifiedToken, ParseEnv};
 use crate::semantic::{CursorLocation, SemanticContext};
 use ropey::Rope;
 use smallvec::smallvec;
@@ -108,10 +110,16 @@ impl Language for JavaLanguage {
         line: u32,
         character: u32,
         trigger_char: Option<char>,
+        env: &ParseEnv,
     ) -> Option<SemanticContext> {
         let offset = rope_line_col_to_offset(rope, line, character)?;
         tracing::debug!(line, character, trigger = ?trigger_char, "java: parsing context (cached tree)");
-        let extractor = JavaContextExtractor::with_rope(source.to_string(), offset, rope.clone());
+        let extractor = JavaContextExtractor::with_rope(
+            source.to_string(),
+            offset,
+            rope.clone(),
+            env.name_table.clone(),
+        );
         if extractor.is_in_comment() {
             return Some(SemanticContext::new(
                 CursorLocation::Unknown,
@@ -270,29 +278,41 @@ pub struct JavaContextExtractor {
     source: String,
     pub rope: Rope,
     pub offset: usize,
+    name_table: Option<Arc<NameTable>>,
 }
 
 impl JavaContextExtractor {
-    pub fn new(source: impl Into<String>, offset: usize) -> Self {
+    pub fn new(
+        source: impl Into<String>,
+        offset: usize,
+        name_table: Option<Arc<NameTable>>,
+    ) -> Self {
         let source = source.into();
         let rope = Rope::from_str(&source);
         Self {
             source,
             rope,
             offset,
+            name_table,
         }
     }
 
     /// Create a simplified extractor for indexing (no cursor offset needed)
-    pub fn for_indexing(source: &str) -> Self {
-        Self::new(source, 0)
+    pub fn for_indexing(source: &str, name_table: Option<Arc<NameTable>>) -> Self {
+        Self::new(source, 0, name_table)
     }
 
-    pub(crate) fn with_rope(source: String, offset: usize, rope: Rope) -> Self {
+    pub(crate) fn with_rope(
+        source: String,
+        offset: usize,
+        rope: Rope,
+        name_table: Option<Arc<NameTable>>,
+    ) -> Self {
         Self {
             source,
             rope,
             offset,
+            name_table,
         }
     }
 
@@ -345,7 +365,7 @@ impl JavaContextExtractor {
         let type_ctx = SourceTypeCtx::new(
             enclosing_package.clone(),
             existing_imports.clone(),
-            None, // TODO: pass name_table there
+            self.name_table.clone(),
         );
         let existing_static_imports = scope::extract_static_imports(&self, root);
         let current_class_members = cursor_node
@@ -445,7 +465,15 @@ mod tests {
         let tree = parser.parse(src, None).expect("failed to parse java");
 
         super::JavaLanguage
-            .parse_completion_context_with_tree(src, &rope, tree.root_node(), line, col, trigger)
+            .parse_completion_context_with_tree(
+                src,
+                &rope,
+                tree.root_node(),
+                line,
+                col,
+                trigger,
+                &ParseEnv { name_table: None },
+            )
             .expect("parse_completion_context_with_tree returned None")
     }
 
@@ -1555,7 +1583,7 @@ mod tests {
         let error_node = root.child(0).unwrap();
         assert_eq!(error_node.kind(), "ERROR");
 
-        let extractor = super::JavaContextExtractor::new(src, 0);
+        let extractor = super::JavaContextExtractor::new(src, 0, None);
 
         // Snapshot direct children kinds
         let mut cursor = error_node.walk();
@@ -2294,7 +2322,7 @@ mod tests {
     }
     "#};
         let offset = src.find("java.util.A").unwrap() + 11;
-        let extractor = JavaContextExtractor::new(src, offset);
+        let extractor = JavaContextExtractor::new(src, offset, None);
 
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -2317,7 +2345,7 @@ mod tests {
     }
     "#};
         let offset = src.find("java.util.A").unwrap() + 11;
-        let extractor = JavaContextExtractor::new(src, offset);
+        let extractor = JavaContextExtractor::new(src, offset, None);
 
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -2600,7 +2628,7 @@ mod tests {
         // 验证 JavaContextExtractor 可以脱离 source 字符串独立存活
         let ctx = {
             let src = String::from("class A { void f() { int x = 1; } }");
-            JavaContextExtractor::new(src, 22) // 离开作用域 src 已 move 进去
+            JavaContextExtractor::new(src, 22, None) // 离开作用域 src 已 move 进去
         };
         // ctx 仍然有效
         assert_eq!(ctx.source_str().len(), 35);
@@ -2609,7 +2637,7 @@ mod tests {
 
     #[test]
     fn test_extractor_for_indexing() {
-        let ctx = JavaContextExtractor::for_indexing("class A {}");
+        let ctx = JavaContextExtractor::for_indexing("class A {}", None);
         assert_eq!(ctx.offset, 0);
         assert_eq!(ctx.source_str(), "class A {}");
     }
@@ -2617,7 +2645,7 @@ mod tests {
     #[test]
     fn test_extractor_byte_slice() {
         let src = "class A { void f() {} }";
-        let ctx = JavaContextExtractor::new(src, 0);
+        let ctx = JavaContextExtractor::new(src, 0, None);
         // tree-sitter 给出字节偏移，byte_slice 应正确切片
         assert_eq!(ctx.byte_slice(0, 5), "class");
         assert_eq!(ctx.byte_slice(6, 7), "A");
@@ -2628,14 +2656,14 @@ mod tests {
         let src = "class A { // comment\n void f() {} }";
         // offset 在 comment 内部
         let col = src.find("//").unwrap() + 5;
-        let ctx = JavaContextExtractor::new(src, col);
+        let ctx = JavaContextExtractor::new(src, col, None);
         assert!(ctx.is_in_comment());
     }
 
     #[test]
     fn test_extractor_is_in_comment_false() {
         let src = "class A { void f() {} }";
-        let ctx = JavaContextExtractor::new(src, 10);
+        let ctx = JavaContextExtractor::new(src, 10, None);
         assert!(!ctx.is_in_comment());
     }
 
@@ -2645,7 +2673,7 @@ mod tests {
         let src = String::from("package a; class B {}");
         let rope = ropey::Rope::from_str(&src);
         let line_count = rope.len_lines();
-        let ctx = JavaContextExtractor::with_rope(src, 0, rope);
+        let ctx = JavaContextExtractor::with_rope(src, 0, rope, None);
         assert_eq!(ctx.rope.len_lines(), line_count);
     }
 
@@ -2653,7 +2681,7 @@ mod tests {
     fn test_extractor_node_text_multibyte() {
         // 含 CJK 字符的类名，node_text 应正确返回
         let src = "class 测试类 {}";
-        let ctx = JavaContextExtractor::new(src, 0);
+        let ctx = JavaContextExtractor::new(src, 0, None);
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&tree_sitter_java::LANGUAGE.into())

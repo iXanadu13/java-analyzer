@@ -3,9 +3,9 @@ use tower_lsp::lsp_types::*;
 use tracing::debug;
 
 use super::super::converters::candidate_to_lsp;
-use crate::completion::engine::CompletionEngine;
 use crate::completion::CandidateKind;
-use crate::language::LanguageRegistry;
+use crate::completion::engine::CompletionEngine;
+use crate::language::{LanguageRegistry, ParseEnv};
 use crate::semantic::CursorLocation;
 use crate::workspace::Workspace;
 
@@ -40,8 +40,6 @@ pub async fn handle_completion(
         "completion request"
     );
 
-    // 2) 确保 doc.tree 已缓存（缺失则同步 parse 一次写回）
-    //    注意：闭包里不能 await，所以 parse 必须是同步的（tree-sitter parse 是同步）
     workspace.documents.with_doc_mut(uri, |doc| {
         if doc.tree.is_none() {
             let mut parser = lang.make_parser();
@@ -49,8 +47,14 @@ pub async fn handle_completion(
         }
     })?;
 
-    // 3) 在 read 闭包里：直接用缓存 tree + rope 构造 SemanticContext
-    //    同时把 source clone 出来（后面生成 textEdit 需要 &str，且我们会 await index lock）
+    let scope = workspace.scope_for_uri(uri);
+    let index = workspace.index.read().await;
+    let view = index.view(scope);
+
+    let env = ParseEnv {
+        name_table: Some(view.build_name_table()),
+    };
+
     let (ctx, source_for_edits) = workspace.documents.with_doc(uri, |doc| {
         let tree = doc.tree.as_ref()?;
         let ctx = lang
@@ -61,6 +65,7 @@ pub async fn handle_completion(
                 position.line,
                 position.character,
                 trigger,
+                &env,
             )?
             .with_file_uri(Arc::from(uri_str))
             .with_language_id(crate::language::LanguageId::new(lang_id.clone()));
@@ -70,10 +75,6 @@ pub async fn handle_completion(
 
     tracing::debug!(location = ?ctx.location, query = %ctx.query, "parsed context");
 
-    // 4) completion engine（这里会 await，所以不能在 DashMap guard 里做）
-    let scope = workspace.scope_for_uri(uri);
-    let index = workspace.index.read().await;
-    let view = index.view(scope);
     let candidates = engine.complete(scope, ctx.clone(), lang, &view);
 
     if candidates.is_empty() {
@@ -83,7 +84,6 @@ pub async fn handle_completion(
 
     let candidates = lang.post_process_candidates(candidates, &ctx);
 
-    // 5) 转 LSP items（用 source_for_edits，而不是旧的 doc.content）
     const MAX_ITEMS: usize = 100;
     let items: Vec<CompletionItem> = candidates
         .iter()

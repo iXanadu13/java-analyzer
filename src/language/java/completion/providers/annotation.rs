@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::index::WorkspaceIndex;
 use rust_asm::constants::ACC_ANNOTATION;
 
 use crate::{
@@ -166,7 +164,6 @@ mod tests {
     use crate::completion::CandidateKind;
     use crate::index::{
         AnnotationSummary, AnnotationValue, ClassMetadata, ClassOrigin, IndexScope, ModuleId,
-        IndexView,
     };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::{ACC_ANNOTATION, ACC_PUBLIC};
@@ -288,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_non_annotation_class_excluded() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_class("com/example", "NotAnAnnotation")]);
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Not", vec![], "com/example");
@@ -303,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_annotation_from_import_appears() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         idx.add_classes(vec![make_annotation("org/junit", "Test")]);
         let ctx = annotation_ctx("Te", vec!["org.junit.Test".into()], "com/example");
@@ -317,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_annotation_from_global_index_has_import() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_annotation("org/junit", "Test")]);
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Te", vec![], "com/example");
@@ -333,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_annotation_kind_is_annotation() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Over", vec![], "com/example");
         let results = AnnotationProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
@@ -349,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_prefix_filter_case_insensitive() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("over", vec![], "com/example");
         let results = AnnotationProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
@@ -361,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_target_filter_method_context() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         let mut type_only = make_annotation("com/example", "ClassOnly");
         type_only.annotations = vec![AnnotationSummary {

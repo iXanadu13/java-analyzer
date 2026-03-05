@@ -297,7 +297,7 @@ mod tests {
             .expect("failed to load java grammar");
         let tree = parser.parse(source, None).unwrap();
 
-        let ctx = JavaContextExtractor::new(source, offset);
+        let ctx = JavaContextExtractor::new(source, offset, None);
         (ctx, tree)
     }
 

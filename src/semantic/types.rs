@@ -1,10 +1,10 @@
+use self::generics::{JvmType, split_internal_name, substitute_type};
+use self::type_name::TypeName;
 use super::context::{LocalVar, SemanticContext};
 use crate::{
     index::{IndexView, MethodSummary},
     jvm::descriptor::{consume_one_descriptor_type, split_param_descriptors},
 };
-use self::generics::{split_internal_name, substitute_type, JvmType};
-use self::type_name::TypeName;
 use std::sync::Arc;
 
 pub mod generics;
@@ -825,7 +825,9 @@ mod tests {
     };
 
     fn root_scope() -> IndexScope {
-        IndexScope { module: ModuleId::ROOT }
+        IndexScope {
+            module: ModuleId::ROOT,
+        }
     }
 
     fn make_resolver() -> (IndexView, Vec<LocalVar>) {
@@ -966,7 +968,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: None,
             name: Arc::from("NestedClass"),
@@ -1038,7 +1040,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         // Main has getMain2() returning Main2
         // Main2 has func()
         idx.add_classes(vec![
@@ -1107,7 +1109,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("java/util")),
             name: Arc::from("List"),
@@ -1172,7 +1174,7 @@ mod tests {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
 
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: None,
             name: Arc::from("Main"),

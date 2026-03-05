@@ -256,7 +256,6 @@ mod tests {
     use super::*;
     use crate::index::{
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
-        IndexView,
     };
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
@@ -367,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_basic_override_from_superclass() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -391,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_insert_text_contains_override_annotation() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -415,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_insert_text_contains_method_body_stub() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -436,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_already_overridden_excluded_via_index() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -467,7 +466,7 @@ mod tests {
     #[test]
     fn test_already_overridden_excluded_via_source_members() {
         // Child is not compiled into the index, but current_class_members has doWork.
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_class(
             "com/example",
             "Parent",
@@ -502,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_overloads_both_shown_when_none_overridden() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             make_class(
@@ -533,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_overloads_only_unoverridden_shown() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             make_class(
@@ -578,7 +577,7 @@ mod tests {
     #[test]
     fn test_private_method_not_overridable() {
         use rust_asm::constants::ACC_PRIVATE;
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -599,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_static_method_not_overridable() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -620,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_final_method_not_overridable() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -641,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_synthetic_method_excluded() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -662,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_constructor_excluded() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -683,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_no_enclosing_class_returns_empty() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let ctx = SemanticContext::new(
             CursorLocation::Expression {
                 prefix: "pub".to_string(),
@@ -700,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_protected_method_visibility_preserved() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -723,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_grandparent_method_appears() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -752,7 +751,7 @@ mod tests {
     #[test]
     fn test_no_duplicate_from_multiple_ancestors() {
         // GrandParent 和 Parent 都声明了同一方法（Parent 没有 override，走继承）
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -785,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_wrong_location_returns_empty() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class(
                 "com/example",
@@ -816,7 +815,7 @@ mod tests {
     #[test]
     fn test_object_methods_appear_when_no_explicit_superclass() {
         // Object 的 toString / equals / hashCode 应当出现
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             // Object 本身
@@ -866,7 +865,7 @@ mod tests {
     #[test]
     fn test_object_methods_not_duplicated_when_already_in_mro() {
         // 如果 mro 里已经有 Object（通过显式继承链走到），不应重复
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             ClassMetadata {
@@ -947,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_interface_abstract_method_shown() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_interface(
             "com/example",
             "Runnable",
@@ -970,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_interface_default_method_shown() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
             make_interface(
@@ -994,7 +993,7 @@ mod tests {
 
     #[test]
     fn test_interface_method_excluded_when_already_implemented_in_index() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_interface(
             "com/example",
             "Runnable",
@@ -1023,7 +1022,7 @@ mod tests {
     #[test]
     fn test_interface_method_excluded_via_source_members() {
         // 未编译，只有 source members
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_interface(
             "com/example",
             "Runnable",
@@ -1047,7 +1046,7 @@ mod tests {
 
     #[test]
     fn test_multiple_interfaces_all_shown() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_interface(
                 "com/example",
@@ -1085,7 +1084,7 @@ mod tests {
     #[test]
     fn test_interface_method_not_duplicated_via_superclass_and_interface() {
         // Parent 实现了 Runnable，Child extends Parent —— run() 只应出现一次
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![make_interface(
             "com/example",
             "Runnable",

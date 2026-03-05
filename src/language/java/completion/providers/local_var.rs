@@ -55,7 +55,7 @@ impl CompletionProvider for LocalVarProvider {
 mod tests {
     use crate::index::WorkspaceIndex;
     use super::*;
-    use crate::index::{IndexScope, ModuleId, IndexView};
+    use crate::index::{IndexScope, ModuleId};
     use crate::semantic::context::{CursorLocation, LocalVar, SemanticContext};
     use crate::semantic::types::type_name::TypeName;
     use std::sync::Arc;
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn test_prefix_match() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx(
             "str",
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_partial_prefix_match() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx(
             "aV",
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn test_empty_prefix_returns_all_locals() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx(
             "",
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_case_insensitive() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx("AVAR", vec![("aVar", "java/lang/String")]);
         let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_method_argument_location() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = SemanticContext::new(
             CursorLocation::MethodArgument {
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_fuzzy_match_var_finds_a_var() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx(
             "var",
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn test_no_match_returns_empty() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx("xyz", vec![("aVar", "java/lang/String")]);
         let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_member_access_does_not_return_locals() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_type_annotation_location() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = SemanticContext::new(
             CursorLocation::TypeAnnotation {

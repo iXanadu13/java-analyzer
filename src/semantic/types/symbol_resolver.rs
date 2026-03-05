@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_overload_resolution_in_symbol_resolver() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let scope = IndexScope { module: ModuleId::ROOT };
         idx.add_jar_classes(scope, vec![ClassMetadata {
             package: Some(Arc::from("java/io")),

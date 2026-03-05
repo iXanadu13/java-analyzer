@@ -77,11 +77,10 @@ impl IndexView {
                 }
             } else {
                 let internal = import.replace('.', "/");
-                if let Some(cls) = self.get_class(&internal) {
-                    if seen.insert(Arc::clone(&cls.internal_name)) {
+                if let Some(cls) = self.get_class(&internal)
+                    && seen.insert(Arc::clone(&cls.internal_name)) {
                         result.push(cls);
                     }
-                }
             }
         }
         result

@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use crate::semantic::context::CursorLocation;
-use crate::semantic::types::symbol_resolver::{ResolvedSymbol, SymbolResolver};
 use crate::index::{ClassOrigin, IndexView};
+use crate::language::ParseEnv;
 use crate::language::java::class_parser::find_symbol_range;
 use crate::lsp::server::Backend;
+use crate::semantic::context::CursorLocation;
+use crate::semantic::types::symbol_resolver::{ResolvedSymbol, SymbolResolver};
 use tower_lsp::lsp_types::*;
 use tracing::instrument;
 
@@ -24,14 +25,19 @@ pub async fn handle_goto_definition(
 
     let lang = backend.registry.find(&lang_id)?;
 
-    // 确保 tree 缓存存在
     backend.workspace.documents.with_doc_mut(uri, |doc| {
         if doc.tree.is_none() {
             doc.tree = lang.parse_tree(&doc.text, None);
         }
     })?;
 
-    // 解析 completion context（复用 tree + rope）
+    let scope = backend.workspace.scope_for_uri(uri);
+    let index_guard = backend.workspace.index.read().await;
+    let view = index_guard.view(scope);
+    let env = ParseEnv {
+        name_table: Some(view.build_name_table()),
+    };
+
     let ctx = backend.workspace.documents.with_doc(uri, |doc| {
         let tree = doc.tree.as_ref()?;
         lang.parse_completion_context_with_tree(
@@ -41,12 +47,10 @@ pub async fn handle_goto_definition(
             pos.line,
             full_end,
             None,
+            &env,
         )
     })??;
 
-    let scope = backend.workspace.scope_for_uri(uri);
-    let index_guard = backend.workspace.index.read().await;
-    let view = index_guard.view(scope);
     let mut ctx = ctx;
 
     // enrich context

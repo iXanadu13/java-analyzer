@@ -210,7 +210,6 @@ mod tests {
     use super::*;
     use crate::index::{
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
-        IndexView,
     };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::ACC_PUBLIC;
@@ -221,7 +220,7 @@ mod tests {
     }
 
     fn make_index_with(pkg: &str, name: &str, has_init: bool) -> WorkspaceIndex {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         let methods = if has_init {
             vec![MethodSummary {
                 name: Arc::from("<init>"),
@@ -275,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_empty_prefix_returns_candidates() {
-        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("", None, vec![]);
         let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -286,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_empty_prefix_includes_known_class() {
-        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("", None, vec![]);
         let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -300,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_no_import_when_already_exact_imported() {
-        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.RandomClass".into()]);
         let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -315,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_no_import_when_wildcard_imported() {
-        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.*".into()]);
         let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -330,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_no_import_when_same_package() {
-        let mut idx = make_index_with("org/cubewhy/a", "Helper", true);
+        let idx = make_index_with("org/cubewhy/a", "Helper", true);
         // enclosing package is org/cubewhy/a — same as Helper
         let ctx = make_ctx("Helper", None, vec![]);
         let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
@@ -346,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_import_added_when_not_imported() {
-        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec![]);
         let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
@@ -365,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_expected_type_exact_match_scores_highest() {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         // Add both String and StringBuilder
         for (pkg, name) in [("java/lang", "String"), ("java/lang", "StringBuilder")] {
             idx.add_classes(vec![ClassMetadata {
@@ -417,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_no_expected_type_no_score_boost() {
-        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec![]);
         let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         // score should be 0.0 (set by provider; Scorer adds on top in engine)

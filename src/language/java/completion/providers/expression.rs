@@ -186,7 +186,7 @@ mod tests {
     use rust_asm::constants::ACC_PUBLIC;
 
     use super::*;
-    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId, IndexView};
+    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId};
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use std::sync::Arc;
 
@@ -212,7 +212,7 @@ mod tests {
     }
 
     fn make_index() -> WorkspaceIndex {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_cls("org/cubewhy", "Main"),
             make_cls("org/cubewhy", "Main2"),
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn test_same_name_different_package_not_filtered() {
         // There is a Main package in another package, which should not be filtered.
-        let mut index = make_index();
+        let index = make_index();
         index.add_classes(vec![make_cls("com/other", "Main")]);
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
         let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn test_self_class_appears_in_same_package() {
         // The class itself should appear in the completion (this can be used for type annotations, static access, etc.)
-        let mut index = make_index();
+        let index = make_index();
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
         let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
         assert!(
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_same_name_different_package_both_appear() {
-        let mut index = make_index();
+        let index = make_index();
         index.add_classes(vec![make_cls("com/other", "Main")]);
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
         let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_nested_classes_are_filtered() {
-        let mut index = WorkspaceIndex::new();
+        let index = WorkspaceIndex::new();
         let mut nested_cls = make_cls("java/util", "Entry");
         nested_cls.inner_class_of = Some(Arc::from("java/util/Map"));
 
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_simple_names_from_different_packages() {
-        let mut index = WorkspaceIndex::new();
+        let index = WorkspaceIndex::new();
         index.add_classes(vec![
             make_cls("java/util", "List"),
             make_cls("java/awt", "List"),

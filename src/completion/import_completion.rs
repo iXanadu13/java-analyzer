@@ -204,7 +204,7 @@ mod tests {
     }
 
     fn make_index() -> WorkspaceIndex {
-        let mut idx = WorkspaceIndex::new();
+        let idx = WorkspaceIndex::new();
         idx.add_jar_classes(root_scope(), vec![
             make_cls("org/cubewhy", "Main"),
             make_cls("org/cubewhy", "RealMain"),

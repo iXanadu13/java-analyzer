@@ -1,7 +1,6 @@
 use tree_sitter::Node;
 
 use crate::{
-    semantic::CursorLocation,
     language::java::{
         JavaContextExtractor, SENTINEL,
         location::determine_location,
@@ -11,6 +10,7 @@ use crate::{
             strip_sentinel_from_location,
         },
     },
+    semantic::CursorLocation,
 };
 
 /// Construct the injected source: Replace the token at the cursor with SENTINEL (or insert it directly)
@@ -197,7 +197,11 @@ pub fn inject_and_determine(
     );
 
     if sentinel_node.kind() == "identifier" || sentinel_node.kind() == "type_identifier" {
-        let tmp = JavaContextExtractor::new(injected_source.clone(), sentinel_end);
+        let tmp = JavaContextExtractor::new(
+            injected_source.clone(),
+            sentinel_end,
+            ctx.name_table.clone(),
+        );
         let (loc, q) = determine_location(&tmp, Some(sentinel_node), trigger_char);
         let clean_q = if q == SENTINEL {
             String::new()
@@ -211,7 +215,11 @@ pub fn inject_and_determine(
     let mut cur = sentinel_node;
     loop {
         if cur.kind() == "identifier" || cur.kind() == "type_identifier" {
-            let tmp = JavaContextExtractor::new(injected_source.clone(), sentinel_end);
+            let tmp = JavaContextExtractor::new(
+                injected_source.clone(),
+                sentinel_end,
+                ctx.name_table.clone(),
+            );
             let (loc, q) = determine_location(&tmp, Some(cur), trigger_char);
             let clean_q = strip_sentinel(&q);
             let clean_loc = strip_sentinel_from_location(loc);
@@ -269,7 +277,7 @@ mod tests {
             .expect("failed to load java grammar");
         let tree = parser.parse(source, None).unwrap();
 
-        let ctx = JavaContextExtractor::new(source, offset);
+        let ctx = JavaContextExtractor::new(source, offset, None);
         (ctx, tree)
     }
 
