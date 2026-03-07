@@ -582,10 +582,23 @@ fn clean_javadoc(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::{
-        index::ClassOrigin,
-        language::java::{class_parser::parse_java_source, render},
-        semantic::types::SymbolProvider,
+        index::{ClassOrigin, IndexScope, ModuleId, WorkspaceIndex},
+        language::java::{
+            JavaContextExtractor,
+            class_parser::parse_java_source,
+            make_java_parser,
+            render,
+            scope::{extract_imports, extract_package},
+            type_ctx::SourceTypeCtx,
+        },
+        semantic::context::CurrentClassMember,
+        semantic::types::{
+            SymbolProvider, descriptor_to_source_type,
+            generics::{JvmType, substitute_type},
+        },
     };
+    use std::sync::Arc;
+    use tree_sitter::Query;
     use tracing_subscriber::{EnvFilter, fmt};
 
     fn init_test_tracing() {
@@ -764,6 +777,38 @@ public class Main {
     }
 
     #[test]
+    fn test_source_method_signature_preserves_functional_param_and_generic_return_shape() {
+        let src = indoc::indoc! {r#"
+            package org.example;
+            import java.util.function.Function;
+            public class Demo<T> {
+                public <R> Demo<R> map(Function<? super T, ? extends R> fn) { return null; }
+            }
+        "#};
+        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let demo = classes
+            .iter()
+            .find(|c| c.internal_name.as_ref() == "org/example/Demo")
+            .unwrap();
+        let map = demo.methods.iter().find(|m| m.name.as_ref() == "map").unwrap();
+        let sig = map.generic_signature.as_deref().unwrap_or("");
+
+        assert!(
+            sig.starts_with("<R:Ljava/lang/Object;>"),
+            "method type param should be preserved, sig={sig}"
+        );
+        assert!(
+            sig.contains("Ljava/util/function/Function<-TT;+TR;>;")
+                || sig.contains("LFunction<-TT;+TR;>;"),
+            "functional parameter generic shape should be preserved, sig={sig}"
+        );
+        assert!(
+            sig.ends_with("LDemo<TR;>;") || sig.ends_with("Lorg/example/Demo<TR;>;"),
+            "generic return shape should preserve <TR;>, sig={sig}"
+        );
+    }
+
+    #[test]
     fn test_trace_source_add_overloads_metadata() {
         init_test_tracing();
 
@@ -828,6 +873,255 @@ public class Main {
         assert!(detail.contains("java.lang.String e"), "detail={}", detail);
         assert!(!detail.contains("TE;"), "detail={}", detail);
         assert!(!detail.contains("LE;"), "detail={}", detail);
+    }
+
+    #[test]
+    fn test_snapshot_method_generic_metadata_provenance_map() {
+        let src = indoc::indoc! {r#"
+            package org.example;
+            import java.util.function.Function;
+            public class Demo<T> {
+                public <R> Demo<R> map(Function<? super T, ? extends R> fn) { return null; }
+            }
+        "#};
+        let expected_ideal =
+            "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)Lorg/example/Demo<TR;>;";
+
+        let mut parser = make_java_parser();
+        let tree = parser.parse(src, None).expect("parse");
+        let root = tree.root_node();
+        let ctx = JavaContextExtractor::for_indexing(src, None);
+        let package = extract_package(&ctx, root);
+        let imports = extract_imports(&ctx, root);
+        let type_ctx = SourceTypeCtx::new(package, imports, None);
+
+        let q = Query::new(
+            &tree_sitter_java::LANGUAGE.into(),
+            "(method_declaration name: (identifier) @name) @m",
+        )
+        .unwrap();
+        let m_idx = q.capture_index_for_name("m").unwrap();
+        let n_idx = q.capture_index_for_name("name").unwrap();
+        let mut extracted_method = None;
+        for caps in crate::language::ts_utils::run_query(&q, root, ctx.bytes(), None) {
+            let m = caps.iter().find(|(i, _)| *i == m_idx).map(|(_, n)| *n);
+            let n = caps.iter().find(|(i, _)| *i == n_idx).map(|(_, n)| *n);
+            if let (Some(method_node), Some(name_node)) = (m, n)
+                && ctx.node_text(name_node) == "map"
+            {
+                extracted_method = match crate::language::java::members::parse_method_node(
+                    &ctx, &type_ctx, method_node,
+                ) {
+                    Some(CurrentClassMember::Method(m)) => Some(m),
+                    _ => None,
+                };
+                break;
+            }
+        }
+        let extracted_method = extracted_method.expect("map method from parse_method_node");
+
+        let origin = ClassOrigin::SourceFile(Arc::from("file:///tmp/provenance/Demo.java"));
+        let parsed_classes = parse_java_source(src, origin.clone(), None);
+        let parsed_demo = parsed_classes
+            .iter()
+            .find(|c| c.internal_name.as_ref() == "org/example/Demo")
+            .expect("parsed Demo");
+        let parsed_map = parsed_demo
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "map")
+            .expect("parsed map method");
+        let parsed_class_internal = parsed_demo.internal_name.to_string();
+        let parsed_class_generic_signature = parsed_demo.generic_signature.clone();
+        let parsed_class_origin = parsed_demo.origin.clone();
+        let parsed_map_desc = parsed_map.desc().to_string();
+        let parsed_map_generic_signature = parsed_map.generic_signature.clone();
+        let parsed_map_return_type = parsed_map.return_type.clone();
+        let parsed_map_param_names = parsed_map
+            .params
+            .items
+            .iter()
+            .map(|p| p.name.as_ref().to_string())
+            .collect::<Vec<_>>();
+        let parsed_map_param_descs = parsed_map
+            .params
+            .items
+            .iter()
+            .map(|p| p.descriptor.as_ref().to_string())
+            .collect::<Vec<_>>();
+
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        idx.update_source(scope, origin.clone(), parsed_classes);
+        let view = idx.view(scope);
+        let indexed_demo = view.get_class("org/example/Demo").expect("indexed Demo");
+        let indexed_map = indexed_demo
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "map")
+            .expect("indexed map method");
+        let (visible_methods, _) = view.collect_inherited_members("org/example/Demo");
+        let visible_map = visible_methods
+            .iter()
+            .find(|m| m.name.as_ref() == "map")
+            .expect("provider-visible map");
+
+        let mut out = String::new();
+        out.push_str("source_method_text:\n");
+        out.push_str("public <R> Demo<R> map(Function<? super T, ? extends R> fn)\n\n");
+        out.push_str(&format!("ideal_generic_signature:\n{}\n\n", expected_ideal));
+
+        out.push_str("stage_parse_method_node:\n");
+        out.push_str(&format!(
+            "name={}\ndesc={}\ngeneric_signature={:?}\nreturn_type={:?}\nparam_names={:?}\nparam_descs={:?}\n\n",
+            extracted_method.name,
+            extracted_method.desc(),
+            extracted_method.generic_signature,
+            extracted_method.return_type,
+            extracted_method.params.items.iter().map(|p| p.name.as_ref()).collect::<Vec<_>>(),
+            extracted_method.params.items.iter().map(|p| p.descriptor.as_ref()).collect::<Vec<_>>(),
+        ));
+
+        out.push_str("stage_parse_java_source_class_metadata:\n");
+        out.push_str(&format!(
+            "class_internal={}\nclass_generic_signature={:?}\nclass_origin={:?}\nmap_desc={}\nmap_generic_signature={:?}\nmap_return_type={:?}\nmap_param_names={:?}\nmap_param_descs={:?}\n\n",
+            parsed_class_internal,
+            parsed_class_generic_signature,
+            parsed_class_origin,
+            parsed_map_desc,
+            parsed_map_generic_signature,
+            parsed_map_return_type,
+            parsed_map_param_names,
+            parsed_map_param_descs,
+        ));
+
+        out.push_str("stage_workspace_index_visible:\n");
+        out.push_str(&format!(
+            "class_internal={}\nclass_generic_signature={:?}\nclass_origin={:?}\nindexed_map_desc={}\nindexed_map_generic_signature={:?}\nindexed_map_return_type={:?}\nvisible_map_desc={}\nvisible_map_generic_signature={:?}\nvisible_map_return_type={:?}\n",
+            indexed_demo.internal_name,
+            indexed_demo.generic_signature,
+            indexed_demo.origin,
+            indexed_map.desc(),
+            indexed_map.generic_signature,
+            indexed_map.return_type,
+            visible_map.desc(),
+            visible_map.generic_signature,
+            visible_map.return_type,
+        ));
+
+        insta::assert_snapshot!("method_generic_metadata_provenance_map", out);
+    }
+
+    #[test]
+    fn test_snapshot_groupby_method_detail_rendering_provenance() {
+        let src = indoc::indoc! {r#"
+            package org.example;
+            import java.util.List;
+            import java.util.Map;
+            import java.util.function.Function;
+            public class Box<R> {
+                public <K, V> Map<K, List<V>> groupBy(
+                    Function<? super R, ? extends K> keyFn,
+                    Function<? super R, ? extends V> valueFn
+                ) { return null; }
+            }
+        "#};
+
+        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let cls = classes
+            .iter()
+            .find(|c| c.internal_name.as_ref() == "org/example/Box")
+            .expect("Box class");
+        let group_by = cls
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "groupBy")
+            .expect("groupBy method");
+
+        let receiver_internal = "org/example/Box<Ljava/util/List<Ljava/lang/String;>;>";
+        let sig_to_use = group_by
+            .generic_signature
+            .clone()
+            .unwrap_or_else(|| group_by.desc());
+        let base_return = group_by.return_type.as_deref().unwrap_or("V");
+        let ret_jvm = sig_to_use
+            .find(')')
+            .map(|i| &sig_to_use[i + 1..])
+            .unwrap_or(base_return);
+
+        let substituted_return = substitute_type(
+            receiver_internal,
+            cls.generic_signature.as_deref(),
+            ret_jvm,
+        )
+        .map(|t| t.to_jvm_signature())
+        .unwrap_or_else(|| ret_jvm.to_string());
+        let rendered_return = descriptor_to_source_type(&substituted_return, &TestProvider);
+
+        let mut param_rows = Vec::new();
+        if let Some(start) = sig_to_use.find('(')
+            && let Some(end) = sig_to_use.find(')')
+        {
+            let mut params = &sig_to_use[start + 1..end];
+            while !params.is_empty() {
+                if let Some((_, rest)) = JvmType::parse(params) {
+                    let raw = &params[..params.len() - rest.len()];
+                    let subbed = substitute_type(
+                        receiver_internal,
+                        cls.generic_signature.as_deref(),
+                        raw,
+                    )
+                    .map(|t| t.to_jvm_signature())
+                    .unwrap_or_else(|| raw.to_string());
+                    let rendered = descriptor_to_source_type(&subbed, &TestProvider);
+                    param_rows.push((raw.to_string(), subbed, rendered));
+                    params = rest;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let detail = render::method_detail(receiver_internal, cls, group_by, &TestProvider);
+
+        let mut out = String::new();
+        out.push_str("method_summary:\n");
+        out.push_str(&format!(
+            "desc={}\ngeneric_signature={:?}\nreturn_type={:?}\nparam_descriptors={:?}\n\n",
+            group_by.desc(),
+            group_by.generic_signature,
+            group_by.return_type,
+            group_by
+                .params
+                .items
+                .iter()
+                .map(|p| p.descriptor.as_ref().to_string())
+                .collect::<Vec<_>>(),
+        ));
+        out.push_str("render_inputs:\n");
+        out.push_str(&format!(
+            "receiver_internal={}\nclass_generic_signature={:?}\nsig_to_use={}\nbase_return={}\nret_jvm={}\nsubstituted_return={}\nrendered_return={:?}\n\n",
+            receiver_internal,
+            cls.generic_signature,
+            sig_to_use,
+            base_return,
+            ret_jvm,
+            substituted_return,
+            rendered_return,
+        ));
+        out.push_str("render_param_tokens:\n");
+        for (idx, (raw, subbed, rendered)) in param_rows.iter().enumerate() {
+            out.push_str(&format!(
+                "#{idx}: raw={raw} | substituted={subbed} | rendered={rendered:?}\n"
+            ));
+        }
+        out.push_str("\nfinal_detail:\n");
+        out.push_str(&detail);
+        out.push('\n');
+
+        insta::assert_snapshot!("groupby_method_detail_rendering_provenance", out);
     }
 
     #[test]

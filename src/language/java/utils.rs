@@ -44,6 +44,13 @@ fn node_text<'a>(node: Node, bytes: &'a [u8]) -> &'a str {
 /// Extracts generic parameters from a class or method and constructs them into a generic signature according to the JVM specification.
 /// For example, extracts `<T:Ljava/lang/Object;E:Ljava/lang/Object;>Ljava/lang/Object;` from `class List<T, E>`.
 pub fn extract_generic_signature(node: Node, bytes: &[u8], suffix: &str) -> Option<Arc<str>> {
+    let mut sig = extract_type_parameters_prefix(node, bytes)?;
+    sig.push_str(suffix);
+    Some(Arc::from(sig))
+}
+
+/// Extract only the `<...>` type-parameter prefix from class/method declarations.
+pub fn extract_type_parameters_prefix(node: Node, bytes: &[u8]) -> Option<String> {
     // Compatible with Java (child_by_field_name) and Kotlin (directly search for kind)
     let tp_node = node.child_by_field_name("type_parameters").or_else(|| {
         node.children(&mut node.walk())
@@ -77,8 +84,7 @@ pub fn extract_generic_signature(node: Node, bytes: &[u8], suffix: &str) -> Opti
     }
 
     sig.push('>');
-    sig.push_str(suffix);
-    Some(Arc::from(sig))
+    Some(sig)
 }
 
 pub(crate) fn build_internal_name(

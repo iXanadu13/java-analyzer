@@ -1,0 +1,33 @@
+---
+source: src/semantic/types.rs
+expression: out
+---
+method_reference_arg:
+List::size
+
+selected_map:
+name=map
+desc=(Ljava/util/function/Function;)LBox;
+generic_signature=Some("<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)LBox<TR;>;")
+return_type=Some("LBox;")
+
+parsed_signature:
+params=["Ljava/util/function/Function<-TT;+TR;>;"]
+return=LBox<TR;>;
+return_type_vars=["R"]
+
+method_ref_owner_resolution:
+resolve_owner_from_text("List")=None
+resolve_owner_from_text("java/util/List")=Some("java/util/List")
+resolve_owner_from_text("java/awt/List")=Some("java/awt/List")
+
+inference_bridge:
+infer_functional_arg_return_shallow=None
+inferred_bindings=[]
+
+chain_propagation:
+receiver_before_map=Box<Ljava/util/List<Ljava/lang/String;>;>
+map_result=Some("Box<TR;>")
+get_receiver=Box<TR;>
+get_result=Some("R")
+final_chain_result=Some("R")

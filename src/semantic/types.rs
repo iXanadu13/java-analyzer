@@ -1,11 +1,14 @@
-use self::generics::{JvmType, split_internal_name, substitute_type};
+use self::generics::{
+    JvmType, parse_method_signature_types, parse_method_type_parameters, split_internal_name,
+    substitute_type, substitute_type_vars,
+};
 use self::type_name::TypeName;
 use super::context::{LocalVar, SemanticContext};
 use crate::{
     index::{IndexView, MethodSummary},
     jvm::descriptor::{consume_one_descriptor_type, split_param_descriptors},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod generics;
@@ -171,10 +174,56 @@ impl<'idx> TypeResolver<'idx> {
         arg_count: i32,
         arg_types: &[TypeName],
     ) -> Option<TypeName> {
+        self.resolve_method_return_with_callsite(
+            receiver_internal,
+            method_name,
+            arg_count,
+            arg_types,
+            &[],
+            &[],
+            None,
+        )
+    }
+
+    pub fn resolve_method_return_with_callsite(
+        &self,
+        receiver_internal: &str,
+        method_name: &str,
+        arg_count: i32,
+        arg_types: &[TypeName],
+        arg_texts: &[String],
+        locals: &[LocalVar],
+        enclosing: Option<&Arc<str>>,
+    ) -> Option<TypeName> {
+        self.resolve_method_return_with_callsite_and_qualifier_resolver(
+            receiver_internal,
+            method_name,
+            arg_count,
+            arg_types,
+            arg_texts,
+            locals,
+            enclosing,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_method_return_with_callsite_and_qualifier_resolver(
+        &self,
+        receiver_internal: &str,
+        method_name: &str,
+        arg_count: i32,
+        arg_types: &[TypeName],
+        arg_texts: &[String],
+        locals: &[LocalVar],
+        enclosing: Option<&Arc<str>>,
+        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+    ) -> Option<TypeName> {
         tracing::debug!(
             receiver_internal,
             method_name,
             ?arg_types,
+            ?arg_texts,
             "resolve_method_return"
         );
         let (base_receiver, _receiver_type_args) = split_internal_name(receiver_internal);
@@ -196,14 +245,30 @@ impl<'idx> TypeResolver<'idx> {
                 .clone()
                 .unwrap_or_else(|| method.desc());
 
-            let ret_idx = sig.find(')')?;
-            let ret_jvm_str = &sig[ret_idx + 1..];
-            let (ret_jvm_type, _) = JvmType::parse(&sig[ret_idx + 1..])?;
+            let (param_jvm_types, ret_jvm_type) = parse_method_signature_types(&sig)?;
+            let mut resolved_ret = ret_jvm_type.clone();
+
+            let method_bindings = self.infer_method_type_bindings_shallow(
+                method_name,
+                &sig,
+                &param_jvm_types,
+                &ret_jvm_type,
+                arg_types,
+                arg_texts,
+                locals,
+                enclosing,
+                qualifier_resolver,
+            );
+            if !method_bindings.is_empty() {
+                resolved_ret = substitute_type_vars(&resolved_ret, &method_bindings);
+            }
+
+            let ret_jvm_str = resolved_ret.to_signature_string();
 
             if let Some(substituted) = substitute_type(
                 receiver_internal,
                 class.generic_signature.as_deref(),
-                ret_jvm_str,
+                &ret_jvm_str,
             ) {
                 if substituted.erased_internal() == "void" {
                     return None;
@@ -211,12 +276,247 @@ impl<'idx> TypeResolver<'idx> {
                 return Some(substituted);
             }
 
-            if let JvmType::Primitive('V') = ret_jvm_type {
+            if let JvmType::Primitive('V') = resolved_ret {
                 return None;
             }
-            return Some(ret_jvm_type.to_type_name());
+            return Some(resolved_ret.to_type_name());
         }
         None
+    }
+
+    fn infer_method_type_bindings_shallow(
+        &self,
+        method_name: &str,
+        method_signature: &str,
+        param_jvm_types: &[JvmType],
+        ret_jvm_type: &JvmType,
+        arg_types: &[TypeName],
+        arg_texts: &[String],
+        locals: &[LocalVar],
+        enclosing: Option<&Arc<str>>,
+        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+    ) -> HashMap<String, JvmType> {
+        let method_type_params = parse_method_type_parameters(method_signature);
+        if method_type_params.is_empty() {
+            return HashMap::new();
+        }
+
+        let mut return_type_vars = HashSet::new();
+        collect_type_vars(ret_jvm_type, &mut return_type_vars);
+        if return_type_vars.is_empty() {
+            return HashMap::new();
+        }
+
+        let mut bindings: HashMap<String, JvmType> = HashMap::new();
+        let mut conflicted = HashSet::new();
+
+        for (idx, param_ty) in param_jvm_types.iter().enumerate() {
+            let arg_ty = arg_types.get(idx);
+            if let JvmType::TypeVar(name) = param_ty
+                && return_type_vars.contains(name)
+            {
+                if let Some(arg_ty) = arg_ty
+                    && let Some(jvm) = type_name_to_jvm_type(arg_ty)
+                {
+                    bind_type_var(name, jvm, &mut bindings, &mut conflicted);
+                }
+                continue;
+            }
+
+            self.bind_return_type_var_from_functional_param(
+                method_name,
+                idx,
+                param_ty,
+                arg_texts.get(idx).map(|s| s.as_str()),
+                arg_ty,
+                locals,
+                enclosing,
+                qualifier_resolver,
+                &return_type_vars,
+                &mut bindings,
+                &mut conflicted,
+            );
+        }
+
+        for key in conflicted {
+            bindings.remove(&key);
+        }
+        bindings
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_return_type_var_from_functional_param(
+        &self,
+        _method_name: &str,
+        _arg_index: usize,
+        param_ty: &JvmType,
+        arg_text: Option<&str>,
+        arg_ty: Option<&TypeName>,
+        locals: &[LocalVar],
+        enclosing: Option<&Arc<str>>,
+        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        return_type_vars: &HashSet<String>,
+        bindings: &mut HashMap<String, JvmType>,
+        conflicted: &mut HashSet<String>,
+    ) {
+        let JvmType::Object(_, type_args) = param_ty else {
+            return;
+        };
+
+        // Prefer `? extends R` / covariant slot when present.
+        let covariant_ret_var = type_args.iter().find_map(|arg| match arg {
+            JvmType::WildcardBound('+', inner) => match inner.as_ref() {
+                JvmType::TypeVar(name) if return_type_vars.contains(name) => Some(name.clone()),
+                _ => None,
+            },
+            JvmType::TypeVar(name) if return_type_vars.contains(name) => Some(name.clone()),
+            _ => None,
+        });
+        let Some(ret_var) = covariant_ret_var else {
+            return;
+        };
+
+        let inferred = arg_ty
+            .and_then(type_name_to_jvm_type)
+            .or_else(|| {
+                arg_text.and_then(|txt| {
+                    self.infer_functional_arg_return_shallow(
+                        txt,
+                        locals,
+                        enclosing,
+                        qualifier_resolver,
+                    )
+                })
+            });
+        if let Some(jvm) = inferred {
+            bind_type_var(&ret_var, jvm, bindings, conflicted);
+        }
+    }
+
+    fn infer_functional_arg_return_shallow(
+        &self,
+        arg_text: &str,
+        locals: &[LocalVar],
+        enclosing: Option<&Arc<str>>,
+        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+    ) -> Option<JvmType> {
+        let text = arg_text.trim();
+        if text.is_empty() {
+            return None;
+        }
+
+        if let Some((qualifier, member, is_constructor)) = parse_method_reference_text(text) {
+            if is_constructor {
+                let owner = self.resolve_owner_from_text_with_context(qualifier, qualifier_resolver)?;
+                return Some(JvmType::Object(owner, vec![]));
+            }
+
+            if is_likely_type_qualifier(qualifier) {
+                let owner = self.resolve_owner_from_text_with_context(qualifier, qualifier_resolver)?;
+                let ret = self.resolve_method_reference_return_on_owner(&owner, member)?;
+                return Some(ret);
+            }
+
+            let owner_ty = self.resolve(qualifier, locals, enclosing)?;
+            let owner = if owner_ty.contains_slash() {
+                owner_ty.erased_internal().to_string()
+            } else {
+                self.resolve_owner_from_text(owner_ty.erased_internal())?
+            };
+            let ret = self.resolve_method_reference_return_on_owner(&owner, member)?;
+            return Some(ret);
+        }
+
+        if let Some(body) = parse_lambda_expression_body(text) {
+            let body_ty = self.resolve(body, locals, enclosing)?;
+            return type_name_to_jvm_type(&body_ty);
+        }
+
+        None
+    }
+
+    fn resolve_method_reference_return_on_owner(
+        &self,
+        owner_internal: &str,
+        member_name: &str,
+    ) -> Option<JvmType> {
+        let mut fallback: Option<JvmType> = None;
+        for class in self.view.mro(owner_internal) {
+            for method in class.methods.iter().filter(|m| m.name.as_ref() == member_name) {
+                let desc = method
+                    .generic_signature
+                    .clone()
+                    .unwrap_or_else(|| method.desc());
+                let (_, ret) = parse_method_signature_types(&desc)?;
+                if let JvmType::Primitive('V') = ret {
+                    continue;
+                }
+                if method.params.len() == 0 {
+                    return Some(ret);
+                }
+                if fallback.is_none() {
+                    fallback = Some(ret);
+                }
+            }
+        }
+        fallback
+    }
+
+    fn resolve_owner_from_text(&self, raw: &str) -> Option<String> {
+        let mut text = raw.trim();
+        if let Some(i) = text.find('<') {
+            text = &text[..i];
+        }
+        if text.is_empty() {
+            return None;
+        }
+        if text.contains('/') {
+            return self
+                .view
+                .get_class(text)
+                .map(|_| text.to_string());
+        }
+        if text.contains('.') {
+            let candidate = text.replace('.', "/");
+            return self
+                .view
+                .get_class(&candidate)
+                .map(|_| candidate);
+        }
+
+        let lang = format!("java/lang/{text}");
+        if self.view.get_class(&lang).is_some() {
+            return Some(lang);
+        }
+
+        let mut found: Option<String> = None;
+        for class in self.view.iter_all_classes() {
+            if class.name.as_ref() == text {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(class.internal_name.to_string());
+            }
+        }
+        found
+    }
+
+    fn resolve_owner_from_text_with_context(
+        &self,
+        raw: &str,
+        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+    ) -> Option<String> {
+        if let Some(resolve_qualifier) = qualifier_resolver
+            && let Some(ty) = resolve_qualifier(raw)
+        {
+            if ty.contains_slash() {
+                return Some(ty.erased_internal().to_string());
+            }
+            if let Some(owner) = self.resolve_owner_from_text(ty.erased_internal()) {
+                return Some(owner);
+            }
+        }
+        self.resolve_owner_from_text(raw)
     }
 
     pub fn select_overload<'a>(
@@ -299,11 +599,14 @@ impl<'idx> TypeResolver<'idx> {
                 if seg.arg_count.is_some() {
                     // Bare method call: receiver is the enclosing class
                     let recv = enclosing_internal_name?;
-                    current_type = self.resolve_method_return(
+                    current_type = self.resolve_method_return_with_callsite(
                         recv.as_ref(),
                         &seg.name,
                         seg.arg_count.unwrap_or(-1),
                         &seg.arg_types,
+                        &seg.arg_texts,
+                        locals,
+                        enclosing_internal_name,
                     );
                 } else {
                     current_type = self.resolve(&seg.name, locals, enclosing_internal_name);
@@ -329,11 +632,14 @@ impl<'idx> TypeResolver<'idx> {
 
                 if seg.arg_count.is_some() {
                     let receiver_internal = receiver.to_internal_with_generics();
-                    current_type = self.resolve_method_return(
+                    current_type = self.resolve_method_return_with_callsite(
                         &receiver_internal,
                         actual_name,
                         seg.arg_count.unwrap_or(-1),
                         &seg.arg_types,
+                        &seg.arg_texts,
+                        locals,
+                        enclosing_internal_name,
                     );
                 } else {
                     let mut found_field: Option<TypeName> = None;
@@ -756,6 +1062,78 @@ pub fn java_source_type_to_jvm_generic(
     result
 }
 
+fn collect_type_vars(ty: &JvmType, out: &mut HashSet<String>) {
+    match ty {
+        JvmType::TypeVar(name) => {
+            out.insert(name.clone());
+        }
+        JvmType::Object(_, args) => {
+            for arg in args {
+                collect_type_vars(arg, out);
+            }
+        }
+        JvmType::Array(inner) | JvmType::WildcardBound(_, inner) => {
+            collect_type_vars(inner, out);
+        }
+        JvmType::Primitive(_) | JvmType::Wildcard => {}
+    }
+}
+
+fn bind_type_var(
+    name: &str,
+    candidate: JvmType,
+    bindings: &mut HashMap<String, JvmType>,
+    conflicted: &mut HashSet<String>,
+) {
+    if conflicted.contains(name) {
+        return;
+    }
+    if let Some(existing) = bindings.get(name) {
+        if existing != &candidate {
+            conflicted.insert(name.to_string());
+        }
+        return;
+    }
+    bindings.insert(name.to_string(), candidate);
+}
+
+fn type_name_to_jvm_type(ty: &TypeName) -> Option<JvmType> {
+    let sig = ty.to_jvm_signature();
+    let (parsed, rest) = JvmType::parse(&sig)?;
+    if rest.is_empty() { Some(parsed) } else { None }
+}
+
+fn parse_method_reference_text(text: &str) -> Option<(&str, &str, bool)> {
+    let idx = text.find("::")?;
+    let qualifier = text[..idx].trim();
+    let member = text[idx + 2..].trim();
+    if qualifier.is_empty() || member.is_empty() {
+        return None;
+    }
+    let is_constructor = member == "new";
+    Some((qualifier, member, is_constructor))
+}
+
+fn parse_lambda_expression_body(text: &str) -> Option<&str> {
+    let idx = text.find("->")?;
+    let body = text[idx + 2..].trim();
+    if body.is_empty() || body.starts_with('{') {
+        return None;
+    }
+    Some(body)
+}
+
+fn is_likely_type_qualifier(qualifier: &str) -> bool {
+    let q = qualifier.trim();
+    if q.is_empty() {
+        return false;
+    }
+    if q.contains('.') || q.contains('/') {
+        return true;
+    }
+    q.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
 /// Resolver that combines global index data with file-local context.
 /// Follows strict JLS visibility rules and avoids heuristic guessing.
 pub struct ContextualResolver<'a> {
@@ -860,6 +1238,206 @@ mod tests {
                 init_expr: None,
             },
         ];
+        (idx.view(root_scope()), locals)
+    }
+
+    fn make_functional_binding_fixture() -> (IndexView, Vec<LocalVar>) {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Box"),
+                internal_name: Arc::from("Box"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("map"),
+                        params: MethodParams::from_method_descriptor(
+                            "(Ljava/util/function/Function;)LBox;",
+                        ),
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        annotations: vec![],
+                        generic_signature: Some(Arc::from(
+                            "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)LBox<TR;>;",
+                        )),
+                        return_type: Some(Arc::from("LBox;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("get"),
+                        params: MethodParams::empty(),
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        annotations: vec![],
+                        generic_signature: Some(Arc::from("()TT;")),
+                        return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("List"),
+                internal_name: Arc::from("List"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("size"),
+                    params: MethodParams::empty(),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: None,
+                    return_type: Some(Arc::from("I")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("ArrayList"),
+                internal_name: Arc::from("ArrayList"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let box_t = TypeName::with_args(
+            "Box",
+            vec![TypeName::with_args(
+                "List",
+                vec![TypeName::new("java/lang/String")],
+            )],
+        );
+        let locals = vec![LocalVar {
+            name: Arc::from("box"),
+            type_internal: box_t,
+            init_expr: None,
+        }];
+        (idx.view(root_scope()), locals)
+    }
+
+    fn make_functional_binding_fixture_with_ambiguous_list() -> (IndexView, Vec<LocalVar>) {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Box"),
+                internal_name: Arc::from("Box"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("map"),
+                        params: MethodParams::from_method_descriptor(
+                            "(Ljava/util/function/Function;)LBox;",
+                        ),
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        annotations: vec![],
+                        generic_signature: Some(Arc::from(
+                            "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)LBox<TR;>;",
+                        )),
+                        return_type: Some(Arc::from("LBox;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("get"),
+                        params: MethodParams::empty(),
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        annotations: vec![],
+                        generic_signature: Some(Arc::from("()TT;")),
+                        return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util")),
+                name: Arc::from("List"),
+                internal_name: Arc::from("java/util/List"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("size"),
+                    params: MethodParams::empty(),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: None,
+                    return_type: Some(Arc::from("I")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/awt")),
+                name: Arc::from("List"),
+                internal_name: Arc::from("java/awt/List"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("size"),
+                    params: MethodParams::empty(),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: None,
+                    return_type: Some(Arc::from("I")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let box_t = TypeName::with_args(
+            "Box",
+            vec![TypeName::with_args(
+                "java/util/List",
+                vec![TypeName::new("java/lang/String")],
+            )],
+        );
+        let locals = vec![LocalVar {
+            name: Arc::from("box"),
+            type_internal: box_t,
+            init_expr: None,
+        }];
         (idx.view(root_scope()), locals)
     }
 
@@ -1094,6 +1672,228 @@ mod tests {
             Some("RandomClass"),
             "int arg should select RandomClass overload"
         );
+    }
+
+    #[test]
+    fn test_functional_method_reference_binds_generic_return_type() {
+        let (view, locals) = make_functional_binding_fixture();
+        let resolver = TypeResolver::new(&view);
+        let chain = parse_chain_from_expr("box.map(List::size).get()");
+
+        let result = resolver.resolve_chain(&chain, &locals, None);
+        assert_eq!(
+            result.as_ref().map(|t| t.erased_internal()),
+            Some("int"),
+            "List::size should bind map<R> to int"
+        );
+    }
+
+    #[test]
+    fn test_functional_constructor_reference_binds_generic_return_type() {
+        let (view, locals) = make_functional_binding_fixture();
+        let resolver = TypeResolver::new(&view);
+        let chain = parse_chain_from_expr("box.map(ArrayList::new).get()");
+
+        let result = resolver.resolve_chain(&chain, &locals, None);
+        assert_eq!(
+            result.as_ref().map(|t| t.erased_internal()),
+            Some("ArrayList"),
+            "Type::new should bind map<R> to constructed owner type"
+        );
+    }
+
+    #[test]
+    fn test_functional_lambda_inference_stays_unresolved_when_not_trivial() {
+        let (view, locals) = make_functional_binding_fixture();
+        let resolver = TypeResolver::new(&view);
+        let chain = parse_chain_from_expr("box.map(x -> x + 1).get()");
+
+        let result = resolver.resolve_chain(&chain, &locals, None);
+        assert_eq!(
+            result.as_ref().map(|t| t.erased_internal()),
+            Some("R"),
+            "non-trivial lambda body should stay conservatively unresolved"
+        );
+    }
+
+    #[test]
+    fn test_source_derived_map_signature_keeps_bindable_r_for_chain_resolution() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use crate::language::java::class_parser::parse_java_source;
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let idx = WorkspaceIndex::new();
+        let scope = root_scope();
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            public class Demo<T> {
+                public <R> Demo<R> map(Function<? super T, ? extends R> fn) { return null; }
+                public T get() { return null; }
+            }
+        "#};
+        let origin = ClassOrigin::SourceFile(Arc::from("file:///tmp/provenance/Demo.java"));
+        let classes = parse_java_source(src, origin.clone(), None);
+        idx.update_source(scope, origin, classes);
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("List"),
+            internal_name: Arc::from("List"),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("size"),
+                params: MethodParams::empty(),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                annotations: vec![],
+                generic_signature: None,
+                return_type: Some(Arc::from("I")),
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let view = idx.view(scope);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("box"),
+            type_internal: TypeName::with_args(
+                "Demo",
+                vec![TypeName::with_args(
+                    "List",
+                    vec![TypeName::new("java/lang/String")],
+                )],
+            ),
+            init_expr: None,
+        }];
+        let chain = parse_chain_from_expr("box.map(List::size).get()");
+        let result = resolver.resolve_chain(&chain, &locals, None);
+
+        assert_eq!(
+            result.as_ref().map(|t| t.erased_internal()),
+            Some("int"),
+            "source-derived generic_signature for map should preserve bindable R"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_provenance_map_list_size_with_ambiguous_simple_list_owner() {
+        let (view, locals) = make_functional_binding_fixture_with_ambiguous_list();
+        let resolver = TypeResolver::new(&view);
+        let chain = parse_chain_from_expr("box.map(List::size).get()");
+        let map_seg = chain.get(1).expect("map segment");
+
+        let receiver = resolver.resolve("box", &locals, None).expect("box receiver");
+        let receiver_internal = receiver.to_internal_with_generics();
+        let (methods, _) = view.collect_inherited_members(receiver.erased_internal());
+        let map_candidates: Vec<_> = methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "map")
+            .map(|m| m.as_ref())
+            .collect();
+        let selected = resolver
+            .select_overload(&map_candidates, map_seg.arg_count.unwrap_or(-1), &[])
+            .expect("selected map overload");
+        let selected_sig = selected
+            .generic_signature
+            .clone()
+            .unwrap_or_else(|| selected.desc());
+        let (param_jvm, ret_jvm) =
+            parse_method_signature_types(&selected_sig).expect("parsed map signature");
+        let mut return_type_vars = std::collections::HashSet::new();
+        collect_type_vars(&ret_jvm, &mut return_type_vars);
+        let mut return_type_vars_sorted: Vec<_> = return_type_vars.iter().cloned().collect();
+        return_type_vars_sorted.sort();
+
+        let inferred_direct =
+            resolver.infer_functional_arg_return_shallow("List::size", &locals, None, None);
+        let inferred_bindings = resolver.infer_method_type_bindings_shallow(
+            "map",
+            &selected_sig,
+            &param_jvm,
+            &ret_jvm,
+            &[],
+            &map_seg.arg_texts,
+            &locals,
+            None,
+            None,
+        );
+        let mut inferred_bindings_sorted: Vec<_> = inferred_bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_signature_string()))
+            .collect();
+        inferred_bindings_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let map_result = resolver.resolve_method_return_with_callsite(
+            &receiver_internal,
+            "map",
+            map_seg.arg_count.unwrap_or(-1),
+            &[],
+            &map_seg.arg_texts,
+            &locals,
+            None,
+        );
+        let get_receiver = map_result
+            .as_ref()
+            .map(TypeName::to_internal_with_generics)
+            .unwrap_or_else(|| "<none>".to_string());
+        let get_result = map_result.as_ref().and_then(|r| {
+            let get_receiver_internal = r.to_internal_with_generics();
+            resolver.resolve_method_return_with_callsite(
+                &get_receiver_internal,
+                "get",
+                0,
+                &[],
+                &[],
+                &locals,
+                None,
+            )
+        });
+        let chain_result = resolver.resolve_chain(&chain, &locals, None);
+
+        let mut out = String::new();
+        out.push_str("method_reference_arg:\nList::size\n\n");
+        out.push_str(&format!(
+            "selected_map:\nname={}\ndesc={}\ngeneric_signature={:?}\nreturn_type={:?}\n\n",
+            selected.name,
+            selected.desc(),
+            selected.generic_signature,
+            selected.return_type,
+        ));
+        out.push_str(&format!(
+            "parsed_signature:\nparams={:?}\nreturn={}\nreturn_type_vars={:?}\n\n",
+            param_jvm
+                .iter()
+                .map(JvmType::to_signature_string)
+                .collect::<Vec<_>>(),
+            ret_jvm.to_signature_string(),
+            return_type_vars_sorted
+        ));
+        out.push_str(&format!(
+            "method_ref_owner_resolution:\nresolve_owner_from_text(\"List\")={:?}\nresolve_owner_from_text(\"java/util/List\")={:?}\nresolve_owner_from_text(\"java/awt/List\")={:?}\n\n",
+            resolver.resolve_owner_from_text("List"),
+            resolver.resolve_owner_from_text("java/util/List"),
+            resolver.resolve_owner_from_text("java/awt/List"),
+        ));
+        out.push_str(&format!(
+            "inference_bridge:\ninfer_functional_arg_return_shallow={:?}\ninferred_bindings={:?}\n\n",
+            inferred_direct.map(|t| t.to_signature_string()),
+            inferred_bindings_sorted
+        ));
+        out.push_str(&format!(
+            "chain_propagation:\nreceiver_before_map={}\nmap_result={:?}\nget_receiver={}\nget_result={:?}\nfinal_chain_result={:?}\n",
+            receiver_internal,
+            map_result.as_ref().map(TypeName::to_internal_with_generics),
+            get_receiver,
+            get_result.as_ref().map(TypeName::to_internal_with_generics),
+            chain_result.as_ref().map(TypeName::to_internal_with_generics),
+        ));
+
+        insta::assert_snapshot!("functional_binding_provenance_map_list_size_ambiguous_list_owner", out);
     }
 
     #[test]

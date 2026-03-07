@@ -267,7 +267,16 @@ fn canonicalize_receiver_semantic(
             let ty_str = ty.erased_internal_with_arrays();
             let r = type_ctx.resolve_type_name_strict(&ty_str);
             tracing::debug!(?r, ?ty, "enrich_context: final match -> resolve strict");
-            r
+            match r {
+                Some(mut canonical) => {
+                    if !ty.args.is_empty() {
+                        canonical.args = ty.args;
+                    }
+                    canonical.array_dims = ty.array_dims;
+                    Some(canonical)
+                }
+                None => None,
+            }
         }
     }
 }
@@ -428,6 +437,7 @@ fn evaluate_chain(
     view: &IndexView,
 ) -> Option<TypeName> {
     let mut current: Option<TypeName> = None;
+    let resolve_qualifier = |q: &str| type_ctx.resolve_type_name_strict(q);
     for (i, seg) in chain.iter().enumerate() {
         // Split `name[index]` into base segment and trailing index dimensions.
         let bracket_idx = seg.name.find('[');
@@ -451,11 +461,15 @@ fn evaluate_chain(
                 } else {
                     &[]
                 };
-                current = resolver.resolve_method_return(
+                current = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                     recv_internal.as_ref(),
                     base_name,
                     seg.arg_count.unwrap_or(-1),
                     arg_types_ref,
+                    &seg.arg_texts,
+                    locals,
+                    enclosing_internal,
+                    Some(&resolve_qualifier),
                 );
             } else {
                 current = resolver.resolve(base_name, locals, enclosing_internal);
@@ -504,11 +518,15 @@ fn evaluate_chain(
                         &[]
                     };
                     let receiver_internal = recv_full.to_internal_with_generics();
-                    current = resolver.resolve_method_return(
+                    current = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                         &receiver_internal,
                         base_name,
                         seg.arg_count.unwrap_or(-1),
                         arg_types_ref,
+                        &seg.arg_texts,
+                        locals,
+                        enclosing_internal,
+                        Some(&resolve_qualifier),
                     );
                 } else {
                     let (methods, fields) =
@@ -1417,6 +1435,166 @@ mod tests {
         idx
     }
 
+    fn make_index_with_box_map_get_list_size() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            IndexScope {
+                module: ModuleId::ROOT,
+            },
+            vec![
+                ClassMetadata {
+                    package: None,
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![
+                        MethodSummary {
+                            name: Arc::from("map"),
+                            params: MethodParams::from([("Ljava/util/function/Function;", "fn")]),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: Some(Arc::from(
+                                "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)LBox<TR;>;",
+                            )),
+                            return_type: Some(Arc::from("LBox;")),
+                        },
+                        MethodSummary {
+                            name: Arc::from("get"),
+                            params: MethodParams::empty(),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: Some(Arc::from("()TT;")),
+                            return_type: Some(Arc::from("Ljava/lang/Object;")),
+                        },
+                    ],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: None,
+                    name: Arc::from("List"),
+                    internal_name: Arc::from("List"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("size"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("I")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        idx
+    }
+
+    fn make_index_with_box_map_get_ambiguous_list_size() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            IndexScope {
+                module: ModuleId::ROOT,
+            },
+            vec![
+                ClassMetadata {
+                    package: None,
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![
+                        MethodSummary {
+                            name: Arc::from("map"),
+                            params: MethodParams::from([("Ljava/util/function/Function;", "fn")]),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: Some(Arc::from(
+                                "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)LBox<TR;>;",
+                            )),
+                            return_type: Some(Arc::from("LBox;")),
+                        },
+                        MethodSummary {
+                            name: Arc::from("get"),
+                            params: MethodParams::empty(),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: Some(Arc::from("()TT;")),
+                            return_type: Some(Arc::from("Ljava/lang/Object;")),
+                        },
+                    ],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/util")),
+                    name: Arc::from("List"),
+                    internal_name: Arc::from("java/util/List"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("size"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("I")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/awt")),
+                    name: Arc::from("List"),
+                    internal_name: Arc::from("java/awt/List"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("size"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("I")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        idx
+    }
+
     #[test]
     fn test_enrich_context_resolves_simple_name_via_import() {
         let idx = make_index_with_random_class();
@@ -1566,6 +1744,164 @@ mod tests {
                 Some("java/lang/Object")
             );
             assert_eq!(receiver_type.as_deref(), Some("org/cubewhy/RandomClass"));
+        }
+    }
+
+    #[test]
+    fn test_canonicalize_receiver_semantic_preserves_existing_type_args() {
+        let idx = make_index_with_random_class();
+        let view = idx.view(IndexScope {
+            module: ModuleId::ROOT,
+        });
+        let name_table = view.build_name_table();
+        let type_ctx = SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy/a")),
+            vec!["org.cubewhy.*".into()],
+            Some(name_table),
+        );
+
+        let resolved = Some(TypeName::with_args("RandomClass", vec![TypeName::new("R")]));
+        let canonical = super::canonicalize_receiver_semantic(resolved, &type_ctx)
+            .expect("canonicalized type");
+
+        assert_eq!(canonical.erased_internal(), "org/cubewhy/RandomClass");
+        assert_eq!(canonical.args.len(), 1);
+        assert_eq!(canonical.args[0].erased_internal(), "R");
+    }
+
+    #[test]
+    fn test_canonicalize_receiver_semantic_keeps_failure_behavior() {
+        let idx = make_index_with_random_class();
+        let view = idx.view(IndexScope {
+            module: ModuleId::ROOT,
+        });
+        let name_table = view.build_name_table();
+        let type_ctx = SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy/a")),
+            vec!["org.cubewhy.*".into()],
+            Some(name_table),
+        );
+
+        let resolved = Some(TypeName::with_args(
+            "DefinitelyUnknownType",
+            vec![TypeName::new("R")],
+        ));
+        let canonical = super::canonicalize_receiver_semantic(resolved, &type_ctx);
+        assert!(canonical.is_none());
+    }
+
+    #[test]
+    fn test_enrich_context_keeps_map_receiver_semantic_args_for_list_size() {
+        let idx = make_index_with_box_map_get_list_size();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(None, vec![], Some(name_table)));
+        let mut ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "ge".to_string(),
+                receiver_expr: "box.map(List::size)".to_string(),
+                arguments: Some("()".to_string()),
+            },
+            "ge",
+            vec![LocalVar {
+                name: Arc::from("box"),
+                type_internal: TypeName::with_args(
+                    "Box",
+                    vec![TypeName::with_args(
+                        "List",
+                        vec![TypeName::new("java/lang/String")],
+                    )],
+                ),
+                init_expr: None,
+            }],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            None,
+            vec![],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        if let CursorLocation::MemberAccess {
+            receiver_semantic_type,
+            receiver_type,
+            ..
+        } = &ctx.location
+        {
+            let sem = receiver_semantic_type
+                .as_ref()
+                .expect("semantic receiver should be populated");
+            assert_eq!(sem.erased_internal(), "Box");
+            assert!(
+                !sem.args.is_empty(),
+                "map(List::size) receiver semantic args should be preserved"
+            );
+            assert_eq!(receiver_type.as_deref(), Some("Box"));
+        } else {
+            panic!("expected member access location");
+        }
+    }
+
+    #[test]
+    fn test_enrich_context_resolves_list_method_ref_via_import_context_for_binding() {
+        let idx = make_index_with_box_map_get_ambiguous_list_size();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(None, vec!["java.util.*".into()], Some(name_table)));
+        let mut ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "ge".to_string(),
+                receiver_expr: "box.map(List::size)".to_string(),
+                arguments: Some("()".to_string()),
+            },
+            "ge",
+            vec![LocalVar {
+                name: Arc::from("box"),
+                type_internal: TypeName::with_args(
+                    "Box",
+                    vec![TypeName::with_args(
+                        "java/util/List",
+                        vec![TypeName::new("java/lang/String")],
+                    )],
+                ),
+                init_expr: None,
+            }],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            None,
+            vec!["java.util.*".into()],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        if let CursorLocation::MemberAccess {
+            receiver_semantic_type, ..
+        } = &ctx.location
+        {
+            let sem = receiver_semantic_type
+                .as_ref()
+                .expect("semantic receiver should be populated");
+            assert_eq!(sem.erased_internal(), "Box");
+            assert_eq!(sem.args.len(), 1);
+            assert_eq!(
+                sem.args[0].erased_internal(),
+                "int",
+                "List::size should bind map<R> return to int via import-aware qualifier resolution"
+            );
+        } else {
+            panic!("expected member access location");
         }
     }
 

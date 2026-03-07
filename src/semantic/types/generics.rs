@@ -1,4 +1,5 @@
 use crate::semantic::types::type_name::TypeName;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JvmType {
@@ -250,6 +251,69 @@ pub fn parse_class_type_parameters(signature: &str) -> Vec<String> {
         }
     }
     params
+}
+
+/// Extract declared method type parameter names from a JVM method signature.
+/// Example: `<R:Ljava/lang/Object;>(...)TR;` -> ["R"]
+pub fn parse_method_type_parameters(signature: &str) -> Vec<String> {
+    parse_class_type_parameters(signature)
+}
+
+/// Parse JVM method signature/descriptor into parameter and return JVM types.
+/// Supports optional leading method type parameters.
+pub fn parse_method_signature_types(signature: &str) -> Option<(Vec<JvmType>, JvmType)> {
+    let mut s = signature;
+    if s.starts_with('<') {
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, c) in s.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end?;
+        s = &s[end + 1..];
+    }
+
+    if !s.starts_with('(') {
+        return None;
+    }
+    let close = s.find(')')?;
+    let mut params_raw = &s[1..close];
+    let mut params = Vec::new();
+    while !params_raw.is_empty() {
+        let (ty, rest) = JvmType::parse(params_raw)?;
+        params.push(ty);
+        params_raw = rest;
+    }
+    let (ret, _) = JvmType::parse(&s[close + 1..])?;
+    Some((params, ret))
+}
+
+/// Substitute type variables in a JVM type using explicit bindings.
+pub fn substitute_type_vars(ty: &JvmType, bindings: &HashMap<String, JvmType>) -> JvmType {
+    match ty {
+        JvmType::TypeVar(name) => bindings.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        JvmType::Object(name, args) => JvmType::Object(
+            name.clone(),
+            args.iter()
+                .map(|a| substitute_type_vars(a, bindings))
+                .collect(),
+        ),
+        JvmType::Array(inner) => JvmType::Array(Box::new(substitute_type_vars(inner, bindings))),
+        JvmType::WildcardBound(c, inner) => {
+            JvmType::WildcardBound(*c, Box::new(substitute_type_vars(inner, bindings)))
+        }
+        _ => ty.clone(),
+    }
 }
 
 /// Perform type substitution. If receiver_internal contains generics (such as List<LString;>), then attempt to replace target_jvm_type (such as TE;) with String.

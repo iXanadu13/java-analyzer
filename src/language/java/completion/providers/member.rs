@@ -1221,4 +1221,65 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn test_member_provider_uses_erased_owner_when_semantic_receiver_has_args() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Box"),
+                internal_name: Arc::from("Box"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![make_method("get", "()Ljava/lang/Object;", ACC_PUBLIC, false)],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Legacy"),
+                internal_name: Arc::from("Legacy"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![make_method("legacyOnly", "()V", ACC_PUBLIC, false)],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: Some(TypeName::with_args("Box", vec![TypeName::new("R")])),
+                receiver_type: Some(Arc::from("Legacy")),
+                member_prefix: "ge".to_string(),
+                receiver_expr: "x".to_string(),
+                arguments: None,
+            },
+            "ge",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "get"),
+            "erased owner lookup should still target Box and find get()"
+        );
+        assert!(
+            !results.iter().any(|c| c.label.as_ref() == "legacyOnly"),
+            "legacy receiver_type should not override semantic owner"
+        );
+    }
 }

@@ -1,0 +1,25 @@
+---
+source: src/language/java/class_parser.rs
+expression: out
+---
+method_summary:
+desc=(LFunction;LFunction;)LMap;
+generic_signature=Some("<K:Ljava/lang/Object;V:Ljava/lang/Object;>(LFunction<-TR;+TK;>;LFunction<-TR;+TV;>;)LMap<TK;LList<TV;>;>;")
+return_type=Some("LMap;")
+param_descriptors=["LFunction;", "LFunction;"]
+
+render_inputs:
+receiver_internal=org/example/Box<Ljava/util/List<Ljava/lang/String;>;>
+class_generic_signature=Some("<R:Ljava/lang/Object;>Ljava/lang/Object;")
+sig_to_use=<K:Ljava/lang/Object;V:Ljava/lang/Object;>(LFunction<-TR;+TK;>;LFunction<-TR;+TV;>;)LMap<TK;LList<TV;>;>;
+base_return=LMap;
+ret_jvm=LMap<TK;LList<TV;>;>;
+substituted_return=TMap;
+rendered_return=None
+
+render_param_tokens:
+#0: raw=LFunction<-TR;+TK;>; | substituted=TFunction; | rendered=None
+#1: raw=LFunction<-TR;+TV;>; | substituted=TFunction; | rendered=None
+
+final_detail:
+Box — Map groupBy(TFunction; keyFn, TFunction; valueFn)
