@@ -10,9 +10,13 @@ import {
   normalizeOptionalPath,
   type ExtensionSettings,
 } from "./config";
+import { resolveEffectiveDecompilerPath } from "./decompilerPath";
 import { resolveServerOptions } from "./serverPath";
 
-function createClientOptions(settings: ExtensionSettings): LanguageClientOptions {
+function createClientOptions(
+  context: vscode.ExtensionContext,
+  settings: ExtensionSettings,
+): LanguageClientOptions {
   return {
     documentSelector: [
       { scheme: "file", language: "java" },
@@ -23,7 +27,7 @@ function createClientOptions(settings: ExtensionSettings): LanguageClientOptions
     },
     initializationOptions: {
       jdkPath: normalizeOptionalPath(settings.jdkPath),
-      decompilerPath: normalizeOptionalPath(settings.decompilerPath),
+      decompilerPath: resolveEffectiveDecompilerPath(context, settings),
       decompilerBackend: settings.decompilerBackend,
     },
   };
@@ -39,7 +43,7 @@ export class LanguageClientManager {
       EXTENSION_ID,
       EXTENSION_ID,
       resolveServerOptions(this.context, settings),
-      createClientOptions(settings),
+      createClientOptions(this.context, settings),
     );
 
     await this.client.start();

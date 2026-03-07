@@ -15,7 +15,8 @@
     "onLanguage:java",
     "onLanguage:kotlin",
     "onCommand:java-analyzer.setJdkPath",
-    "onCommand:java-analyzer.setDecompilerPath",
+    "onCommand:java-analyzer.setVineflowerPath",
+    "onCommand:java-analyzer.setCfrPath",
     "onCommand:java-analyzer.selectDecompilerBackend",
     "onCommand:java-analyzer.setServerPath"
   ],
@@ -26,8 +27,12 @@
         "title": "Java Analyzer: Set JDK Path"
       },
       {
-        "command": "java-analyzer.setDecompilerPath",
-        "title": "Java Analyzer: Set Decompiler Path"
+        "command": "java-analyzer.setVineflowerPath",
+        "title": "Java Analyzer: Set Vineflower Path"
+      },
+      {
+        "command": "java-analyzer.setCfrPath",
+        "title": "Java Analyzer: Set CFR Path"
       },
       {
         "command": "java-analyzer.selectDecompilerBackend",
@@ -46,11 +51,6 @@
           "default": "",
           "description": "Path to the JDK home directory used by the Java analyzer. If empty, the backend falls back to `java` on PATH."
         },
-        "java-analyzer.decompilerPath": {
-          "type": "string",
-          "default": "",
-          "description": "Optional path to the decompiler executable or jar used by the analyzer."
-        },
         "java-analyzer.decompilerBackend": {
           "type": "string",
           "default": "vineflower",
@@ -60,6 +60,16 @@
             "Use the CFR decompiler backend."
           ],
           "description": "Select the decompiler backend."
+        },
+        "java-analyzer.vineflowerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom path to the Vineflower jar. If empty, Java Analyzer uses bundled Vineflower."
+        },
+        "java-analyzer.cfrPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom path to the CFR jar. If empty, Java Analyzer uses bundled CFR."
         },
         "java-analyzer.serverPath": {
           "type": "string",
@@ -76,7 +86,8 @@
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-    "package": "pnpm run check-types && pnpm run lint && node esbuild.js --production",
+    "prepare:decompilers": "node scripts/prepare-decompilers.mjs",
+    "package": "pnpm run check-types && pnpm run lint && node esbuild.js --production && pnpm run prepare:decompilers",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",

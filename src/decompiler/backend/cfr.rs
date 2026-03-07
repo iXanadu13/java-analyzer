@@ -28,8 +28,6 @@ impl Decompiler for CfrDecompiler {
             .arg("-jar")
             .arg(decompiler_jar)
             .arg(&input_class)
-            // .arg("--comments")
-            // .arg("false")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?

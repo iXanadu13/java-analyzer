@@ -9,7 +9,8 @@ import {
 } from "./config";
 
 const COMMAND_SET_JDK_PATH = `${CONFIG_NAMESPACE}.setJdkPath`;
-const COMMAND_SET_DECOMPILER_PATH = `${CONFIG_NAMESPACE}.setDecompilerPath`;
+const COMMAND_SET_VINEFLOWER_PATH = `${CONFIG_NAMESPACE}.setVineflowerPath`;
+const COMMAND_SET_CFR_PATH = `${CONFIG_NAMESPACE}.setCfrPath`;
 const COMMAND_SELECT_DECOMPILER_BACKEND = `${CONFIG_NAMESPACE}.selectDecompilerBackend`;
 const COMMAND_SET_SERVER_PATH = `${CONFIG_NAMESPACE}.setServerPath`;
 
@@ -25,7 +26,8 @@ interface CommandDependencies {
 export function registerCommands(deps: CommandDependencies): vscode.Disposable[] {
   return [
     vscode.commands.registerCommand(COMMAND_SET_JDK_PATH, () => setJdkPath(deps)),
-    vscode.commands.registerCommand(COMMAND_SET_DECOMPILER_PATH, () => setDecompilerPath(deps)),
+    vscode.commands.registerCommand(COMMAND_SET_VINEFLOWER_PATH, () => setVineflowerPath(deps)),
+    vscode.commands.registerCommand(COMMAND_SET_CFR_PATH, () => setCfrPath(deps)),
     vscode.commands.registerCommand(
       COMMAND_SELECT_DECOMPILER_BACKEND,
       () => selectDecompilerBackend(deps),
@@ -109,15 +111,26 @@ async function setJdkPath(deps: CommandDependencies): Promise<void> {
   await deps.updateConfigurationValue(EXTENSION_CONFIG_KEYS.jdkPath, selectedPath);
 }
 
-async function setDecompilerPath(deps: CommandDependencies): Promise<void> {
-  const currentPath = deps.getSettings().decompilerPath;
-  const selectedPath = await choosePath("Set Decompiler Path", currentPath, true, false);
+async function setVineflowerPath(deps: CommandDependencies): Promise<void> {
+  const currentPath = deps.getSettings().vineflowerPath;
+  const selectedPath = await choosePath("Set Vineflower Path", currentPath, true, false);
 
   if (selectedPath === undefined) {
     return;
   }
 
-  await deps.updateConfigurationValue(EXTENSION_CONFIG_KEYS.decompilerPath, selectedPath);
+  await deps.updateConfigurationValue(EXTENSION_CONFIG_KEYS.vineflowerPath, selectedPath);
+}
+
+async function setCfrPath(deps: CommandDependencies): Promise<void> {
+  const currentPath = deps.getSettings().cfrPath;
+  const selectedPath = await choosePath("Set CFR Path", currentPath, true, false);
+
+  if (selectedPath === undefined) {
+    return;
+  }
+
+  await deps.updateConfigurationValue(EXTENSION_CONFIG_KEYS.cfrPath, selectedPath);
 }
 
 async function setServerPath(deps: CommandDependencies): Promise<void> {

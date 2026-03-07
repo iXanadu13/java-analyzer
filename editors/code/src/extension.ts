@@ -5,12 +5,14 @@ import { registerCommands } from "./commands";
 import {
   didRelevantConfigChange,
   getExtensionSettings,
+  migrateLegacyDecompilerPathIfNeeded,
   updateConfigurationValue,
 } from "./config";
 
 let clientManager: LanguageClientManager | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
+  await migrateLegacyDecompilerPathIfNeeded();
   clientManager = new LanguageClientManager(context);
 
   context.subscriptions.push(
