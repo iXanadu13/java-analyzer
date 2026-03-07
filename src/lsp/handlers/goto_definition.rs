@@ -17,7 +17,6 @@ pub async fn handle_goto_definition(
     let uri = &params.text_document_position_params.text_document.uri;
     let pos = params.text_document_position_params.position;
 
-    // 读 language_id + 当前行 token end（需要 text）
     let (lang_id, full_end) = backend.workspace.documents.with_doc(uri, |doc| {
         let full_end = token_end_character(&doc.text, pos.line, pos.character);
         Some((doc.language_id.clone(), full_end))
