@@ -10,6 +10,7 @@ export const EXTENSION_CONFIG_KEYS = {
   cfrPath: "cfrPath",
   legacyDecompilerPath: "decompilerPath",
   serverPath: "serverPath",
+  logLevel: "logLevel",
 } as const;
 
 const RELEVANT_CONFIGURATION_PATHS = [
@@ -18,6 +19,7 @@ const RELEVANT_CONFIGURATION_PATHS = [
   EXTENSION_CONFIG_KEYS.vineflowerPath,
   EXTENSION_CONFIG_KEYS.cfrPath,
   EXTENSION_CONFIG_KEYS.serverPath,
+  EXTENSION_CONFIG_KEYS.logLevel,
 ].map((key) => `${CONFIG_NAMESPACE}.${key}`);
 
 export type ExtensionConfigKey =
@@ -31,6 +33,7 @@ export interface ExtensionSettings {
   vineflowerPath: string;
   cfrPath: string;
   serverPath: string;
+  logLevel: string;
 }
 
 export function getExtensionSettings(): ExtensionSettings {
@@ -43,6 +46,7 @@ export function getExtensionSettings(): ExtensionSettings {
     vineflowerPath: config.get<string>(EXTENSION_CONFIG_KEYS.vineflowerPath, "").trim(),
     cfrPath: config.get<string>(EXTENSION_CONFIG_KEYS.cfrPath, "").trim(),
     serverPath: config.get<string>(EXTENSION_CONFIG_KEYS.serverPath, "").trim(),
+    logLevel: config.get<string>(EXTENSION_CONFIG_KEYS.logLevel, "info").trim() || "info",
   };
 }
 

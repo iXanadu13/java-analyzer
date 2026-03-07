@@ -56,12 +56,32 @@ function getJavaExecutableOptions(javaRuntime: string): ExecutableOptions | unde
   return { env };
 }
 
+function withLogEnv(
+  options: ExecutableOptions | undefined,
+  logLevel: string,
+): ExecutableOptions {
+  const env = {
+    ...process.env,
+    ...(options?.env ?? {}),
+    JAVA_ANALYZER_LOG: logLevel,
+  };
+  return {
+    ...(options ?? {}),
+    env,
+  };
+}
+
 export function resolveServerOptions(
   context: vscode.ExtensionContext,
   settings: ExtensionSettings,
 ): ServerOptions {
+  const logLevel = settings.logLevel.trim() || "info";
+
   if (settings.serverPath) {
-    const runtimeOptions = getJavaExecutableOptions(settings.jdkPath);
+    const runtimeOptions = withLogEnv(
+      getJavaExecutableOptions(settings.jdkPath),
+      logLevel,
+    );
     if (settings.serverPath.toLowerCase().endsWith(".jar")) {
       const javaCommand = resolveJavaCommand(settings.jdkPath);
       return {
@@ -85,23 +105,25 @@ export function resolveServerOptions(
   }
 
   if (context.extensionMode === vscode.ExtensionMode.Development) {
+    const runtimeOptions = withLogEnv(undefined, logLevel);
     return {
       run: {
         command: "cargo",
         args: ["run"],
-        options: { cwd: getDevServerCwd(context) },
+        options: { ...runtimeOptions, cwd: getDevServerCwd(context) },
       },
       debug: {
         command: "cargo",
         args: ["run"],
-        options: { cwd: getDevServerCwd(context) },
+        options: { ...runtimeOptions, cwd: getDevServerCwd(context) },
       },
     };
   }
 
   const serverPath = getBundledServerPath(context);
+  const runtimeOptions = withLogEnv(undefined, logLevel);
   return {
-    run: { command: serverPath },
-    debug: { command: serverPath, args: [] },
+    run: { command: serverPath, options: runtimeOptions },
+    debug: { command: serverPath, args: [], options: runtimeOptions },
   };
 }

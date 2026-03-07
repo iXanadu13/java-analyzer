@@ -75,6 +75,11 @@
           "type": "string",
           "default": "",
           "description": "Optional custom path to the LSP backend executable. If set, use this backend. If empty, use bundled backend, or `cargo run` in development."
+        },
+        "java-analyzer.logLevel": {
+          "type": "string",
+          "default": "info",
+          "description": "Tracing log level (EnvFilter syntax) passed to the language server via JAVA_ANALYZER_LOG."
         }
       }
     }
