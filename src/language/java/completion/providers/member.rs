@@ -156,7 +156,7 @@ impl CompletionProvider for MemberProvider {
                         {
                             continue;
                         }
-                        use rust_asm::constants::ACC_STATIC;
+
                         let is_static = field.access_flags & ACC_STATIC != 0;
                         let kind = if is_static {
                             CandidateKind::StaticField {
@@ -431,19 +431,20 @@ fn resolve_receiver_type(
     {
         tracing::debug!(
             expr,
-            type_internal = lv.type_internal.as_ref(),
+            type_internal = %lv.type_internal,
             "found in locals"
         );
-        let ty = lv.type_internal.as_ref();
 
-        if ty.contains('/') {
-            tracing::debug!(ty, "type contains '/', returning directly");
-            return Some(lv.type_internal.to_arc());
+        if lv.type_internal.contains_slash() {
+            let internal = lv.type_internal.to_internal_with_generics();
+            tracing::debug!(internal, "type contains '/', returning directly");
+            return Some(Arc::from(internal));
         }
 
-        let result = resolve_complex_type_to_internal(ty, ctx, index, scope);
+        let ty = lv.type_internal.erased_internal_with_arrays();
+        let result = resolve_complex_type_to_internal(&ty, ctx, index, scope);
         tracing::debug!(?result, ty, "resolve_complex_name_to_internal result");
-        return result.map(Arc::from);
+        return result.map(|t| Arc::from(t.to_internal_with_generics()));
     }
 
     tracing::debug!(expr, "local var not found");
@@ -520,24 +521,13 @@ fn resolve_complex_type_to_internal(
     ctx: &SemanticContext,
     index: &IndexView,
     scope: IndexScope,
-) -> Option<String> {
+) -> Option<TypeName> {
     let ty = ty.trim();
 
     // 1. Array
     if let Some(stripped) = ty.strip_suffix("[]") {
         let inner = resolve_complex_type_to_internal(stripped, ctx, index, scope)?;
-        match inner.as_str() {
-            "byte" => return Some("[B".to_string()),
-            "char" => return Some("[C".to_string()),
-            "double" => return Some("[D".to_string()),
-            "float" => return Some("[F".to_string()),
-            "int" => return Some("[I".to_string()),
-            "long" => return Some("[J".to_string()),
-            "short" => return Some("[S".to_string()),
-            "boolean" => return Some("[Z".to_string()),
-            _ if inner.starts_with('[') => return Some(format!("[{}", inner)),
-            _ => return Some(format!("[L{};", inner)),
-        }
+        return Some(inner.wrap_array());
     }
 
     // 2. Generics
@@ -575,44 +565,34 @@ fn resolve_complex_type_to_internal(
         for a in args {
             let arg = a.trim();
             if arg == "?" {
-                resolved_args.push("*".to_string());
+                resolved_args.push(TypeName::new("*"));
                 continue;
             }
 
             // 动态解析泛型实参 (例如 "String" -> "java/lang/String")
             let inner = resolve_complex_type_to_internal(arg, ctx, index, scope)?;
-            let desc = match inner.as_str() {
-                "byte" => "B".to_string(),
-                "char" => "C".to_string(),
-                "double" => "D".to_string(),
-                "float" => "F".to_string(),
-                "int" => "I".to_string(),
-                "long" => "J".to_string(),
-                "short" => "S".to_string(),
-                "boolean" => "Z".to_string(),
-                _ if inner.starts_with('[') => inner,
-                _ => format!("L{};", inner),
-            };
-            resolved_args.push(desc);
+            resolved_args.push(inner);
         }
-        return Some(format!("{}<{}>", base_internal, resolved_args.join("")));
+        let mut base_ty = base_internal;
+        base_ty.args = resolved_args;
+        return Some(base_ty);
     }
 
     // 3. Primitive & Special
     match ty {
         "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" | "void"
         | "var" => {
-            return Some(ty.to_string());
+            return Some(TypeName::new(ty));
         }
         _ => {}
     }
 
     // 4. Base class name
     if ty.contains('/') {
-        Some(ty.to_string())
+        Some(TypeName::new(ty))
     } else {
         // 交给原有的 import / global index 推导机制去查
-        resolve_simple_name_to_internal(ty, ctx, index, scope).map(|arc| arc.to_string())
+        resolve_simple_name_to_internal(ty, ctx, index, scope).map(TypeName::from)
     }
 }
 
@@ -657,7 +637,7 @@ fn resolve_method_call_receiver(
     let resolver = TypeResolver::new(index);
     resolver
         .resolve_method_return(enclosing, method_name, arg_count, &[])
-        .map(|i| TypeName::to_arc(&i))
+        .map(|i| Arc::from(i.to_internal_with_generics()))
 }
 
 /// Resolves simple class names to internal names
@@ -719,7 +699,9 @@ mod tests {
     use crate::semantic::types::parse_return_type_from_descriptor;
 
     fn root_scope() -> IndexScope {
-        IndexScope { module: ModuleId::ROOT }
+        IndexScope {
+            module: ModuleId::ROOT,
+        }
     }
 
     fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {

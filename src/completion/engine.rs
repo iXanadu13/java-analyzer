@@ -451,7 +451,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "str")
             .unwrap();
-        assert_eq!(str_var.type_internal.as_ref(), "NestedClass");
+        assert_eq!(str_var.type_internal.erased_internal(), "NestedClass");
     }
 
     #[test]
@@ -527,7 +527,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "str")
             .unwrap();
-        assert_eq!(str_var.type_internal.as_ref(), "Main2");
+        assert_eq!(str_var.type_internal.erased_internal(), "Main2");
     }
 
     #[test]
@@ -583,7 +583,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "str")
             .unwrap();
-        assert_eq!(str_var.type_internal.as_ref(), "java/lang/String");
+        assert_eq!(str_var.type_internal.erased_internal(), "java/lang/String");
     }
 
     #[test]
@@ -632,7 +632,10 @@ mod tests {
         let view = idx.view(root_scope());
         let resolver = TypeResolver::new(&view);
         let result = resolver.resolve_method_return("Child", "getValue", 0, &[]);
-        assert_eq!(result.as_deref(), Some("java/lang/String"));
+        assert_eq!(
+            result.as_ref().map(|t| t.erased_internal()),
+            Some("java/lang/String")
+        );
     }
 
     #[test]
@@ -755,7 +758,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "a")
             .unwrap();
-        assert_eq!(a_var.type_internal.as_ref(), "java/lang/String");
+        assert_eq!(a_var.type_internal.erased_internal(), "java/lang/String");
     }
 
     #[test]
@@ -794,7 +797,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "x")
             .unwrap();
-        assert_ne!(x_var.type_internal.as_ref(), "int[]");
+        assert_ne!(x_var.type_internal.erased_internal_with_arrays(), "int[]");
     }
 
     #[test]
@@ -983,7 +986,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "c")
             .unwrap();
-        assert_eq!(c_var.type_internal.as_ref(), "char");
+        assert_eq!(c_var.type_internal.erased_internal(), "char");
 
         // 校验 strArr (new String[]...) 被推断为 java/lang/String[]
         let str_arr_var = ctx
@@ -991,7 +994,10 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "strArr")
             .unwrap();
-        assert_eq!(str_arr_var.type_internal.as_ref(), "java/lang/String[]");
+        assert_eq!(
+            str_arr_var.type_internal.erased_internal_with_arrays(),
+            "java/lang/String[]"
+        );
 
         // 校验 strItem (strArr[1]) 被推断为 java/lang/String
         let str_item_var = ctx
@@ -999,7 +1005,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "strItem")
             .unwrap();
-        assert_eq!(str_item_var.type_internal.as_ref(), "java/lang/String");
+        assert_eq!(str_item_var.type_internal.erased_internal(), "java/lang/String");
     }
 
     #[test]
@@ -1057,7 +1063,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "item")
             .unwrap();
-        assert_eq!(item.type_internal.as_ref(), "java/lang/String");
+        assert_eq!(item.type_internal.erased_internal(), "java/lang/String");
     }
 
     #[test]

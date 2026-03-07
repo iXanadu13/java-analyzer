@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tracing::instrument;
+
 use crate::{
     index::{ClassMetadata, FieldSummary, MethodSummary},
     semantic::{
@@ -11,6 +13,7 @@ use crate::{
     },
 };
 
+#[instrument(skip(class_meta, method, provider))]
 pub fn method_detail(
     receiver_internal: &str,
     class_meta: &ClassMetadata,
@@ -18,26 +21,25 @@ pub fn method_detail(
     provider: &impl SymbolProvider,
 ) -> String {
     let base_return = method.return_type.as_deref().unwrap_or("V");
-    let display_return: Arc<str> = if let Some(sig) = method.generic_signature.as_deref() {
-        if let Some(ret_idx) = sig.find(')') {
-            let ret_jvm = &sig[ret_idx + 1..];
-            substitute_type(
-                receiver_internal,
-                class_meta.generic_signature.as_deref(),
-                ret_jvm,
-            )
-            .map(|t| t.0.clone())
-            .unwrap_or_else(|| {
-                JvmType::parse(ret_jvm)
-                    .map(|(t, _)| Arc::from(t.to_signature_string()))
-                    .unwrap_or_else(|| Arc::from(base_return))
-            })
-        } else {
-            Arc::from(base_return)
-        }
-    } else {
-        Arc::from(base_return)
-    };
+
+    let ret_jvm: &str = method
+        .generic_signature
+        .as_deref()
+        .and_then(|sig| sig.find(')').map(|i| &sig[i + 1..]))
+        .unwrap_or(base_return);
+
+    let mut display_return: Arc<str> = substitute_type(
+        receiver_internal,
+        class_meta.generic_signature.as_deref(),
+        ret_jvm,
+    )
+    .map(|t| Arc::from(t.to_jvm_signature()))
+    .unwrap_or_else(|| Arc::from(ret_jvm));
+
+    if display_return.starts_with('T') && display_return.ends_with(';') && display_return.len() >= 3
+    {
+        display_return = Arc::from(&display_return[1..display_return.len() - 1]);
+    }
 
     let source_style_return = descriptor_to_source_type(&display_return, provider)
         .unwrap_or_else(|| display_return.to_string());
@@ -45,6 +47,7 @@ pub fn method_detail(
     let sig_to_use = method
         .generic_signature
         .clone()
+        .or(class_meta.generic_signature.clone())
         .unwrap_or_else(|| method.desc());
 
     let mut param_types = Vec::new();
@@ -61,7 +64,7 @@ pub fn method_detail(
                     class_meta.generic_signature.as_deref(),
                     param_jvm_str,
                 )
-                .map(|t| t.0.clone())
+                .map(|t| Arc::from(t.to_jvm_signature()))
                 .unwrap_or_else(|| {
                     JvmType::parse(param_jvm_str)
                         .map(|(t, _)| Arc::from(t.to_signature_string()))
@@ -111,6 +114,7 @@ pub fn method_detail(
     )
 }
 
+#[instrument(skip(class_meta, field, provider))]
 pub fn field_detail(
     receiver_internal: &str,
     class_meta: &ClassMetadata,
@@ -127,8 +131,10 @@ pub fn field_detail(
         class_meta.generic_signature.as_deref(),
         sig_to_use,
     )
-    .map(|t| t.0.clone())
+    .map(|t| Arc::from(t.to_jvm_signature()))
     .unwrap_or_else(|| Arc::from(sig_to_use));
+
+    tracing::debug!(?class_meta.generic_signature);
 
     let source_style_type = descriptor_to_source_type(&display_type, provider)
         .unwrap_or_else(|| display_type.to_string());

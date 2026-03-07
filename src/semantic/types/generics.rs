@@ -91,30 +91,21 @@ impl JvmType {
     pub fn to_type_name(&self) -> TypeName {
         match self {
             JvmType::Object(name, args) => {
-                if args.is_empty() {
-                    TypeName::from(name.as_str())
-                } else {
-                    let arg_strs: Vec<_> = args.iter().map(|a| a.to_type_name().0).collect();
-                    TypeName::new(format!("{}<{}>", name, arg_strs.join("")))
-                }
+                let inner_args: Vec<TypeName> = args.iter().map(|a| a.to_type_name()).collect();
+                TypeName::with_args(name.as_str(), inner_args)
             }
-            JvmType::TypeVar(name) => TypeName::from(name.as_str()),
+            JvmType::TypeVar(name) => TypeName::new(name.as_str()),
             JvmType::Array(inner) => inner.to_type_name().wrap_array(),
             JvmType::Wildcard => TypeName::new("*"),
             JvmType::WildcardBound(c, inner) => {
-                let kw = match c {
-                    '+' => "? extends ",
-                    '-' => "? super ",
-                    _ => "",
-                };
-                TypeName::new(format!("{}{}", kw, inner.to_type_name().as_str()))
+                TypeName::with_args(c.to_string(), vec![inner.to_type_name()])
             }
             JvmType::Primitive(c) => TypeName::new(java_primitive_char_to_name(*c)),
         }
     }
 
     pub fn to_internal_name_string(&self) -> String {
-        self.to_type_name().0.to_string()
+        self.to_type_name().to_internal_with_generics()
     }
 
     /// Convert to the standard JVM signature format: `Ljava/util/List<Ljava/lang/String;>;`
@@ -133,6 +124,33 @@ impl JvmType {
             JvmType::Wildcard => "*".to_string(),
             JvmType::WildcardBound(c, inner) => format!("{}{}", c, inner.to_signature_string()),
             JvmType::Primitive(c) => c.to_string(),
+        }
+    }
+
+    pub fn to_java_like_string(&self) -> String {
+        match self {
+            JvmType::Object(name, args) => {
+                if args.is_empty() {
+                    name.clone()
+                } else {
+                    let rendered_args: Vec<_> =
+                        args.iter().map(|a| a.to_java_like_string()).collect();
+                    format!("{}<{}>", name, rendered_args.join(", "))
+                }
+            }
+            JvmType::TypeVar(name) => name.clone(),
+            JvmType::Array(inner) => format!("{}[]", inner.to_java_like_string()),
+            JvmType::Primitive(c) => java_primitive_char_to_name(*c).to_string(),
+            JvmType::Wildcard => "?".to_string(),
+            JvmType::WildcardBound('+', inner) => {
+                format!("? extends {}", inner.to_java_like_string())
+            }
+            JvmType::WildcardBound('-', inner) => {
+                format!("? super {}", inner.to_java_like_string())
+            }
+            JvmType::WildcardBound(other, inner) => {
+                format!("? ({}) {}", other, inner.to_java_like_string())
+            }
         }
     }
 }
@@ -234,7 +252,7 @@ pub fn parse_class_type_parameters(signature: &str) -> Vec<String> {
     params
 }
 
-/// 执行类型替换。如果 receiver_internal 包含泛型（如 List<LString;>），则尝试将 target_jvm_type (如 TE;) 替换为 String。
+/// Perform type substitution. If receiver_internal contains generics (such as List<LString;>), then attempt to replace target_jvm_type (such as TE;) with String.
 pub fn substitute_type(
     receiver_internal: &str,
     class_generic_signature: Option<&str>,
@@ -284,7 +302,7 @@ mod tests {
             '-',
             Box::new(JvmType::Object("java/lang/String".to_string(), vec![])),
         );
-        assert_eq!(ty.to_internal_name_string(), "? super java/lang/String");
+        assert_eq!(ty.to_java_like_string(), "? super java/lang/String");
     }
 
     #[test]

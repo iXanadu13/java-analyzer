@@ -205,7 +205,7 @@ impl<'idx> TypeResolver<'idx> {
                 class.generic_signature.as_deref(),
                 ret_jvm_str,
             ) {
-                if substituted.as_str() == "void" {
+                if substituted.erased_internal() == "void" {
                     return None;
                 }
                 return Some(substituted);
@@ -330,8 +330,9 @@ impl<'idx> TypeResolver<'idx> {
 
                 if seg.arg_count.is_some() {
                     // 方法返回
+                    let receiver_internal = receiver.to_internal_with_generics();
                     current_type = self.resolve_method_return(
-                        receiver.as_str(),
+                        &receiver_internal,
                         actual_name,
                         seg.arg_count.unwrap_or(-1),
                         &seg.arg_types,
@@ -339,7 +340,7 @@ impl<'idx> TypeResolver<'idx> {
                 } else {
                     // 字段读取
                     let mut found_field: Option<TypeName> = None;
-                    for class in self.view.mro(receiver.as_str()) {
+                    for class in self.view.mro(receiver.erased_internal()) {
                         if let Some(f) =
                             class.fields.iter().find(|f| f.name.as_ref() == actual_name)
                         {
@@ -383,7 +384,8 @@ impl<'idx> TypeResolver<'idx> {
 
         let mut total_score = 0;
         for (i, (desc, arg_ty)) in param_descs.iter().zip(arg_types.iter()).enumerate() {
-            let score = self.score_single_descriptor(desc, arg_ty.as_str());
+            let ty_str = arg_ty.erased_internal_with_arrays();
+            let score = self.score_single_descriptor(desc, &ty_str);
             if score < 0 {
                 tracing::debug!(param_index = i, "score: -1 (param mismatch)");
                 return -1;
@@ -875,7 +877,8 @@ mod tests {
         let r = TypeResolver::new(&view);
         // "cl" ends with 'l', but it's a local variable and shouldn't be evaluated as long.
         assert_eq!(
-            r.resolve("cl", &locals, None).as_deref(),
+            r.resolve("cl", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
             Some("RandomClass"),
             "'cl' should resolve to RandomClass, not long"
         );
@@ -887,7 +890,8 @@ mod tests {
         let r = TypeResolver::new(&view);
         // "sf" ends with 'f', but it's a local variable
         assert_eq!(
-            r.resolve("sf", &locals, None).as_deref(),
+            r.resolve("sf", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
             Some("float"), // float is the variable's type, not a literal value.
             "'sf' should resolve to its declared type"
         );
@@ -897,33 +901,69 @@ mod tests {
     fn test_long_literal_recognized() {
         let (view, locals) = make_resolver();
         let r = TypeResolver::new(&view);
-        assert_eq!(r.resolve("123L", &locals, None).as_deref(), Some("long"));
-        assert_eq!(r.resolve("0l", &locals, None).as_deref(), Some("long"));
-        assert_eq!(r.resolve("999L", &locals, None).as_deref(), Some("long"));
+        assert_eq!(
+            r.resolve("123L", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("long")
+        );
+        assert_eq!(
+            r.resolve("0l", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("long")
+        );
+        assert_eq!(
+            r.resolve("999L", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("long")
+        );
     }
 
     #[test]
     fn test_float_literal_recognized() {
         let (view, locals) = make_resolver();
         let r = TypeResolver::new(&view);
-        assert_eq!(r.resolve("1.5f", &locals, None).as_deref(), Some("float"));
-        assert_eq!(r.resolve("3F", &locals, None).as_deref(), Some("float"));
+        assert_eq!(
+            r.resolve("1.5f", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("float")
+        );
+        assert_eq!(
+            r.resolve("3F", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("float")
+        );
     }
 
     #[test]
     fn test_double_literal_recognized() {
         let (view, locals) = make_resolver();
         let r = TypeResolver::new(&view);
-        assert_eq!(r.resolve("1.5d", &locals, None).as_deref(), Some("double"));
-        assert_eq!(r.resolve("3.14", &locals, None).as_deref(), Some("double"));
+        assert_eq!(
+            r.resolve("1.5d", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("double")
+        );
+        assert_eq!(
+            r.resolve("3.14", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("double")
+        );
     }
 
     #[test]
     fn test_int_literal_recognized() {
         let (view, locals) = make_resolver();
         let r = TypeResolver::new(&view);
-        assert_eq!(r.resolve("42", &locals, None).as_deref(), Some("int"));
-        assert_eq!(r.resolve("0", &locals, None).as_deref(), Some("int"));
+        assert_eq!(
+            r.resolve("42", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("int")
+        );
+        assert_eq!(
+            r.resolve("0", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("int")
+        );
     }
 
     #[test]
@@ -931,7 +971,8 @@ mod tests {
         let (view, locals) = make_resolver();
         let r = TypeResolver::new(&view);
         assert_eq!(
-            r.resolve("\"hello\"", &locals, None).as_deref(),
+            r.resolve("\"hello\"", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
             Some("java/lang/String")
         );
     }
@@ -942,7 +983,8 @@ mod tests {
         let r = TypeResolver::new(&view);
         let enclosing = Arc::from("org/cubewhy/Main");
         assert_eq!(
-            r.resolve("this", &locals, Some(&enclosing)).as_deref(),
+            r.resolve("this", &locals, Some(&enclosing))
+                .as_ref().map(|t| t.erased_internal()),
             Some("org/cubewhy/Main")
         );
     }
@@ -970,7 +1012,8 @@ mod tests {
         let r = TypeResolver::new(&view);
         // "myL" ends with 'L' but is not a numeric prefix, and should not be recognized as long.
         assert_eq!(
-            r.resolve("myL", &locals, None).as_deref(),
+            r.resolve("myL", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
             Some("SomeClass")
         );
     }
@@ -1028,7 +1071,7 @@ mod tests {
             &[TypeName::new("java/lang/String"), TypeName::new("long")],
         );
         assert_eq!(
-            result.as_deref(),
+            result.as_ref().map(|t| t.erased_internal()),
             Some("Main2"),
             "long arg should select Main2 overload"
         );
@@ -1041,7 +1084,7 @@ mod tests {
             &[TypeName::new("java/lang/String"), TypeName::new("int")],
         );
         assert_eq!(
-            result2.as_deref(),
+            result2.as_ref().map(|t| t.erased_internal()),
             Some("RandomClass"),
             "int arg should select RandomClass overload"
         );
@@ -1110,7 +1153,7 @@ mod tests {
         let chain = parse_chain_from_expr("getMain2()");
         let result = resolver.resolve_chain(&chain, &[], Some(&enclosing));
         assert_eq!(
-            result.as_deref(),
+            result.as_ref().map(|t| t.erased_internal()),
             Some("Main2"),
             "bare method call should resolve via enclosing class"
         );
@@ -1159,7 +1202,7 @@ mod tests {
         );
 
         assert_eq!(
-            result.as_deref(),
+            result.as_ref().map(|t| t.erased_internal()),
             Some("java/lang/String"),
             "Generic type TE; should be correctly substituted to java/lang/String"
         );
@@ -1178,7 +1221,10 @@ mod tests {
 
         let resolver = TypeResolver::new(&view);
         let result = resolver.resolve("arr[0]", &locals, None);
-        assert_eq!(result.as_deref(), Some("char"));
+        assert_eq!(
+            result.as_ref().map(|t| t.erased_internal()),
+            Some("char")
+        );
     }
 
     #[test]
@@ -1219,7 +1265,10 @@ mod tests {
         let result = resolver.resolve_chain(&chain, &[], Some(&enclosing));
 
         // char[][] 提取出一层下标后应为 char[]，底层 JVM internal_name 表示为 `[C`
-        assert_eq!(result.as_deref(), Some("char[]"));
+        assert_eq!(
+            result.as_ref().map(|t| t.erased_internal_with_arrays()),
+            Some("char[]".to_string())
+        );
     }
 
     #[test]
@@ -1273,9 +1322,14 @@ mod tests {
     fn test_boolean_literal_recognized() {
         let (view, locals) = make_resolver();
         let r = TypeResolver::new(&view);
-        assert_eq!(r.resolve("true", &locals, None).as_deref(), Some("boolean"));
         assert_eq!(
-            r.resolve("false", &locals, None).as_deref(),
+            r.resolve("true", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
+            Some("boolean")
+        );
+        assert_eq!(
+            r.resolve("false", &locals, None)
+                .as_ref().map(|t| t.erased_internal()),
             Some("boolean")
         );
     }

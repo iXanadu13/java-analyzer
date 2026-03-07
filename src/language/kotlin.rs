@@ -635,7 +635,7 @@ mod tests {
             .local_variables
             .iter()
             .find(|v| v.name.as_ref() == "items")
-            .map(|v| v.type_internal.as_ref());
+            .map(|v| v.type_internal.erased_internal());
         assert_eq!(ty, Some("java/util/List"));
     }
 
@@ -674,7 +674,7 @@ mod tests {
             .local_variables
             .iter()
             .find(|v| v.name.as_ref() == "input")
-            .map(|v| v.type_internal.as_ref());
+            .map(|v| v.type_internal.erased_internal());
         assert_eq!(ty, Some("java/lang/String"));
     }
 

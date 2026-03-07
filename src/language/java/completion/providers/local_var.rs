@@ -33,14 +33,15 @@ impl CompletionProvider for LocalVarProvider {
             .map(|(lv, score)| {
                 let type_simple = lv
                     .type_internal
+                    .erased_internal()
                     .rsplit('/')
                     .next()
-                    .unwrap_or(&lv.type_internal);
+                    .unwrap_or(lv.type_internal.erased_internal());
                 CompletionCandidate::new(
                     Arc::clone(&lv.name),
                     lv.name.to_string(),
                     CandidateKind::LocalVariable {
-                        type_descriptor: lv.type_internal.to_arc(),
+                        type_descriptor: Arc::from(lv.type_internal.to_internal_with_generics()),
                     },
                     self.name(),
                 )

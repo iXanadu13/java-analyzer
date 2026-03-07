@@ -221,27 +221,25 @@ fn resolve_type_name_strict_inner(
         ctx.resolve_simple_strict(base_name)
     }?;
 
-    let mut full = if let Some(args) = args_str {
-        let arg_sigs = split_generic_args(args)
+    let mut ty = if let Some(args) = args_str {
+        let arg_types = split_generic_args(args)
             .into_iter()
-            .map(|arg| resolve_type_arg_signature(ctx, arg))
-            .collect::<Option<Vec<String>>>()?;
-        if arg_sigs.is_empty() {
-            base_internal
+            .map(|arg| resolve_type_arg_type(ctx, arg))
+            .collect::<Option<Vec<crate::semantic::types::type_name::TypeName>>>()?;
+        if arg_types.is_empty() {
+            crate::semantic::types::type_name::TypeName::new(base_internal)
         } else {
-            format!("{}<{}>", base_internal, arg_sigs.join(""))
+            crate::semantic::types::type_name::TypeName::with_args(base_internal, arg_types)
         }
     } else {
-        base_internal
+        crate::semantic::types::type_name::TypeName::new(base_internal)
     };
 
     if dims > 0 {
-        for _ in 0..dims {
-            full.push_str("[]");
-        }
+        ty = ty.with_array_dims(dims);
     }
 
-    Some(crate::semantic::types::type_name::TypeName::new(full))
+    Some(ty)
 }
 
 fn split_generic_base(ty: &str) -> Option<(&str, Option<&str>)> {
@@ -288,28 +286,31 @@ fn split_generic_args(s: &str) -> Vec<&str> {
     result.into_iter().filter(|s| !s.is_empty()).collect()
 }
 
-fn resolve_type_arg_signature(ctx: &SourceTypeCtx, arg: &str) -> Option<String> {
+fn resolve_type_arg_type(
+    ctx: &SourceTypeCtx,
+    arg: &str,
+) -> Option<crate::semantic::types::type_name::TypeName> {
     let arg = arg.trim();
     if arg.is_empty() {
         return None;
     }
     if arg == "?" {
-        return Some("*".to_string());
+        return Some(crate::semantic::types::type_name::TypeName::new("*"));
     }
     if let Some(bound) = arg.strip_prefix("? extends ") {
-        let inner = resolve_type_arg_signature(ctx, bound)?;
-        return Some(format!("+{}", inner));
+        let inner = resolve_type_arg_type(ctx, bound)?;
+        return Some(crate::semantic::types::type_name::TypeName::with_args("+", vec![inner]));
     }
     if let Some(bound) = arg.strip_prefix("? super ") {
-        let inner = resolve_type_arg_signature(ctx, bound)?;
-        return Some(format!("-{}", inner));
+        let inner = resolve_type_arg_type(ctx, bound)?;
+        return Some(crate::semantic::types::type_name::TypeName::with_args("-", vec![inner]));
     }
 
     let resolved = resolve_type_name_strict_inner(ctx, arg)?;
     if resolved.is_array() {
         return None;
     }
-    let base = resolved.base();
+    let base = resolved.erased_internal();
     if matches!(
         base,
         "void"
@@ -325,7 +326,7 @@ fn resolve_type_arg_signature(ctx: &SourceTypeCtx, arg: &str) -> Option<String> 
         return None;
     }
     if base.contains('/') {
-        return Some(format!("L{};", base));
+        return Some(resolved);
     }
     None
 }

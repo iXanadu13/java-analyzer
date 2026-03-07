@@ -34,7 +34,7 @@ impl<'a> ContextEnricher<'a> {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, lv)| {
-                    if lv.type_internal.as_ref() == "var" {
+                    if lv.type_internal.erased_internal() == "var" {
                         lv.init_expr.as_deref().map(|e| (i, e.to_string()))
                     } else {
                         None
@@ -113,11 +113,12 @@ impl<'a> ContextEnricher<'a> {
                         tracing::debug!("enrich_context: final match -> None");
                         None
                     }
-                    Some(ref ty) if ty.contains_slash() => Some(Arc::from(ty.base())),
+                    Some(ref ty) if ty.contains_slash() => Some(Arc::from(ty.erased_internal())),
                     Some(ty) => {
-                        let r = type_ctx.resolve_type_name_strict(ty.as_str());
+                        let ty_str = ty.erased_internal_with_arrays();
+                        let r = type_ctx.resolve_type_name_strict(&ty_str);
                         tracing::debug!(?r, ?ty, "enrich_context: final match -> resolve strict");
-                        r.map(|t| Arc::from(t.base()))
+                        r.map(|t| Arc::from(t.erased_internal()))
                     }
                 };
             }
@@ -157,7 +158,7 @@ impl<'a> ContextEnricher<'a> {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, lv)| {
-                    if lv.type_internal.as_ref() == "var" {
+                    if lv.type_internal.erased_internal() == "var" {
                         lv.init_expr.as_deref().map(|e| (i, e.to_string()))
                     } else {
                         None
@@ -220,11 +221,9 @@ fn expand_local_type_strict(
     type_ctx: &SourceTypeCtx,
     ty: &TypeName,
 ) -> TypeName {
-    let s = ty.as_str();
-
     // primitives/unknown/var 不动
     if matches!(
-        s,
+        ty.erased_internal(),
         "var"
             | "unknown"
             | "byte"
@@ -240,34 +239,44 @@ fn expand_local_type_strict(
         return ty.clone();
     }
 
-    // array dims: Foo[][]
-    let mut base = s;
-    let mut dims = 0usize;
-    while let Some(stripped) = base.strip_suffix("[]") {
-        dims += 1;
-        base = stripped.trim();
+    let base = ty.erased_internal();
+
+    if ty.args.is_empty() && base.contains('<') {
+        if let Some(mut resolved) = type_ctx.resolve_type_name_strict(base) {
+            resolved.array_dims = ty.array_dims;
+            return resolved;
+        }
     }
 
-    if let Some(resolved) = type_ctx.resolve_type_name_strict(s) {
+    let expanded_args: Vec<TypeName> = ty
+        .args
+        .iter()
+        .map(|a| expand_local_type_strict(sym, ctx, type_ctx, a))
+        .collect();
+
+    if ty.contains_slash() || sym.view.get_class(base).is_some() {
+        return TypeName {
+            base_internal: ty.base_internal.clone(),
+            args: expanded_args,
+            array_dims: ty.array_dims,
+        };
+    }
+
+    if let Some(mut resolved) = type_ctx.resolve_type_name_strict(base) {
+        resolved.args = expanded_args;
+        resolved.array_dims = ty.array_dims;
         return resolved;
     }
-    let base = base.split('<').next().unwrap_or(base).trim();
 
-    // already internal or index match
-    if base.contains('/') || sym.view.get_class(base).is_some() {
-        return ty.clone();
+    if let Some(internal) = sym.resolve_type_name(ctx, base) {
+        return TypeName {
+            base_internal: internal,
+            args: expanded_args,
+            array_dims: ty.array_dims,
+        };
     }
 
-    let mut out = if let Some(internal) = sym.resolve_type_name(ctx, base) {
-        TypeName::from(internal)
-    } else {
-        ty.clone()
-    };
-
-    for _ in 0..dims {
-        out = out.wrap_array();
-    }
-    out
+    ty.clone()
 }
 
 fn resolve_array_access_type(
@@ -426,11 +435,10 @@ fn evaluate_chain(
             if base_name.is_empty() {
                 current = Some(recv.clone());
             } else {
-                let recv_str = recv.as_str();
-                let recv_full: TypeName = if recv_str.contains('/') {
+                let recv_full: TypeName = if recv.contains_slash() {
                     recv.clone()
                 } else {
-                    type_ctx.resolve_type_name_strict(recv_str)?
+                    type_ctx.resolve_type_name_strict(recv.erased_internal())?
                 };
 
                 if seg.arg_count.is_some() {
@@ -444,14 +452,16 @@ fn evaluate_chain(
                     } else {
                         &[]
                     };
+                    let receiver_internal = recv_full.to_internal_with_generics();
                     current = resolver.resolve_method_return(
-                        recv_full.as_str(),
+                        &receiver_internal,
                         base_name,
                         seg.arg_count.unwrap_or(-1),
                         arg_types_ref,
                     );
                 } else {
-                    let (methods, fields) = view.collect_inherited_members(recv_full.base());
+                    let (methods, fields) =
+                        view.collect_inherited_members(recv_full.erased_internal());
 
                     if let Some(f) = fields.iter().find(|f| f.name.as_ref() == base_name) {
                         if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {

@@ -209,7 +209,7 @@ fn extract_params(
         .filter_map(|captures| {
             let ty = capture_text(&captures, type_idx, ctx.bytes())?;
             let name = capture_text(&captures, name_idx, ctx.bytes())?;
-            let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
+            let raw_ty = ty.trim();
             Some(LocalVar {
                 name: Arc::from(name),
                 type_internal: TypeName::new(java_type_to_internal(raw_ty).as_str()),
@@ -322,18 +322,18 @@ mod tests {
         // 验证提取结果
         assert!(
             vars.iter()
-                .any(|v| v.name.as_ref() == "a" && v.type_internal.as_ref() == "int")
+                .any(|v| v.name.as_ref() == "a" && v.type_internal.to_internal_with_generics() == "int")
         );
         assert!(
             vars.iter()
-                .any(|v| v.name.as_ref() == "b" && v.type_internal.as_ref() == "String")
+                .any(|v| v.name.as_ref() == "b" && v.type_internal.to_internal_with_generics() == "String")
         );
         assert!(
             vars.iter()
-                .any(|v| v.name.as_ref() == "c" && v.type_internal.as_ref() == "List<String>"),
+                .any(|v| v.name.as_ref() == "c" && v.type_internal.to_internal_with_generics() == "List<String>"),
             "Should preserve generics. Found types: {:?}",
             vars.iter()
-                .map(|v| v.type_internal.as_ref())
+                .map(|v| v.type_internal.to_internal_with_generics())
                 .collect::<Vec<_>>()
         );
     }
@@ -355,11 +355,11 @@ mod tests {
 
         assert!(
             vars.iter()
-                .any(|v| v.name.as_ref() == "p1" && v.type_internal.as_ref() == "int")
+                .any(|v| v.name.as_ref() == "p1" && v.type_internal.to_internal_with_generics() == "int")
         );
         assert!(
             vars.iter()
-                .any(|v| v.name.as_ref() == "p2" && v.type_internal.as_ref() == "String")
+                .any(|v| v.name.as_ref() == "p2" && v.type_internal.to_internal_with_generics() == "String")
         );
     }
 
@@ -384,7 +384,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "map")
             .expect("Should find map");
-        assert_eq!(map_var.type_internal.as_ref(), "var");
+        assert_eq!(map_var.type_internal.erased_internal(), "var");
         assert!(map_var.init_expr.as_ref().unwrap().contains("new HashMap"));
     }
 
@@ -406,7 +406,7 @@ mod tests {
 
         // 无法推断时，类型应为 "var"，并且携带初始化表达式以供后续分析（如果支持的话）
         let v = vars.iter().find(|v| v.name.as_ref() == "unknown").unwrap();
-        assert_eq!(v.type_internal.as_ref(), "var");
+        assert_eq!(v.type_internal.erased_internal(), "var");
         assert_eq!(v.init_expr.as_deref(), Some("someMethodCall()"));
     }
 
@@ -454,7 +454,7 @@ mod tests {
         // 期望能从容错逻辑中提取出 s
         assert!(
             vars.iter()
-                .any(|v| v.name.as_ref() == "s" && v.type_internal.as_ref() == "String"),
+                .any(|v| v.name.as_ref() == "s" && v.type_internal.to_internal_with_generics() == "String"),
             "Should parse variable 's' even without semicolon. Found: {:?}",
             vars.iter().map(|v| v.name.as_ref()).collect::<Vec<_>>()
         );
@@ -483,7 +483,7 @@ mod tests {
             .iter()
             .find(|v| v.name.as_ref() == "x")
             .expect("Should find 'x'");
-        assert_eq!(x.type_internal.as_ref(), "var");
+        assert_eq!(x.type_internal.erased_internal(), "var");
         assert!(x.init_expr.as_ref().unwrap().contains("new HashSet"));
     }
 
@@ -639,10 +639,10 @@ mod tests {
 
         assert!(
             vars.iter()
-                .any(|v| v.name.as_ref() == "c" && v.type_internal.as_ref() == "List<String>"),
+                .any(|v| v.name.as_ref() == "c" && v.type_internal.to_internal_with_generics() == "List<String>"),
             "Should preserve generics exactly as in source. Found types: {:?}",
             vars.iter()
-                .map(|v| v.type_internal.as_ref())
+                .map(|v| v.type_internal.to_internal_with_generics())
                 .collect::<Vec<_>>()
         );
     }

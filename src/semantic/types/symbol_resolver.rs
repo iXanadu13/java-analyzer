@@ -164,7 +164,7 @@ impl<'a> SymbolResolver<'a> {
     fn resolve_bare_id(&self, ctx: &SemanticContext, id: &str) -> Option<ResolvedSymbol> {
         // local variable -> return its type
         if let Some(local) = ctx.local_variables.iter().find(|v| v.name.as_ref() == id) {
-            let base = local.type_internal.base();
+            let base = local.type_internal.erased_internal();
             let resolved_type = self
                 .resolve_type_name(ctx, base)
                 .unwrap_or_else(|| Arc::from(base));
@@ -214,7 +214,7 @@ impl<'a> SymbolResolver<'a> {
 
         // local variable
         if let Some(lv) = ctx.local_variables.iter().find(|v| v.name.as_ref() == expr) {
-            let t = Arc::from(lv.type_internal.base());
+            let t = Arc::from(lv.type_internal.erased_internal());
             tracing::debug!(expr = %expr, type_ = %t, "resolve: receiver type from local var");
             return Some(t);
         }
@@ -238,7 +238,7 @@ impl<'a> SymbolResolver<'a> {
             .iter()
             .find(|v| v.name.as_ref() == first)
         {
-            Arc::from(lv.type_internal.base())
+            Arc::from(lv.type_internal.erased_internal())
         } else {
             self.resolve_type_name(ctx, first)?
         };
