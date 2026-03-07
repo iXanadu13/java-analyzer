@@ -29,15 +29,14 @@ impl<'a> SymbolResolver<'a> {
 
     pub fn resolve(&self, ctx: &SemanticContext) -> Option<ResolvedSymbol> {
         match &ctx.location {
-            CursorLocation::MemberAccess {
-                receiver_type,
-                receiver_expr,
-                member_prefix,
-                arguments,
-                ..
-            } => {
-                let owner = receiver_type
-                    .clone()
+            CursorLocation::MemberAccess { .. } => {
+                let receiver_expr = ctx.location.member_access_expr()?;
+                let member_prefix = ctx.location.member_access_prefix()?;
+                let arguments = ctx.location.member_access_arguments();
+                let owner = ctx
+                    .location
+                    .member_access_receiver_owner_internal()
+                    .map(Arc::from)
                     .or_else(|| self.infer_receiver_type(ctx, receiver_expr));
                 tracing::debug!(
                     receiver_expr = %receiver_expr,
@@ -45,7 +44,7 @@ impl<'a> SymbolResolver<'a> {
                     resolved_owner = ?owner,
                     "resolve: member access"
                 );
-                self.resolve_member(ctx, &owner?, member_prefix, arguments.as_deref())
+                self.resolve_member(ctx, &owner?, member_prefix, arguments)
             }
             CursorLocation::StaticAccess {
                 class_internal_name,
@@ -429,6 +428,119 @@ mod tests {
             );
         } else {
             panic!("Expected Method");
+        }
+    }
+
+    #[test]
+    fn test_member_access_resolve_prefers_semantic_owner_over_legacy_receiver_type() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope { module: ModuleId::ROOT };
+        idx.add_jar_classes(scope, vec![ClassMetadata {
+            package: Some(Arc::from("java/util")),
+            name: Arc::from("List"),
+            internal_name: Arc::from("java/util/List"),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("size"),
+                params: MethodParams::empty(),
+                annotations: vec![],
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: Some(TypeName::with_args(
+                    "java/util/List",
+                    vec![TypeName::new("java/lang/String")],
+                )),
+                receiver_type: Some(Arc::from("legacy/Wrong")),
+                receiver_expr: "xs".to_string(),
+                member_prefix: "size".to_string(),
+                arguments: None,
+            },
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
+        let resolved = resolver.resolve(&ctx).expect("should resolve method");
+        match resolved {
+            ResolvedSymbol::Method { owner, summary } => {
+                assert_eq!(owner.as_ref(), "java/util/List");
+                assert_eq!(summary.name.as_ref(), "size");
+            }
+            _ => panic!("Expected method resolution"),
+        }
+    }
+
+    #[test]
+    fn test_member_access_resolve_falls_back_to_legacy_receiver_type() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope { module: ModuleId::ROOT };
+        idx.add_jar_classes(scope, vec![ClassMetadata {
+            package: Some(Arc::from("java/util")),
+            name: Arc::from("List"),
+            internal_name: Arc::from("java/util/List"),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("size"),
+                params: MethodParams::empty(),
+                annotations: vec![],
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: Some(Arc::from("java/util/List")),
+                receiver_expr: "xs".to_string(),
+                member_prefix: "size".to_string(),
+                arguments: None,
+            },
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
+        let resolved = resolver.resolve(&ctx).expect("should resolve method");
+        match resolved {
+            ResolvedSymbol::Method { owner, summary } => {
+                assert_eq!(owner.as_ref(), "java/util/List");
+                assert_eq!(summary.name.as_ref(), "size");
+            }
+            _ => panic!("Expected method resolution"),
         }
     }
 }
