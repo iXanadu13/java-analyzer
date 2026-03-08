@@ -1353,6 +1353,44 @@ mod tests {
     }
 
     #[test]
+    fn test_method_call_arithmetic_var_materialization_surfaces_double_in_completion() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(parse_java_source(
+            indoc::indoc! {r#"
+            class Demo {
+                int getInt() { return 1; }
+                void f() {}
+            }
+            "#},
+            ClassOrigin::Unknown,
+            None,
+        ));
+        idx.add_classes(vec![make_class("java/lang", "Object")]);
+        let view = idx.view(root_scope());
+
+        let src = indoc::indoc! {r#"
+        class Demo {
+            int getInt() { return 1; }
+            void f() {
+                var a = getInt() + 1 + 1 * 100d;
+                a|
+            }
+        }
+        "#};
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let cand_a = candidates
+            .iter()
+            .find(|c| c.label.as_ref() == "a")
+            .expect("expected local candidate a");
+        match &cand_a.kind {
+            crate::completion::CandidateKind::LocalVariable { type_descriptor } => {
+                assert_eq!(type_descriptor.as_ref(), "double");
+            }
+            other => panic!("expected local variable candidate for a, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_later_declared_method_visible_in_earlier_method_completion() {
         let src = indoc::indoc! {r#"
         package org.cubewhy;

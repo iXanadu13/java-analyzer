@@ -1286,6 +1286,68 @@ mod tests {
         idx
     }
 
+    fn make_index_with_demo_getint_method() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            IndexScope {
+                module: ModuleId::ROOT,
+            },
+            vec![
+                ClassMetadata {
+                    package: None,
+                    name: Arc::from("Demo"),
+                    internal_name: Arc::from("Demo"),
+                    super_name: Some(Arc::from("java/lang/Object")),
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("getInt"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("I")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("Object"),
+                    internal_name: Arc::from("java/lang/Object"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("String"),
+                    internal_name: Arc::from("java/lang/String"),
+                    super_name: Some(Arc::from("java/lang/Object")),
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        idx
+    }
+
     fn make_index_with_functional_types() -> WorkspaceIndex {
         let idx = WorkspaceIndex::new();
         idx.add_jar_classes(
@@ -5217,6 +5279,72 @@ mod tests {
             .find(|lv| lv.name.as_ref() == "g")
             .expect("local g");
         assert_eq!(g.type_internal.erased_internal(), "java/lang/String");
+    }
+
+    #[test]
+    fn test_var_rhs_inference_method_call_numeric_expression_materializes_types() {
+        let idx = make_index_with_demo_getint_method();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            None,
+            vec!["java.lang.*".into()],
+            Some(view.build_name_table()),
+        ));
+
+        let mut ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "b".to_string(),
+            },
+            "b",
+            vec![
+                LocalVar {
+                    name: Arc::from("a"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("getInt() + 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("b"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("getInt() + 1 + 1 * 100d".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("c"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("getInt() + \"x\"".to_string()),
+                },
+            ],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            None,
+            vec!["java.lang.*".into()],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        let a = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "a")
+            .expect("local a");
+        assert_eq!(a.type_internal.erased_internal(), "int");
+
+        let b = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "b")
+            .expect("local b");
+        assert_eq!(b.type_internal.erased_internal(), "double");
+
+        let c = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "c")
+            .expect("local c");
+        assert_eq!(c.type_internal.erased_internal(), "java/lang/String");
     }
 
     #[test]

@@ -138,6 +138,17 @@ fn resolve_ast_node_type(
             resolve_floating_point_literal_type(text)
         }
         "string_literal" | "text_block" => Some(TypeName::new("java/lang/String")),
+        "method_invocation" => {
+            let text = node.utf8_text(bytes).ok()?;
+            resolve_expression_via_existing_resolver(
+                text,
+                locals,
+                enclosing_internal,
+                resolver,
+                type_ctx,
+                view,
+            )
+        }
         "binary_expression" => resolve_binary_expression_type(
             node,
             bytes,
@@ -149,6 +160,21 @@ fn resolve_ast_node_type(
         ),
         _ => None,
     }
+}
+
+fn resolve_expression_via_existing_resolver(
+    expr: &str,
+    locals: &[LocalVar],
+    enclosing_internal: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    type_ctx: &SourceTypeCtx,
+    view: &IndexView,
+) -> Option<TypeName> {
+    let chain = parse_chain_from_expr(expr.trim());
+    if chain.is_empty() {
+        return resolver.resolve(expr, locals, enclosing_internal);
+    }
+    evaluate_chain(&chain, locals, enclosing_internal, resolver, type_ctx, view)
 }
 
 #[allow(clippy::too_many_arguments)]
