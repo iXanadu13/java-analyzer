@@ -1034,28 +1034,7 @@ impl<'idx> TypeResolver<'idx> {
             return 10;
         }
 
-        // wrapper type
-        let is_wrapper_match = matches!(
-            (resolved_desc, normalized_ty.as_str()),
-            ("int", "java/lang/Integer")
-                | ("java/lang/Integer", "int")
-                | ("boolean", "java/lang/Boolean")
-                | ("java/lang/Boolean", "boolean")
-                | ("long", "java/lang/Long")
-                | ("java/lang/Long", "long")
-                | ("double", "java/lang/Double")
-                | ("java/lang/Double", "double")
-                | ("float", "java/lang/Float")
-                | ("java/lang/Float", "float")
-                | ("char", "java/lang/Character")
-                | ("java/lang/Character", "char")
-                | ("byte", "java/lang/Byte")
-                | ("java/lang/Byte", "byte")
-                | ("short", "java/lang/Short")
-                | ("java/lang/Short", "short")
-        );
-
-        if is_wrapper_match {
+        if are_boxing_compatible_type_names(resolved_desc, normalized_ty.as_str()) {
             tracing::debug!("score: 8 (autoboxing/unboxing match)");
             return 8;
         }
@@ -1089,6 +1068,87 @@ fn normalize_call_arg_count(arg_count: i32, arg_types: &[TypeName]) -> usize {
     } else {
         arg_types.len()
     }
+}
+
+pub(crate) fn primitive_wrapper_type_name(primitive: &str) -> Option<&'static str> {
+    match primitive {
+        "boolean" => Some("java/lang/Boolean"),
+        "byte" => Some("java/lang/Byte"),
+        "char" => Some("java/lang/Character"),
+        "short" => Some("java/lang/Short"),
+        "int" => Some("java/lang/Integer"),
+        "long" => Some("java/lang/Long"),
+        "float" => Some("java/lang/Float"),
+        "double" => Some("java/lang/Double"),
+        _ => None,
+    }
+}
+
+pub(crate) fn unboxed_primitive_type_name(ty: &str) -> Option<&'static str> {
+    let normalized = ty.replace('.', "/");
+    match normalized.as_str() {
+        "boolean" => Some("boolean"),
+        "byte" => Some("byte"),
+        "char" => Some("char"),
+        "short" => Some("short"),
+        "int" => Some("int"),
+        "long" => Some("long"),
+        "float" => Some("float"),
+        "double" => Some("double"),
+        "java/lang/Boolean" | "Boolean" => Some("boolean"),
+        "java/lang/Byte" | "Byte" => Some("byte"),
+        "java/lang/Character" | "Character" => Some("char"),
+        "java/lang/Short" | "Short" => Some("short"),
+        "java/lang/Integer" | "Integer" => Some("int"),
+        "java/lang/Long" | "Long" => Some("long"),
+        "java/lang/Float" | "Float" => Some("float"),
+        "java/lang/Double" | "Double" => Some("double"),
+        _ => None,
+    }
+}
+
+pub(crate) fn are_boxing_compatible_type_names(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let left_normalized = left.replace('.', "/");
+    let right_normalized = right.replace('.', "/");
+    if let Some(wrapper) = primitive_wrapper_type_name(left_normalized.as_str())
+        && wrapper == right_normalized
+    {
+        return true;
+    }
+    if let Some(wrapper) = primitive_wrapper_type_name(right_normalized.as_str())
+        && wrapper == left_normalized
+    {
+        return true;
+    }
+    false
+}
+
+pub(crate) fn promoted_numeric_result_type_name(left: &str, right: &str) -> Option<&'static str> {
+    let left = unboxed_primitive_type_name(left)?;
+    let right = unboxed_primitive_type_name(right)?;
+    if !matches!(
+        left,
+        "byte" | "short" | "char" | "int" | "long" | "float" | "double"
+    ) || !matches!(
+        right,
+        "byte" | "short" | "char" | "int" | "long" | "float" | "double"
+    ) {
+        return None;
+    }
+
+    if left == "double" || right == "double" {
+        return Some("double");
+    }
+    if left == "float" || right == "float" {
+        return Some("float");
+    }
+    if left == "long" || right == "long" {
+        return Some("long");
+    }
+    Some("int")
 }
 
 fn normalize_arg_types(arg_count: usize, arg_types: &[TypeName]) -> Vec<TypeName> {
@@ -2971,6 +3031,32 @@ mod tests {
         assert_eq!(
             resolver.score_single_descriptor("Ljava/lang/Boolean;", "boolean"),
             8
+        );
+    }
+
+    #[test]
+    fn test_shared_boxing_and_numeric_promotion_helpers() {
+        assert!(are_boxing_compatible_type_names("int", "java/lang/Integer"));
+        assert!(are_boxing_compatible_type_names(
+            "java/lang/Double",
+            "double"
+        ));
+        assert_eq!(
+            unboxed_primitive_type_name("java/lang/Integer"),
+            Some("int")
+        );
+        assert_eq!(unboxed_primitive_type_name("Double"), Some("double"));
+        assert_eq!(
+            promoted_numeric_result_type_name("java/lang/Integer", "double"),
+            Some("double")
+        );
+        assert_eq!(
+            promoted_numeric_result_type_name("java/lang/Double", "int"),
+            Some("double")
+        );
+        assert_eq!(
+            promoted_numeric_result_type_name("java/lang/Integer", "int"),
+            Some("int")
         );
     }
 

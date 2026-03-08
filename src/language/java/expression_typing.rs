@@ -6,7 +6,8 @@ use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::semantic::LocalVar;
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::types::{
-    ChainSegment, TypeResolver, parse_single_type_to_internal, singleton_descriptor_to_type,
+    ChainSegment, TypeResolver, parse_single_type_to_internal, promoted_numeric_result_type_name,
+    singleton_descriptor_to_type,
 };
 use tree_sitter::Node;
 
@@ -239,35 +240,13 @@ fn resolve_floating_point_literal_type(text: &str) -> Option<TypeName> {
 }
 
 fn numeric_binary_result_type(left: &TypeName, right: &TypeName) -> Option<TypeName> {
-    if !is_numeric_primitive(left) || !is_numeric_primitive(right) {
-        return None;
-    }
-
-    if is_type(left, "double") || is_type(right, "double") {
-        return Some(TypeName::new("double"));
-    }
-    if is_type(left, "float") || is_type(right, "float") {
-        return Some(TypeName::new("float"));
-    }
-    if is_type(left, "long") || is_type(right, "long") {
-        return Some(TypeName::new("long"));
-    }
-    Some(TypeName::new("int"))
+    let promoted =
+        promoted_numeric_result_type_name(left.erased_internal(), right.erased_internal())?;
+    Some(TypeName::new(promoted))
 }
 
 fn is_string_type(ty: &TypeName) -> bool {
     matches!(ty.erased_internal(), "java/lang/String")
-}
-
-fn is_type(ty: &TypeName, name: &str) -> bool {
-    ty.erased_internal() == name
-}
-
-fn is_numeric_primitive(ty: &TypeName) -> bool {
-    matches!(
-        ty.erased_internal(),
-        "byte" | "short" | "char" | "int" | "long" | "float" | "double"
-    )
 }
 
 pub(crate) fn resolve_var_init_expr(

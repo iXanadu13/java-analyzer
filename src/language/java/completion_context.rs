@@ -5108,6 +5108,118 @@ mod tests {
     }
 
     #[test]
+    fn test_var_rhs_inference_wrapper_arithmetic_unboxing_and_promotion() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            None,
+            vec!["java.lang.*".into()],
+            Some(view.build_name_table()),
+        ));
+
+        let mut ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "a".to_string(),
+            },
+            "a",
+            vec![
+                LocalVar {
+                    name: Arc::from("i"),
+                    type_internal: TypeName::new("java/lang/Integer"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("d"),
+                    type_internal: TypeName::new("java/lang/Double"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("a"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("i + 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("b"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("i + 1.0".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("c"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("i + 1 + 1 * 100d".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("e"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("d + 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("f"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("2 * 3".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("g"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("i + \"x\"".to_string()),
+                },
+            ],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            None,
+            vec!["java.lang.*".into()],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        let a = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "a")
+            .expect("local a");
+        assert_eq!(a.type_internal.erased_internal(), "int");
+
+        let b = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "b")
+            .expect("local b");
+        assert_eq!(b.type_internal.erased_internal(), "double");
+
+        let c = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "c")
+            .expect("local c");
+        assert_eq!(c.type_internal.erased_internal(), "double");
+
+        let e = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "e")
+            .expect("local e");
+        assert_eq!(e.type_internal.erased_internal(), "double");
+
+        let f = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "f")
+            .expect("local f");
+        assert_eq!(f.type_internal.erased_internal(), "int");
+
+        let g = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "g")
+            .expect("local g");
+        assert_eq!(g.type_internal.erased_internal(), "java/lang/String");
+    }
+
+    #[test]
     fn test_var_rhs_inference_propagates_receiver_generics_for_chain() {
         use crate::completion::provider::CompletionProvider;
         use crate::language::java::completion::providers::member::MemberProvider;
