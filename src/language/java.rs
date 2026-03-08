@@ -1173,6 +1173,182 @@ mod tests {
     }
 
     #[test]
+    fn test_inner_class_constructor_reference_var_materializes_b() {
+        let src = indoc::indoc! {r#"
+        package org.cubewhy;
+
+        import java.util.*;
+        import java.util.function.*;
+
+        public class ChainCheck {
+            class Box<T> {
+                private final T value;
+                Box(T value) { this.value = value; }
+                T get() { return value; }
+                <R> Box<R> map(Function<? super T, ? extends R> fn) {
+                    return new Box<>(fn.apply(value));
+                }
+            }
+            void test() {
+                Box<String> s = new Box<>("x");
+                var b = s.map(ArrayList::new).get();
+                b|
+            }
+        }
+        "#};
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(vec![
+            make_class("java/lang", "Object"),
+            make_class("java/lang", "String"),
+            ClassMetadata {
+                package: Some(Arc::from("java/util/function")),
+                name: Arc::from("Function"),
+                internal_name: Arc::from("java/util/function/Function"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("apply"),
+                    params: MethodParams::from([("Ljava/lang/Object;", "t")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from("(TT;)TR;")),
+                    return_type: Some(Arc::from("Ljava/lang/Object;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from(
+                    "<T:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;",
+                )),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util")),
+                name: Arc::from("ArrayList"),
+                internal_name: Arc::from("java/util/ArrayList"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("add"),
+                    params: MethodParams::from([("Ljava/lang/Object;", "e")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from("(TE;)Z")),
+                    return_type: Some(Arc::from("Z")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        let view = idx.view(root_scope());
+        let cursor_byte = src.find('|').expect("expected |");
+        let src_no_cursor = src.replacen('|', "", 1);
+        let rope = ropey::Rope::from_str(&src_no_cursor);
+        let cursor_char = rope.byte_to_char(cursor_byte);
+        let line = rope.char_to_line(cursor_char) as u32;
+        let col = (cursor_char - rope.line_to_char(line as usize)) as u32;
+        let mut parser = super::make_java_parser();
+        let tree = parser.parse(&src_no_cursor, None).expect("failed to parse");
+        let mut ctx = super::JavaLanguage
+            .parse_completion_context_with_tree(
+                &src_no_cursor,
+                &rope,
+                tree.root_node(),
+                line,
+                col,
+                None,
+                &ParseEnv {
+                    name_table: Some(view.build_name_table()),
+                },
+            )
+            .expect("parse_completion_context_with_tree returned None");
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let type_ctx = ctx
+            .extension::<crate::language::java::type_ctx::SourceTypeCtx>()
+            .expect("type ctx");
+        let resolver = crate::semantic::types::TypeResolver::new(&view);
+        let init_expr = "s.map(ArrayList::new).get()";
+        let chain = crate::completion::parser::parse_chain_from_expr(init_expr);
+        let seg_eval: Vec<String> = (0..chain.len())
+            .map(|i| {
+                crate::language::java::expression_typing::evaluate_chain(
+                    &chain[..=i],
+                    &ctx.local_variables,
+                    ctx.enclosing_internal_name.as_ref(),
+                    &resolver,
+                    type_ctx,
+                    &view,
+                )
+                .as_ref()
+                .map(crate::semantic::types::type_name::TypeName::to_internal_with_generics)
+                .unwrap_or_else(|| "<none>".to_string())
+            })
+            .collect();
+        let s_ty = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "s")
+            .map(|lv| lv.type_internal.to_internal_with_generics())
+            .unwrap_or_default();
+        let direct_map = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
+            &s_ty,
+            "map",
+            1,
+            &[],
+            &["ArrayList::new".to_string()],
+            &ctx.local_variables,
+            ctx.enclosing_internal_name.as_ref(),
+            Some(&|q| type_ctx.resolve_type_name_strict(q)),
+        );
+        let direct_get = direct_map.as_ref().and_then(|m| {
+            resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
+                &m.to_internal_with_generics(),
+                "get",
+                0,
+                &[],
+                &[],
+                &ctx.local_variables,
+                ctx.enclosing_internal_name.as_ref(),
+                Some(&|q| type_ctx.resolve_type_name_strict(q)),
+            )
+        });
+        let b = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "b")
+            .expect("expected local b");
+        assert_ne!(
+            b.type_internal.erased_internal(),
+            "var",
+            "inner-class constructor-reference chain should materialize b to concrete type; locals={:?} chain={:?} seg_eval={:?} direct_map={:?} direct_get={:?}",
+            ctx.local_variables
+                .iter()
+                .map(|lv| (
+                    lv.name.to_string(),
+                    lv.type_internal.to_internal_with_generics(),
+                    lv.init_expr.clone()
+                ))
+                .collect::<Vec<_>>(),
+            chain,
+            seg_eval,
+            direct_map
+                .as_ref()
+                .map(crate::semantic::types::type_name::TypeName::to_internal_with_generics),
+            direct_get
+                .as_ref()
+                .map(crate::semantic::types::type_name::TypeName::to_internal_with_generics)
+        );
+    }
+
+    #[test]
     fn test_functional_chain_conservative_when_method_ref_unresolved() {
         let idx = make_functional_chain_index();
         let view = idx.view(root_scope());
@@ -3586,6 +3762,37 @@ mod tests {
             ctx.local_variables
                 .iter()
                 .map(|v| v.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_locals_ignore_incomplete_following_declaration_type_token() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            var b = make();
+            b nums = makeNums();
+        }
+    }
+    "#};
+        let line = 3u32;
+        let col = src
+            .lines()
+            .nth(line as usize)
+            .and_then(|l| l.find("b nums").map(|c| c as u32 + 1))
+            .expect("expected b nums marker");
+        let ctx = at(src, line, col);
+        assert!(
+            ctx.local_variables.iter().any(|v| v.name.as_ref() == "b"),
+            "previous local b should be visible"
+        );
+        assert!(
+            !ctx.local_variables.iter().any(|v| v.name.as_ref() == "nums"),
+            "incomplete next declaration should not leak nums into locals: {:?}",
+            ctx.local_variables
+                .iter()
+                .map(|v| (v.name.to_string(), v.type_internal.to_internal_with_generics()))
                 .collect::<Vec<_>>()
         );
     }

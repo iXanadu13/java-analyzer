@@ -272,6 +272,10 @@ impl<'idx> TypeResolver<'idx> {
                 class.generic_signature.as_deref(),
                 &ret_jvm_str,
             ) {
+                let substituted = self.canonicalize_type_in_owner_scope(
+                    substituted,
+                    class.internal_name.as_ref(),
+                );
                 if substituted.erased_internal() == "void" {
                     return None;
                 }
@@ -281,9 +285,85 @@ impl<'idx> TypeResolver<'idx> {
             if let JvmType::Primitive('V') = resolved_ret {
                 return None;
             }
-            return Some(resolved_ret.to_type_name());
+            return Some(self.canonicalize_type_in_owner_scope(
+                resolved_ret.to_type_name(),
+                class.internal_name.as_ref(),
+            ));
         }
         None
+    }
+
+    fn canonicalize_type_in_owner_scope(&self, ty: TypeName, owner_internal: &str) -> TypeName {
+        let canonical_args: Vec<TypeName> = ty
+            .args
+            .into_iter()
+            .map(|a| self.canonicalize_type_in_owner_scope(a, owner_internal))
+            .collect();
+        let mut ty = TypeName {
+            base_internal: ty.base_internal,
+            args: canonical_args,
+            array_dims: ty.array_dims,
+        };
+
+        if ty.contains_slash()
+            || matches!(ty.base_internal.as_ref(), "+" | "-" | "?" | "*" | "capture")
+        {
+            return ty;
+        }
+
+        let base = ty.erased_internal();
+        if base.is_empty() {
+            return ty;
+        }
+
+        // Type variables / placeholders should remain as-is.
+        if base.chars().all(|c| c.is_ascii_uppercase()) {
+            return ty;
+        }
+
+        let owner_simple = owner_internal
+            .rsplit('/')
+            .next()
+            .unwrap_or(owner_internal)
+            .rsplit('$')
+            .next()
+            .unwrap_or(owner_internal);
+        if base == owner_simple {
+            ty.base_internal = Arc::from(owner_internal);
+            return ty;
+        }
+
+        if let Some(dollar_idx) = owner_internal.rfind('$') {
+            let outer = &owner_internal[..dollar_idx];
+            let candidate = format!("{outer}${base}");
+            if self.view.get_class(&candidate).is_some() {
+                ty.base_internal = Arc::from(candidate);
+                return ty;
+            }
+        }
+
+        if let Some(last_slash) = owner_internal.rfind('/') {
+            let pkg = &owner_internal[..last_slash];
+            let candidate = format!("{pkg}/{base}");
+            if self.view.get_class(&candidate).is_some() {
+                ty.base_internal = Arc::from(candidate);
+                return ty;
+            }
+        }
+
+        let java_lang_candidate = format!("java/lang/{base}");
+        if self.view.get_class(&java_lang_candidate).is_some() {
+            ty.base_internal = Arc::from(java_lang_candidate);
+            return ty;
+        }
+
+        let globals = self.view.get_classes_by_simple_name(base);
+        if globals.len() == 1 {
+            ty.base_internal = Arc::clone(&globals[0].internal_name);
+            return ty;
+        }
+
+        ty
     }
 
     fn infer_method_type_bindings_shallow(

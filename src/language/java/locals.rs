@@ -8,8 +8,7 @@ use crate::{
             JavaContextExtractor,
             type_ctx::SourceTypeCtx,
             utils::{
-                find_ancestor, get_initializer_text, infer_type_from_initializer,
-                java_type_to_internal,
+                find_ancestor, get_initializer_text, java_type_to_internal,
             },
         },
         ts_utils::{capture_text, find_method_by_offset, run_query},
@@ -61,6 +60,10 @@ pub fn extract_locals_with_type_ctx(
 
             let declarator = name_node.parent()?; // variable_declarator
             let decl = declarator.parent()?; // local_variable_declaration
+            if !is_visible_local_declaration_before_cursor(ctx.offset, name_node, declarator, decl)
+            {
+                return None;
+            }
 
             // Pattern 1: The declarator contains an argument list (direct method calls are inserted into it)
             {
@@ -288,22 +291,22 @@ fn collect_locals_in_errors(
                         if ty_node.start_byte() >= ctx.offset {
                             return None;
                         }
+                        let declarator = name_node.parent()?;
+                        let decl = declarator.parent()?;
+                        if !is_visible_local_declaration_before_cursor(
+                            ctx.offset, name_node, declarator, decl,
+                        ) {
+                            return None;
+                        }
                         let ty = ty_node.utf8_text(ctx.bytes()).ok()?;
                         let name = name_node.utf8_text(ctx.bytes()).ok()?;
                         let raw_ty = ty.trim();
 
                         if raw_ty == "var" {
-                            return Some(match infer_type_from_initializer(ty_node, ctx.bytes()) {
-                                Some(t) => LocalVar {
-                                    name: Arc::from(name),
-                                    type_internal: resolve_declared_source_type(&t, type_ctx),
-                                    init_expr: None,
-                                },
-                                None => LocalVar {
-                                    name: Arc::from(name),
-                                    type_internal: TypeName::new("var"),
-                                    init_expr: get_initializer_text(ty_node, ctx.bytes()),
-                                },
+                            return Some(LocalVar {
+                                name: Arc::from(name),
+                                type_internal: TypeName::new("var"),
+                                init_expr: get_initializer_text(ty_node, ctx.bytes()),
                             });
                         }
 
@@ -322,6 +325,20 @@ fn collect_locals_in_errors(
             collect_locals_in_errors(ctx, child, vars, type_ctx);
         }
     }
+}
+
+fn is_visible_local_declaration_before_cursor(
+    offset: usize,
+    name_node: Node,
+    declarator: Node,
+    decl: Node,
+) -> bool {
+    // Local becomes in-scope only after its declarator name is present.
+    // This blocks malformed/in-progress declarations (e.g. partial type token)
+    // from polluting locals with bogus type/name pairs.
+    name_node.start_byte() < offset
+        && declarator.start_byte() < offset
+        && decl.start_byte() < offset
 }
 
 #[cfg(test)]
@@ -589,6 +606,32 @@ mod tests {
         assert!(
             !vars.iter().any(|v| v.name.as_ref() == "str"),
             "`str` must not appear as a local variable (it was a misread type annotation)"
+        );
+    }
+
+    #[test]
+    fn test_incomplete_next_declaration_does_not_pollute_locals() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                var b = make();
+                b nums = makeNums();
+            }
+        }
+        "#};
+        let marker = "b nums";
+        let offset = src.find(marker).unwrap() + 1; // cursor right after the partial type token `b`
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            vars.iter().any(|v| v.name.as_ref() == "b"),
+            "previous declaration should still be visible"
+        );
+        assert!(
+            !vars.iter().any(|v| v.name.as_ref() == "nums"),
+            "in-progress next declaration must not leak as local"
         );
     }
 
