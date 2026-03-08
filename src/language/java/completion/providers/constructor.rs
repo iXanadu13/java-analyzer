@@ -25,16 +25,48 @@ impl CompletionProvider for ConstructorProvider {
 
     fn provide(
         &self,
-        _scope: IndexScope,
+        scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
     ) -> Vec<CompletionCandidate> {
+        self.provide_with_limit(scope, ctx, index, None).candidates
+    }
+
+    fn provide_with_limit(
+        &self,
+        _scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &IndexView,
+        limit: Option<usize>,
+    ) -> ProviderCompletionResult {
+        self.provide_internal(ctx, index, limit)
+    }
+}
+
+impl ConstructorProvider {
+    fn provide_internal(
+        &self,
+        ctx: &SemanticContext,
+        index: &IndexView,
+        limit: Option<usize>,
+    ) -> ProviderCompletionResult {
+        if limit == Some(0) {
+            return ProviderCompletionResult {
+                candidates: Vec::new(),
+                is_incomplete: true,
+            };
+        }
         let (class_prefix, expected_type) = match &ctx.location {
             CursorLocation::ConstructorCall {
                 class_prefix,
                 expected_type,
             } => (class_prefix.as_str(), expected_type.as_deref()),
-            _ => return vec![],
+            _ => {
+                return ProviderCompletionResult {
+                    candidates: vec![],
+                    is_incomplete: false,
+                };
+            }
         };
         let class_prefix = normalize_top_level_generic_base(class_prefix);
 
@@ -44,18 +76,27 @@ impl CompletionProvider for ConstructorProvider {
         } else {
             class_prefix
         };
+        let search_limit = limit.unwrap_or(50).clamp(1, 50);
         let metas = if class_prefix.contains('.') {
             qualified_nested_type_matches(class_prefix, ctx, index)
         } else {
             index
-                .fuzzy_search_classes(search_prefix, 50)
+                .fuzzy_search_classes(search_prefix, search_limit)
                 .into_iter()
                 .filter(|meta| is_constructor_type_visible(meta, ctx, index))
                 .collect()
         };
 
         let mut results = Vec::new();
+        let mut truncated = false;
+        let reached_limit = |len: usize, lim: Option<usize>| {
+            lim.is_some_and(|effective_limit| len >= effective_limit)
+        };
         for meta in metas {
+            if reached_limit(results.len(), limit) {
+                truncated = true;
+                break;
+            }
             let fqn = source_fqn_of_meta(&meta, index);
             let needs_import = is_import_needed(
                 &fqn,
@@ -102,6 +143,10 @@ impl CompletionProvider for ConstructorProvider {
             }
 
             for ctor in constructors {
+                if reached_limit(results.len(), limit) {
+                    truncated = true;
+                    break;
+                }
                 let readable_params = descriptor_params_to_readable(&ctor.desc());
                 let insert_text = format!("{}(", meta.name);
                 let detail = format!("new {}({})", fqn, readable_params);
@@ -125,32 +170,9 @@ impl CompletionProvider for ConstructorProvider {
                 results.push(candidate);
             }
         }
-        results
-    }
-
-    fn provide_with_limit(
-        &self,
-        _scope: IndexScope,
-        ctx: &SemanticContext,
-        index: &IndexView,
-        limit: Option<usize>,
-    ) -> ProviderCompletionResult {
-        let candidates = self.provide(_scope, ctx, index);
-        let Some(limit) = limit else {
-            return ProviderCompletionResult {
-                candidates,
-                is_incomplete: false,
-            };
-        };
-        if candidates.len() > limit {
-            return ProviderCompletionResult {
-                candidates: candidates.into_iter().take(limit).collect(),
-                is_incomplete: true,
-            };
-        }
         ProviderCompletionResult {
-            candidates,
-            is_incomplete: false,
+            candidates: results,
+            is_incomplete: truncated,
         }
     }
 }
@@ -352,15 +374,26 @@ mod tests {
                 super_name: None,
                 interfaces: vec![],
                 annotations: vec![],
-                methods: vec![MethodSummary {
-                    name: Arc::from("<init>"),
-                    params: MethodParams::empty(),
-                    annotations: vec![],
-                    access_flags: ACC_PUBLIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: None,
-                }],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("<init>"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: None,
+                    },
+                    MethodSummary {
+                        name: Arc::from("<init>"),
+                        params: MethodParams::from_method_descriptor("(I)V"),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: None,
+                    },
+                ],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
@@ -712,5 +745,59 @@ mod tests {
             "{:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_constructor_provide_with_limit_caps_and_marks_incomplete() {
+        let idx = WorkspaceIndex::new();
+        let mut methods = Vec::new();
+        for i in 0..10 {
+            let desc = format!("({})V", "I".repeat(i));
+            methods.push(MethodSummary {
+                name: Arc::from("<init>"),
+                params: MethodParams::from_method_descriptor(&desc),
+                annotations: vec![],
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            });
+        }
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("bench/p")),
+            name: Arc::from("ArrayType"),
+            internal_name: Arc::from("bench/p/ArrayType"),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods,
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let ctx = make_ctx("ArrayType", None, vec![]);
+        let limited = ConstructorProvider.provide_with_limit(
+            root_scope(),
+            &ctx,
+            &idx.view(root_scope()),
+            Some(5),
+        );
+        assert_eq!(limited.candidates.len(), 5);
+        assert!(limited.is_incomplete);
+
+        let full = ConstructorProvider.provide_with_limit(
+            root_scope(),
+            &ctx,
+            &idx.view(root_scope()),
+            None,
+        );
+        assert!(
+            full.candidates.len() >= 5,
+            "unbounded path should not be capped"
+        );
+        assert!(!full.is_incomplete);
     }
 }
