@@ -307,6 +307,16 @@ pub fn build_injected_source(
         )
     } else {
         let prefix = &extractor.source[replace_start..replace_end];
+        if class_member_position {
+            // In member declaration positions, keep injection as declaration-shaped,
+            // not expression/method-call shaped, otherwise parser recovers to ERROR.
+            return inject_at(
+                extractor,
+                replace_start,
+                replace_end,
+                &format!("void {prefix}{SENTINEL}() {{}}"),
+            );
+        }
         // cursor in scoped_type_identifier (e.g., java.util.A) -> add semicolon to turn into expression statement
         // let in_scoped_type = cursor_node.is_some_and(|n| {
         //     find_ancestor(n, "scoped_type_identifier").is_some()
@@ -852,6 +862,62 @@ mod tests {
             result
         );
         insta::assert_snapshot!("injection_class_body_slot_after_nested_class", out);
+    }
+
+    #[test]
+    fn test_inject_and_determine_class_body_partial_member_prefix_not_unknown() {
+        let src_with_cursor = indoc::indoc! {r#"
+        public class A {
+            prote|
+        }
+        "#};
+        let offset = src_with_cursor.find('|').expect("cursor marker");
+        let src = src_with_cursor.replacen('|', "", 1);
+        let (ctx, tree) = setup_ctx(&src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let injected = build_injected_source(&ctx, cursor_node);
+
+        assert!(
+            injected.contains(&format!("void prote{SENTINEL}() {{}}")),
+            "class-body partial declaration should use declaration-shaped injection, got:\n{}",
+            injected
+        );
+        assert!(
+            !injected.contains(&format!("prote{SENTINEL}();")),
+            "must not inject expression-shaped call in class body: {}",
+            injected
+        );
+
+        let (loc, query) = inject_and_determine(&ctx, cursor_node, None)
+            .expect("inject_and_determine should succeed in class member prefix");
+        assert!(!matches!(loc, CursorLocation::Unknown), "got {:?}", loc);
+        assert_eq!(query, "prote");
+    }
+
+    #[test]
+    fn test_snapshot_injection_class_body_partial_prefix_after_nested_class() {
+        let src_with_cursor = indoc::indoc! {r#"
+        public class A {
+            class B {}
+            prote|
+        }
+        "#};
+        let offset = src_with_cursor.find('|').expect("cursor marker");
+        let src = src_with_cursor.replacen('|', "", 1);
+        let (ctx, tree) = setup_ctx(&src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let injected = build_injected_source(&ctx, cursor_node);
+        let result = inject_and_determine(&ctx, cursor_node, None);
+        let out = format!(
+            "cursor_node_kind={:?}\ninjected_source=\n{}\nresult={:?}\n",
+            cursor_node.map(|n| n.kind().to_string()),
+            injected,
+            result
+        );
+        insta::assert_snapshot!(
+            "injection_class_body_partial_prefix_after_nested_class",
+            out
+        );
     }
 
     #[test]

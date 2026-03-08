@@ -1,0 +1,12 @@
+---
+source: src/language/java/injection.rs
+expression: out
+---
+cursor_node_kind=Some("identifier")
+injected_source=
+public class A {
+    class B {}
+    void prote__KIRO__() {}
+}
+;
+result=Some((Expression { prefix: "prote" }, "prote"))

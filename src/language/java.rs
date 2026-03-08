@@ -4919,4 +4919,67 @@ mod tests {
             "constructor body must not be class-member position"
         );
     }
+
+    #[test]
+    fn test_context_partial_member_prefix_top_level_class_not_unknown() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (ctx, _candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+                public class A {
+                    prote|
+                }
+            "#},
+            &view,
+        );
+        assert!(
+            !matches!(ctx.location, CursorLocation::Unknown),
+            "partial class member prefix should not be Unknown: {:?}",
+            ctx.location
+        );
+        assert!(ctx.is_class_member_position);
+    }
+
+    #[test]
+    fn test_context_partial_member_prefix_after_nested_class_not_unknown() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (ctx, _candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+                public class A {
+                    class B {}
+                    prote|
+                }
+            "#},
+            &view,
+        );
+        assert!(
+            !matches!(ctx.location, CursorLocation::Unknown),
+            "partial class member prefix after nested class should not be Unknown: {:?}",
+            ctx.location
+        );
+        assert!(ctx.is_class_member_position);
+    }
+
+    #[test]
+    fn test_context_partial_member_prefix_in_nested_class_not_unknown() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (ctx, _candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+                public class A {
+                    class B {
+                        prote|
+                    }
+                }
+            "#},
+            &view,
+        );
+        assert!(
+            !matches!(ctx.location, CursorLocation::Unknown),
+            "partial class member prefix in nested class should not be Unknown: {:?}",
+            ctx.location
+        );
+        assert!(ctx.is_class_member_position);
+    }
 }
