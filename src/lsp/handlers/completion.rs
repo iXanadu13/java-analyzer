@@ -5,7 +5,7 @@ use tracing::debug;
 use super::super::converters::candidate_to_lsp;
 use crate::completion::CandidateKind;
 use crate::completion::candidate::CompletionCandidate;
-use crate::completion::engine::CompletionEngine;
+use crate::completion::engine::{CompletionEngine, CompletionMetadata, CompletionPolicy};
 use crate::language::{LanguageRegistry, ParseEnv};
 use crate::semantic::CursorLocation;
 use crate::workspace::Workspace;
@@ -76,34 +76,83 @@ pub async fn handle_completion(
 
     tracing::debug!(location = ?ctx.location, query = %ctx.query, "parsed context");
 
-    let candidates = engine.complete(scope, ctx.clone(), lang, &view);
-
-    if candidates.is_empty() {
+    const MAX_ITEMS: usize = 100;
+    let completion = engine.complete_with_policy(
+        scope,
+        ctx.clone(),
+        lang,
+        &view,
+        CompletionPolicy {
+            broad_provider_limit: 256,
+            final_result_limit: Some(MAX_ITEMS),
+            short_prefix_len: 1,
+        },
+    );
+    if completion.candidates.is_empty() {
         debug!("no candidates");
         return None;
     }
 
+    let CompletionOutputParts {
+        candidates,
+        metadata,
+    } = CompletionOutputParts::from(completion);
     let candidates = lang.post_process_candidates(candidates, &ctx);
-
-    const MAX_ITEMS: usize = 100;
-    let items: Vec<CompletionItem> = candidates
-        .iter()
-        .take(MAX_ITEMS)
-        .map(|c| map_candidate_item(c, &ctx.location, &source_for_edits, position))
-        .collect();
-
-    let is_incomplete = candidates.len() > MAX_ITEMS;
+    let completion_list = build_completion_list(
+        metadata,
+        &candidates,
+        &ctx.location,
+        &source_for_edits,
+        position,
+        MAX_ITEMS,
+    );
 
     debug!(
-        count = items.len(),
-        incomplete = is_incomplete,
+        count = completion_list.items.len(),
+        incomplete = completion_list.is_incomplete,
+        broad_query = metadata.broad_query,
+        broad_provider = metadata.used_broad_provider,
+        provider_truncated = metadata.provider_truncated,
+        final_truncated = metadata.final_truncated,
         "returning completions"
     );
 
-    Some(CompletionResponse::List(CompletionList {
+    Some(CompletionResponse::List(completion_list))
+}
+
+fn build_completion_list(
+    metadata: CompletionMetadata,
+    candidates: &[CompletionCandidate],
+    location: &CursorLocation,
+    source_for_edits: &str,
+    position: Position,
+    max_items: usize,
+) -> CompletionList {
+    let items: Vec<CompletionItem> = candidates
+        .iter()
+        .take(max_items)
+        .map(|c| map_candidate_item(c, location, source_for_edits, position))
+        .collect();
+
+    let is_incomplete = metadata.is_incomplete() || candidates.len() > max_items;
+    CompletionList {
         is_incomplete,
         items,
-    }))
+    }
+}
+
+struct CompletionOutputParts {
+    candidates: Vec<CompletionCandidate>,
+    metadata: CompletionMetadata,
+}
+
+impl From<crate::completion::engine::CompletionOutput> for CompletionOutputParts {
+    fn from(value: crate::completion::engine::CompletionOutput) -> Self {
+        Self {
+            candidates: value.candidates,
+            metadata: value.metadata,
+        }
+    }
 }
 
 fn map_candidate_item(
@@ -263,6 +312,7 @@ fn make_member_access_text_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::completion::engine::CompletionMetadata;
     use std::sync::Arc;
 
     fn edit_range(edit: &CompletionTextEdit) -> Range {
@@ -332,5 +382,88 @@ mod tests {
         assert_eq!(range.start.character, pos.character);
         assert_eq!(range.end.character, pos.character);
         assert_eq!(edit_text(&edit), "Box");
+    }
+
+    fn mk_candidate(label: &str) -> CompletionCandidate {
+        CompletionCandidate::new(
+            Arc::from(label),
+            label.to_string(),
+            CandidateKind::ClassName,
+            "t",
+        )
+    }
+
+    #[test]
+    fn test_build_completion_list_small_result_is_complete() {
+        let candidates = vec![mk_candidate("Alpha"), mk_candidate("Beta")];
+        let list = build_completion_list(
+            CompletionMetadata::default(),
+            &candidates,
+            &CursorLocation::Expression {
+                prefix: "A".to_string(),
+            },
+            "A",
+            Position::new(0, 1),
+            10,
+        );
+        assert!(!list.is_incomplete);
+        assert_eq!(list.items.len(), 2);
+    }
+
+    #[test]
+    fn test_build_completion_list_truncated_result_is_incomplete() {
+        let candidates: Vec<_> = (0..5).map(|i| mk_candidate(&format!("Item{i}"))).collect();
+        let list = build_completion_list(
+            CompletionMetadata {
+                final_truncated: true,
+                ..CompletionMetadata::default()
+            },
+            &candidates,
+            &CursorLocation::Expression {
+                prefix: String::new(),
+            },
+            "",
+            Position::new(0, 0),
+            3,
+        );
+        assert!(list.is_incomplete);
+        assert_eq!(list.items.len(), 3);
+    }
+
+    #[test]
+    fn test_build_completion_list_threshold_behavior() {
+        let candidates = vec![mk_candidate("A"), mk_candidate("B"), mk_candidate("C")];
+        let list = build_completion_list(
+            CompletionMetadata::default(),
+            &candidates,
+            &CursorLocation::Expression {
+                prefix: "A".to_string(),
+            },
+            "A",
+            Position::new(0, 1),
+            2,
+        );
+        assert!(list.is_incomplete);
+        assert_eq!(list.items.len(), 2);
+    }
+
+    #[test]
+    fn test_build_completion_list_provider_partial_marks_incomplete() {
+        let candidates = vec![mk_candidate("A"), mk_candidate("B")];
+        let list = build_completion_list(
+            CompletionMetadata {
+                provider_truncated: true,
+                ..CompletionMetadata::default()
+            },
+            &candidates,
+            &CursorLocation::Expression {
+                prefix: String::new(),
+            },
+            "",
+            Position::new(0, 0),
+            10,
+        );
+        assert!(list.is_incomplete);
+        assert_eq!(list.items.len(), 2);
     }
 }

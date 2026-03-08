@@ -1451,4 +1451,43 @@ mod tests {
             "override must be skipped in method body"
         );
     }
+
+    #[test]
+    fn test_override_clone_display_keeps_object_return_type() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "java/lang",
+                "Object",
+                None,
+                vec![method("clone", "()Ljava/lang/Object;", ACC_PROTECTED)],
+            ),
+            make_class("com/example", "Child", Some("java/lang/Object"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pro", "com/example/Child");
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let clone = results
+            .iter()
+            .find(|c| c.label.contains("clone"))
+            .expect("clone override candidate should exist");
+
+        assert!(
+            clone.label.contains("java.lang.Object clone(")
+                || clone.label.contains("Object clone("),
+            "clone label should keep Object return type, got: {}",
+            clone.label
+        );
+        assert!(
+            !clone.label.contains("void clone("),
+            "clone label must not collapse Object to void: {}",
+            clone.label
+        );
+        assert!(
+            clone.insert_text.contains("java.lang.Object clone(")
+                || clone.insert_text.contains("Object clone("),
+            "insert text should keep Object return type: {}",
+            clone.insert_text
+        );
+    }
 }

@@ -2,7 +2,7 @@ use crate::{
     completion::{
         CandidateKind, CompletionCandidate,
         import_utils::{is_import_needed, source_fqn_of_meta},
-        provider::CompletionProvider,
+        provider::{CompletionProvider, ProviderCompletionResult, ProviderSearchSpace},
         scorer::AccessFilter,
     },
     index::{IndexScope, IndexView},
@@ -17,6 +17,10 @@ pub struct ConstructorProvider;
 impl CompletionProvider for ConstructorProvider {
     fn name(&self) -> &'static str {
         "constructor"
+    }
+
+    fn search_space(&self, _ctx: &SemanticContext) -> ProviderSearchSpace {
+        ProviderSearchSpace::Broad
     }
 
     fn provide(
@@ -122,6 +126,32 @@ impl CompletionProvider for ConstructorProvider {
             }
         }
         results
+    }
+
+    fn provide_with_limit(
+        &self,
+        _scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &IndexView,
+        limit: Option<usize>,
+    ) -> ProviderCompletionResult {
+        let candidates = self.provide(_scope, ctx, index);
+        let Some(limit) = limit else {
+            return ProviderCompletionResult {
+                candidates,
+                is_incomplete: false,
+            };
+        };
+        if candidates.len() > limit {
+            return ProviderCompletionResult {
+                candidates: candidates.into_iter().take(limit).collect(),
+                is_incomplete: true,
+            };
+        }
+        ProviderCompletionResult {
+            candidates,
+            is_incomplete: false,
+        }
     }
 }
 

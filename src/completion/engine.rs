@@ -1,10 +1,49 @@
 use crate::completion::CompletionCandidate;
 use crate::completion::post_processor;
-use crate::completion::provider::CompletionProvider;
+use crate::completion::provider::{
+    CompletionProvider, ProviderCompletionResult, ProviderSearchSpace,
+};
 use crate::index::{IndexScope, IndexView};
 use crate::language::Language;
-use crate::semantic::SemanticContext;
+use crate::semantic::{CursorLocation, SemanticContext};
 use std::time::Instant;
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompletionPolicy {
+    pub broad_provider_limit: usize,
+    pub final_result_limit: Option<usize>,
+    pub short_prefix_len: usize,
+}
+
+impl Default for CompletionPolicy {
+    fn default() -> Self {
+        Self {
+            broad_provider_limit: 256,
+            final_result_limit: None,
+            short_prefix_len: 1,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompletionMetadata {
+    pub broad_query: bool,
+    pub used_broad_provider: bool,
+    pub provider_truncated: bool,
+    pub final_truncated: bool,
+}
+
+impl CompletionMetadata {
+    pub fn is_incomplete(&self) -> bool {
+        self.provider_truncated || self.final_truncated
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct CompletionOutput {
+    pub candidates: Vec<CompletionCandidate>,
+    pub metadata: CompletionMetadata,
+}
 
 pub struct CompletionEngine {
     extra_providers: Vec<Box<dyn CompletionProvider>>,
@@ -24,14 +63,32 @@ impl CompletionEngine {
     pub fn complete(
         &self,
         scope: IndexScope,
-        mut ctx: SemanticContext,
+        ctx: SemanticContext,
         lang: &dyn Language,
         index: &IndexView,
     ) -> Vec<CompletionCandidate> {
+        self.complete_with_policy(scope, ctx, lang, index, CompletionPolicy::default())
+            .candidates
+    }
+
+    pub fn complete_with_policy(
+        &self,
+        scope: IndexScope,
+        mut ctx: SemanticContext,
+        lang: &dyn Language,
+        index: &IndexView,
+        policy: CompletionPolicy,
+    ) -> CompletionOutput {
         lang.enrich_completion_context(&mut ctx, scope, index);
 
         let t_total = Instant::now();
         let mut candidates: Vec<CompletionCandidate> = Vec::new();
+        let broad_query = is_broad_query(&ctx, policy.short_prefix_len);
+        let mut metadata = CompletionMetadata {
+            broad_query,
+            ..CompletionMetadata::default()
+        };
+
         for provider in lang.completion_providers() {
             if !provider.is_applicable(&ctx) {
                 tracing::debug!(
@@ -41,10 +98,21 @@ impl CompletionEngine {
                 continue;
             }
             let tp = Instant::now();
-            let mut out = provider.provide(scope, &ctx, index);
+            let use_limit =
+                broad_query && provider.search_space(&ctx) == ProviderSearchSpace::Broad;
+            let limit = use_limit.then_some(policy.broad_provider_limit);
+            if use_limit {
+                metadata.used_broad_provider = true;
+            }
+            let ProviderCompletionResult {
+                candidates: mut out,
+                is_incomplete,
+            } = provider.provide_with_limit(scope, &ctx, index, limit);
+            metadata.provider_truncated |= is_incomplete;
             tracing::debug!(
                 provider = provider.name(),
                 candidates = out.len(),
+                limited = use_limit,
                 elapsed_ms = tp.elapsed().as_secs_f64() * 1000.0,
                 "completion provider dispatch"
             );
@@ -60,10 +128,21 @@ impl CompletionEngine {
                 continue;
             }
             let tp = Instant::now();
-            let mut out = provider.provide(scope, &ctx, index);
+            let use_limit =
+                broad_query && provider.search_space(&ctx) == ProviderSearchSpace::Broad;
+            let limit = use_limit.then_some(policy.broad_provider_limit);
+            if use_limit {
+                metadata.used_broad_provider = true;
+            }
+            let ProviderCompletionResult {
+                candidates: mut out,
+                is_incomplete,
+            } = provider.provide_with_limit(scope, &ctx, index, limit);
+            metadata.provider_truncated |= is_incomplete;
             tracing::debug!(
                 provider = provider.name(),
                 candidates = out.len(),
+                limited = use_limit,
                 elapsed_ms = tp.elapsed().as_secs_f64() * 1000.0,
                 "completion extra provider dispatch"
             );
@@ -75,7 +154,40 @@ impl CompletionEngine {
             candidates = candidates.len(),
             "completion provider stage total"
         );
-        post_processor::process(candidates, &ctx.query)
+        let mut candidates = post_processor::process(candidates, &ctx.query);
+        if let Some(limit) = policy.final_result_limit
+            && candidates.len() > limit
+        {
+            candidates.truncate(limit);
+            metadata.final_truncated = true;
+        }
+
+        CompletionOutput {
+            candidates,
+            metadata,
+        }
+    }
+}
+
+fn is_broad_query(ctx: &SemanticContext, short_prefix_len: usize) -> bool {
+    match &ctx.location {
+        CursorLocation::Expression { prefix }
+        | CursorLocation::TypeAnnotation { prefix }
+        | CursorLocation::MethodArgument { prefix } => {
+            !prefix.contains('.') && prefix.len() <= short_prefix_len
+        }
+        CursorLocation::ConstructorCall { class_prefix, .. } => {
+            !class_prefix.contains('.') && class_prefix.len() <= short_prefix_len
+        }
+        CursorLocation::MemberAccess { .. }
+        | CursorLocation::StaticAccess { .. }
+        | CursorLocation::Import { .. }
+        | CursorLocation::ImportStatic { .. }
+        | CursorLocation::MethodReference { .. }
+        | CursorLocation::VariableName { .. }
+        | CursorLocation::Annotation { .. }
+        | CursorLocation::StringLiteral { .. }
+        | CursorLocation::Unknown => false,
     }
 }
 
@@ -90,6 +202,7 @@ mod tests {
     use super::*;
     use crate::{
         completion::parser::parse_chain_from_expr,
+        completion::provider::{ProviderCompletionResult, ProviderSearchSpace},
         index::{
             ClassMetadata, ClassOrigin, IndexView, MethodParams, MethodSummary, ModuleId,
             WorkspaceIndex,
@@ -103,6 +216,7 @@ mod tests {
     use rust_asm::constants::ACC_PUBLIC;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tree_sitter::Parser;
 
     fn root_scope() -> IndexScope {
         IndexScope {
@@ -200,6 +314,108 @@ mod tests {
         }
     }
 
+    struct BroadMockProvider {
+        count: usize,
+    }
+
+    impl CompletionProvider for BroadMockProvider {
+        fn name(&self) -> &'static str {
+            "broad-mock"
+        }
+
+        fn search_space(&self, _ctx: &SemanticContext) -> ProviderSearchSpace {
+            ProviderSearchSpace::Broad
+        }
+
+        fn provide(
+            &self,
+            _scope: IndexScope,
+            _ctx: &SemanticContext,
+            _index: &IndexView,
+        ) -> Vec<CompletionCandidate> {
+            (0..self.count)
+                .map(|i| {
+                    CompletionCandidate::new(
+                        Arc::from(format!("Item{i}")),
+                        format!("Item{i}"),
+                        crate::completion::CandidateKind::ClassName,
+                        self.name(),
+                    )
+                })
+                .collect()
+        }
+
+        fn provide_with_limit(
+            &self,
+            _scope: IndexScope,
+            _ctx: &SemanticContext,
+            _index: &IndexView,
+            limit: Option<usize>,
+        ) -> ProviderCompletionResult {
+            let all = self.provide(_scope, _ctx, _index);
+            let Some(limit) = limit else {
+                return ProviderCompletionResult {
+                    candidates: all,
+                    is_incomplete: false,
+                };
+            };
+            let is_incomplete = all.len() > limit;
+            ProviderCompletionResult {
+                candidates: all.into_iter().take(limit).collect(),
+                is_incomplete,
+            }
+        }
+    }
+
+    struct NarrowMockProvider {
+        count: usize,
+    }
+
+    impl CompletionProvider for NarrowMockProvider {
+        fn name(&self) -> &'static str {
+            "narrow-mock"
+        }
+
+        fn search_space(&self, _ctx: &SemanticContext) -> ProviderSearchSpace {
+            ProviderSearchSpace::Narrow
+        }
+
+        fn provide(
+            &self,
+            _scope: IndexScope,
+            _ctx: &SemanticContext,
+            _index: &IndexView,
+        ) -> Vec<CompletionCandidate> {
+            (0..self.count)
+                .map(|i| {
+                    CompletionCandidate::new(
+                        Arc::from(format!("N{i}")),
+                        format!("N{i}"),
+                        crate::completion::CandidateKind::ClassName,
+                        self.name(),
+                    )
+                })
+                .collect()
+        }
+    }
+
+    #[derive(Debug)]
+    struct DummyLanguage;
+
+    impl crate::language::Language for DummyLanguage {
+        fn id(&self) -> &'static str {
+            "dummy"
+        }
+
+        fn supports(&self, language_id: &str) -> bool {
+            language_id == "dummy"
+        }
+
+        fn make_parser(&self) -> Parser {
+            crate::language::java::make_java_parser()
+        }
+    }
+
     #[test]
     fn test_engine_skips_provider_when_not_applicable() {
         let idx = make_index_with_random_class();
@@ -228,6 +444,108 @@ mod tests {
         }));
         let _ = engine.complete(root_scope(), ctx, &JavaLanguage, &view);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_small_narrow_results_stay_complete() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: Some(Arc::from("org/cubewhy/Owner")),
+                member_prefix: "m".to_string(),
+                receiver_expr: "owner".to_string(),
+                arguments: None,
+            },
+            "m",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/Main")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        );
+        let mut engine = CompletionEngine::new();
+        engine.register_provider(Box::new(NarrowMockProvider { count: 3 }));
+        let out = engine.complete_with_policy(
+            root_scope(),
+            ctx,
+            &DummyLanguage,
+            &view,
+            CompletionPolicy {
+                broad_provider_limit: 2,
+                final_result_limit: Some(10),
+                short_prefix_len: 1,
+            },
+        );
+        assert_eq!(out.candidates.len(), 3);
+        assert!(!out.metadata.is_incomplete());
+    }
+
+    #[test]
+    fn test_broad_truncated_results_mark_incomplete() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/Main")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        );
+        let mut engine = CompletionEngine::new();
+        engine.register_provider(Box::new(BroadMockProvider { count: 12 }));
+        let out = engine.complete_with_policy(
+            root_scope(),
+            ctx,
+            &DummyLanguage,
+            &view,
+            CompletionPolicy {
+                broad_provider_limit: 5,
+                final_result_limit: Some(8),
+                short_prefix_len: 1,
+            },
+        );
+        assert_eq!(out.candidates.len(), 5);
+        assert!(out.metadata.provider_truncated);
+        assert!(out.metadata.is_incomplete());
+    }
+
+    #[test]
+    fn test_threshold_controls_final_truncation() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "abc".to_string(),
+            },
+            "abc",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/Main")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        );
+        let mut engine = CompletionEngine::new();
+        engine.register_provider(Box::new(NarrowMockProvider { count: 6 }));
+        let out = engine.complete_with_policy(
+            root_scope(),
+            ctx,
+            &DummyLanguage,
+            &view,
+            CompletionPolicy {
+                broad_provider_limit: 10,
+                final_result_limit: Some(4),
+                short_prefix_len: 1,
+            },
+        );
+        assert_eq!(out.candidates.len(), 4);
+        assert!(out.metadata.final_truncated);
+        assert!(out.metadata.is_incomplete());
     }
 
     fn make_index_with_random_class() -> WorkspaceIndex {

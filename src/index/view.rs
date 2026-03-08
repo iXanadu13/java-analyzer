@@ -67,45 +67,11 @@ impl IndexView {
 
     pub fn get_source_type_name(&self, internal: &str) -> Option<String> {
         let class = self.get_class(internal)?;
-
-        let mut package_prefix = String::new();
-        if let Some(ref pkg) = class.package {
-            package_prefix.push_str(&pkg.replace('/', "."));
-            package_prefix.push('.');
+        if class.inner_class_of.is_some() || class.internal_name.contains('$') {
+            // For nested/inner classes, internal name already encodes the owner chain.
+            // Converting separators is O(length) and avoids global index scans.
+            return Some(class.internal_name.replace('/', ".").replace('$', "."));
         }
-
-        // Primary path: reconstruct nested source name from explicit inner-class metadata.
-        if class.inner_class_of.is_some() {
-            let mut chain = vec![class.name.to_string()];
-            let pkg = class.package.clone();
-            let mut current = Arc::clone(&class);
-            while let Some(parent_name) = current.inner_class_of.clone() {
-                chain.push(parent_name.to_string());
-                let parent = self
-                    .iter_all_classes()
-                    .into_iter()
-                    .find(|c| c.name.as_ref() == parent_name.as_ref() && c.package == pkg);
-                match parent {
-                    Some(p) => current = p,
-                    None => {
-                        chain.clear();
-                        break;
-                    }
-                }
-            }
-            if !chain.is_empty() {
-                chain.reverse();
-                return Some(format!("{package_prefix}{}", chain.join(".")));
-            }
-        }
-
-        // Compatibility fallback when metadata chain is missing/incomplete.
-        if internal.contains('$') {
-            let mut base = internal.replace('/', ".");
-            base = base.replace('$', ".");
-            return Some(base);
-        }
-
         Some(class.source_name())
     }
 
@@ -712,6 +678,144 @@ mod tests {
         assert_eq!(
             view.get_source_type_name("org/cubewhy/TopLevel").as_deref(),
             Some("org.cubewhy.TopLevel")
+        );
+    }
+
+    #[test]
+    fn test_get_source_type_name_avoids_global_scan_hot_path() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let mut classes = vec![
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Outer"),
+                internal_name: Arc::from("org/cubewhy/Outer"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: rust_asm::constants::ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Middle"),
+                internal_name: Arc::from("org/cubewhy/Outer$Middle"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: rust_asm::constants::ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("Outer")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Inner"),
+                internal_name: Arc::from("org/cubewhy/Outer$Middle$Inner"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: rust_asm::constants::ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("Middle")),
+                origin: ClassOrigin::Unknown,
+            },
+        ];
+        for i in 0..12_000 {
+            classes.push(ClassMetadata {
+                package: Some(Arc::from("bench/p")),
+                name: Arc::from(format!("Dummy{i:05}")),
+                internal_name: Arc::from(format!("bench/p/Dummy{i:05}")),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: rust_asm::constants::ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            });
+        }
+        idx.add_classes(classes);
+        let view = idx.view(scope);
+        let target = view
+            .get_class("org/cubewhy/Outer$Middle$Inner")
+            .expect("target class");
+
+        fn old_style_source_name(view: &IndexView, class: &Arc<ClassMetadata>) -> Option<String> {
+            let mut package_prefix = String::new();
+            if let Some(ref pkg) = class.package {
+                package_prefix.push_str(&pkg.replace('/', "."));
+                package_prefix.push('.');
+            }
+            if class.inner_class_of.is_some() {
+                let mut chain = vec![class.name.to_string()];
+                let pkg = class.package.clone();
+                let mut current = Arc::clone(class);
+                while let Some(parent_name) = current.inner_class_of.clone() {
+                    chain.push(parent_name.to_string());
+                    let parent = view
+                        .iter_all_classes()
+                        .into_iter()
+                        .find(|c| c.name.as_ref() == parent_name.as_ref() && c.package == pkg);
+                    match parent {
+                        Some(p) => current = p,
+                        None => {
+                            chain.clear();
+                            break;
+                        }
+                    }
+                }
+                if !chain.is_empty() {
+                    chain.reverse();
+                    return Some(format!("{package_prefix}{}", chain.join(".")));
+                }
+            }
+            if class.internal_name.contains('$') {
+                return Some(class.internal_name.replace('/', ".").replace('$', "."));
+            }
+            Some(class.source_name())
+        }
+
+        let t_old = std::time::Instant::now();
+        let mut old_last = None;
+        for _ in 0..60 {
+            old_last = old_style_source_name(&view, &target);
+        }
+        let old_ms = t_old.elapsed().as_secs_f64() * 1000.0;
+
+        let t_new = std::time::Instant::now();
+        let mut new_last = None;
+        for _ in 0..60 {
+            new_last = view.get_source_type_name(target.internal_name.as_ref());
+        }
+        let new_ms = t_new.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!(
+            "source_type_name_perf: old_ms={old_ms:.3} new_ms={new_ms:.3} old={:?} new={:?}",
+            old_last, new_last
+        );
+
+        assert_eq!(
+            new_last.as_deref(),
+            Some("org.cubewhy.Outer.Middle.Inner"),
+            "nested source name must preserve owner chain"
+        );
+        assert_eq!(new_last, old_last);
+        assert!(
+            new_ms < old_ms,
+            "optimized path should beat global-scan reconstruction"
         );
     }
 

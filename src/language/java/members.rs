@@ -33,6 +33,20 @@ pub fn is_java_keyword(name: &str) -> bool {
     )
 }
 
+fn is_method_return_type_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "void_type"
+            | "integral_type"
+            | "floating_point_type"
+            | "boolean_type"
+            | "type_identifier"
+            | "scoped_type_identifier"
+            | "array_type"
+            | "generic_type"
+    )
+}
+
 pub fn extract_class_members_from_body(
     ctx: &JavaContextExtractor,
     body: Node,
@@ -221,18 +235,7 @@ pub fn parse_partial_methods_from_error(
         let ret_type = children[..param_pos]
             .iter()
             .rev()
-            .find(|n| {
-                matches!(
-                    n.kind(),
-                    "void_type"
-                        | "integral_type"
-                        | "floating_point_type"
-                        | "boolean_type"
-                        | "type_identifier"
-                        | "array_type"
-                        | "generic_type"
-                )
-            })
+            .find(|n| is_method_return_type_kind(n.kind()))
             .map(|n| ctx.node_text(*n))
             .unwrap_or("void");
 
@@ -296,6 +299,7 @@ pub fn parse_partial_methods_from_error(
                 | "floating_point_type"
                 | "boolean_type"
                 | "type_identifier"
+                | "scoped_type_identifier"
                 | "array_type"
                 | "generic_type" => {
                     if ret_type == "void" {
@@ -320,6 +324,7 @@ pub fn parse_partial_methods_from_error(
                             | "floating_point_type"
                             | "boolean_type"
                             | "type_identifier"
+                            | "scoped_type_identifier"
                             | "array_type"
                             | "generic_type" => {
                                 if ret_type == "void" {
@@ -393,6 +398,7 @@ pub fn parse_method_node(
             | "floating_point_type"
             | "boolean_type"
             | "type_identifier"
+            | "scoped_type_identifier"
             | "array_type"
             | "generic_type" => {
                 ret_type = ctx.node_text(c);
@@ -685,6 +691,7 @@ fn parse_misread_method(
                 method_annos = parse_annotations_in_node(ctx, c, type_ctx);
             }
             "type_identifier"
+            | "scoped_type_identifier"
             | "void_type"
             | "integral_type"
             | "floating_point_type"
@@ -1094,6 +1101,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["separator", "parts"],
             "varargs parameter names should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_parse_scoped_object_return_type_not_void() {
+        let src = indoc::indoc! {r#"
+        class A {
+            protected java.lang.Object clone() { return null; }
+        }
+        "#};
+        let (ctx, tree) = setup(src);
+        let type_ctx = SourceTypeCtx::new(None, vec![], None);
+        let mut members = Vec::new();
+        collect_members_from_node(&ctx, tree.root_node(), &type_ctx, &mut members);
+
+        let clone = members
+            .iter()
+            .find(|m| m.name().as_ref() == "clone")
+            .expect("clone method");
+        let CurrentClassMember::Method(clone) = clone else {
+            panic!("clone should be method");
+        };
+        assert!(
+            clone.desc().as_ref().contains("Object"),
+            "descriptor should preserve Object return type, got {}",
+            clone.desc()
+        );
+        assert_ne!(
+            clone.return_type.as_deref(),
+            Some("V"),
+            "scoped java.lang.Object return type must not collapse to void"
+        );
+        let ret = clone.return_type.as_deref().unwrap_or("");
+        assert!(
+            ret.contains("Object"),
+            "return type should preserve Object, got {ret}"
         );
     }
 

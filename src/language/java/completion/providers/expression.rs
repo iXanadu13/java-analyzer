@@ -1,7 +1,8 @@
 use crate::{
     completion::{
-        CandidateKind, CompletionCandidate, fuzzy, import_utils::is_import_needed,
-        provider::CompletionProvider,
+        CandidateKind, CompletionCandidate, fuzzy,
+        import_utils::is_import_needed,
+        provider::{CompletionProvider, ProviderCompletionResult, ProviderSearchSpace},
     },
     index::{IndexScope, IndexView},
     language::java::completion::providers::type_lookup::qualified_nested_type_matches,
@@ -18,6 +19,10 @@ impl CompletionProvider for ExpressionProvider {
         "expression"
     }
 
+    fn search_space(&self, _ctx: &SemanticContext) -> ProviderSearchSpace {
+        ProviderSearchSpace::Broad
+    }
+
     fn is_applicable(&self, ctx: &SemanticContext) -> bool {
         matches!(
             &ctx.location,
@@ -31,11 +36,39 @@ impl CompletionProvider for ExpressionProvider {
 
     fn provide(
         &self,
-        _scope: IndexScope,
+        scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
     ) -> Vec<CompletionCandidate> {
+        self.provide_with_limit(scope, ctx, index, None).candidates
+    }
+
+    fn provide_with_limit(
+        &self,
+        _scope: IndexScope,
+        ctx: &SemanticContext,
+        index: &IndexView,
+        limit: Option<usize>,
+    ) -> ProviderCompletionResult {
+        self.provide_internal(ctx, index, limit)
+    }
+}
+
+impl ExpressionProvider {
+    fn provide_internal(
+        &self,
+        ctx: &SemanticContext,
+        index: &IndexView,
+        limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         let trace_enabled = tracing::enabled!(tracing::Level::DEBUG);
+        if limit == Some(0) {
+            return ProviderCompletionResult {
+                candidates: Vec::new(),
+                is_incomplete: true,
+            };
+        }
+
         if let CursorLocation::MemberAccess {
             receiver_semantic_type,
             receiver_type,
@@ -52,8 +85,12 @@ impl CompletionProvider for ExpressionProvider {
                 .or_else(|| receiver_type.clone())
                 .or_else(|| resolver.resolve_type_name(ctx, receiver_expr));
             let Some(owner_internal) = owner else {
-                return vec![];
+                return ProviderCompletionResult {
+                    candidates: vec![],
+                    is_incomplete: false,
+                };
             };
+
             let mut out = Vec::new();
             let member_prefix_lower =
                 (!member_prefix.is_empty()).then(|| member_prefix.to_lowercase());
@@ -74,10 +111,12 @@ impl CompletionProvider for ExpressionProvider {
                     .with_score(88.0 + score),
                 );
             }
+
             if trace_enabled {
                 tracing::debug!(
                     provider = self.name(),
                     member_access = true,
+                    limit = ?limit,
                     receiver_expr,
                     owner_internal = %owner_internal,
                     candidates = out.len(),
@@ -85,7 +124,10 @@ impl CompletionProvider for ExpressionProvider {
                     "completion provider timing"
                 );
             }
-            return out;
+            return ProviderCompletionResult {
+                candidates: out,
+                is_incomplete: false,
+            };
         }
 
         if let CursorLocation::StaticAccess {
@@ -118,21 +160,31 @@ impl CompletionProvider for ExpressionProvider {
                 tracing::debug!(
                     provider = self.name(),
                     static_access = true,
+                    limit = ?limit,
                     owner_internal = %class_internal_name,
                     candidates = out.len(),
                     elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0,
                     "completion provider timing"
                 );
             }
-            return out;
+            return ProviderCompletionResult {
+                candidates: out,
+                is_incomplete: false,
+            };
         }
 
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::TypeAnnotation { prefix } => prefix.as_str(),
             CursorLocation::MethodArgument { prefix } => prefix.as_str(),
-            _ => return vec![],
+            _ => {
+                return ProviderCompletionResult {
+                    candidates: vec![],
+                    is_incomplete: false,
+                };
+            }
         };
+
         let t0 = Instant::now();
         let is_type_annotation = matches!(&ctx.location, CursorLocation::TypeAnnotation { .. });
 
@@ -142,27 +194,33 @@ impl CompletionProvider for ExpressionProvider {
                 tracing::debug!(
                     provider = self.name(),
                     prefix,
+                    limit = ?limit,
                     qualified = true,
                     candidates = results.len(),
                     elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0,
                     "completion provider timing"
                 );
             }
-            return results;
+            return ProviderCompletionResult {
+                candidates: results,
+                is_incomplete: false,
+            };
         }
 
         let prefix_lower = prefix.to_lowercase();
-
-        // Package name of the current file (used to determine if it is in the same package)
         let current_pkg = ctx.enclosing_package.as_deref();
-
         let mut results = Vec::new();
         let mut seen_internals: std::collections::HashSet<Arc<str>> = Default::default();
-        let t_imports = Instant::now();
+        let reached_limit = |len: usize, lim: Option<usize>| {
+            lim.is_some_and(|effective_limit| len >= effective_limit)
+        };
 
-        // Classes that have already been imported in current context
+        let t_imports = Instant::now();
         let imported = index.resolve_imports(&ctx.existing_imports);
         for meta in &imported {
+            if reached_limit(results.len(), limit) {
+                break;
+            }
             if !is_type_visible_in_context(meta, ctx, index, is_type_annotation) {
                 continue;
             }
@@ -200,11 +258,10 @@ impl CompletionProvider for ExpressionProvider {
         let fuzzy_pool = if prefix.is_empty() {
             Vec::new()
         } else {
-            index.fuzzy_search_classes(prefix, 1024)
+            index.fuzzy_search_classes(prefix, limit.unwrap_or(1024))
         };
         let fuzzy_ms = t_fuzzy.elapsed().as_secs_f64() * 1000.0;
 
-        // Same package
         let t_same_pkg = Instant::now();
         if let Some(pkg) = current_pkg {
             let iter: Vec<_> = if prefix.is_empty() {
@@ -216,7 +273,11 @@ impl CompletionProvider for ExpressionProvider {
                     .cloned()
                     .collect()
             };
+
             for meta in iter {
+                if reached_limit(results.len(), limit) {
+                    break;
+                }
                 if !is_type_visible_in_context(&meta, ctx, index, is_type_annotation) {
                     continue;
                 }
@@ -249,10 +310,12 @@ impl CompletionProvider for ExpressionProvider {
         }
         let same_pkg_ms = t_same_pkg.elapsed().as_secs_f64() * 1000.0;
 
-        // Other classes (global, require auto-import)
         let t_global = Instant::now();
         if !prefix.is_empty() {
             for meta in fuzzy_pool {
+                if reached_limit(results.len(), limit) {
+                    break;
+                }
                 if current_pkg.is_some_and(|pkg| meta.package.as_deref() == Some(pkg)) {
                     continue;
                 }
@@ -270,10 +333,8 @@ impl CompletionProvider for ExpressionProvider {
                     None => continue,
                 };
                 let fqn = source_fqn_of(&meta, index);
-
                 let boost = calculate_boost(meta.package.as_deref());
                 let base_score = 40.0;
-
                 let length_penalty = meta.name.len() as f32 * 0.05;
 
                 let candidate = CompletionCandidate::new(
@@ -290,23 +351,24 @@ impl CompletionProvider for ExpressionProvider {
                     &ctx.existing_imports,
                     ctx.enclosing_package.as_deref(),
                 );
-                let candidate = if needs_import {
+                results.push(if needs_import {
                     candidate.with_import(fqn)
                 } else {
                     candidate
-                };
-
-                results.push(candidate);
+                });
             }
         }
         let global_ms = t_global.elapsed().as_secs_f64() * 1000.0;
 
+        let is_incomplete = reached_limit(results.len(), limit);
         if trace_enabled {
             tracing::debug!(
                 provider = self.name(),
                 prefix,
+                limit = ?limit,
                 qualified = false,
                 candidates = results.len(),
+                incomplete = is_incomplete,
                 imports_ms,
                 fuzzy_ms,
                 same_pkg_ms,
@@ -315,7 +377,11 @@ impl CompletionProvider for ExpressionProvider {
                 "completion provider timing"
             );
         }
-        results
+
+        ProviderCompletionResult {
+            candidates: results,
+            is_incomplete,
+        }
     }
 }
 
@@ -859,5 +925,34 @@ mod tests {
         assert!(fast_candidates.is_empty(), "{fast_candidates:?}");
         assert!(slow == 0);
         assert!(fast_ms < slow_ms);
+    }
+
+    #[test]
+    fn test_expression_provider_remains_applicable_in_class_member_position() {
+        let index = WorkspaceIndex::new();
+        index.add_classes(vec![
+            make_cls("bench/p", "ProcessBuilder"),
+            make_cls("bench/p", "Process"),
+        ]);
+        let view = index.view(root_scope());
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "pro".to_string(),
+            },
+            "pro",
+            vec![],
+            Some(Arc::from("A")),
+            Some(Arc::from("bench/p/A")),
+            Some(Arc::from("bench/p")),
+            vec![],
+        )
+        .with_class_member_position(true);
+
+        assert!(ExpressionProvider.is_applicable(&ctx));
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &view);
+        assert!(
+            !results.is_empty(),
+            "provider should still produce valid expression candidates"
+        );
     }
 }
