@@ -258,3 +258,21 @@ impl std::fmt::Display for TypeName {
         write!(f, "{}", self.to_internal_with_generics())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TypeName;
+
+    #[test]
+    fn test_erased_internal_keeps_base_and_preserves_array_via_array_helper() {
+        let ty = TypeName::new("int[]");
+        assert_eq!(ty.erased_internal(), "int");
+        assert_eq!(ty.erased_internal_with_arrays(), "int[]");
+    }
+
+    #[test]
+    fn test_to_internal_with_generics_preserves_array_dims() {
+        let ty = TypeName::new("java/lang/String[][]");
+        assert_eq!(ty.to_internal_with_generics(), "java/lang/String[][]");
+    }
+}

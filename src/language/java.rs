@@ -1245,13 +1245,16 @@ mod tests {
             .iter()
             .find(|c| c.label.as_ref() == "join")
             .expect("join should be completable regardless of declaration order");
-        assert!(
-            join.detail
-                .as_deref()
-                .is_some_and(|d| d.contains("String... parts")),
-            "join detail should preserve varargs name/type, got {:?}",
-            join.detail
-        );
+        match &join.kind {
+            crate::completion::CandidateKind::Method { descriptor, .. }
+            | crate::completion::CandidateKind::StaticMethod { descriptor, .. } => {
+                assert!(
+                    descriptor.as_ref().contains("[Ljava/lang/String;"),
+                    "join method should preserve varargs array descriptor, got {descriptor}"
+                );
+            }
+            other => panic!("join should be method candidate, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1335,7 +1338,13 @@ mod tests {
         let mut locals: Vec<String> = ctx
             .local_variables
             .iter()
-            .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+            .map(|lv| {
+                format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                )
+            })
             .collect();
         locals.sort();
 
@@ -1356,13 +1365,24 @@ mod tests {
 
         let mut out: Vec<String> = candidates
             .iter()
-            .map(|c| {
-                format!(
-                    "{}@{}|{:?}",
-                    c.label,
-                    c.source,
-                    c.detail.as_deref().unwrap_or("")
-                )
+            .map(|c| match &c.kind {
+                crate::completion::CandidateKind::Method { descriptor, .. } => {
+                    format!(
+                        "{}@{}|method|desc={}",
+                        c.label.as_ref(),
+                        c.source,
+                        descriptor.as_ref()
+                    )
+                }
+                crate::completion::CandidateKind::LocalVariable { type_descriptor } => {
+                    format!(
+                        "{}@{}|local|ty={}",
+                        c.label.as_ref(),
+                        c.source,
+                        type_descriptor.as_ref()
+                    )
+                }
+                other => format!("{}@{}|{:?}", c.label.as_ref(), c.source, other),
             })
             .collect();
         out.sort();
@@ -1436,14 +1456,25 @@ mod tests {
         let mut locals: Vec<String> = ctx
             .local_variables
             .iter()
-            .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+            .map(|lv| {
+                format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                )
+            })
             .collect();
         locals.sort();
         let mut local_candidates: Vec<String> = candidates
             .iter()
             .filter_map(|c| match &c.kind {
                 crate::completion::CandidateKind::LocalVariable { type_descriptor } => {
-                    Some(format!("{}:{}", c.label, type_descriptor))
+                    Some(format!(
+                        "{}|descriptor={}|detail_has_array={}",
+                        c.label,
+                        type_descriptor,
+                        c.detail.as_deref().is_some_and(|d| d.contains("[]"))
+                    ))
                 }
                 _ => None,
             })
@@ -1457,6 +1488,60 @@ mod tests {
             local_candidates.join("\n"),
         );
         insta::assert_snapshot!("varargs_parameter_metadata_and_body_locals", snapshot);
+    }
+
+    #[test]
+    fn test_snapshot_plain_array_parameter_and_var_materialization() {
+        let src = indoc::indoc! {r#"
+        public class ArrayExample {
+            public static void printNumbers(int[] numbers) {
+                var a = numbers;
+                a|;
+            }
+        }
+        "#};
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(vec![make_class("java/lang", "Object")]);
+        let view = idx.view(root_scope());
+        let (ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+
+        let mut locals: Vec<String> = ctx
+            .local_variables
+            .iter()
+            .map(|lv| {
+                format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                )
+            })
+            .collect();
+        locals.sort();
+
+        let mut local_candidates: Vec<String> = candidates
+            .iter()
+            .filter_map(|c| match &c.kind {
+                crate::completion::CandidateKind::LocalVariable { type_descriptor } => {
+                    Some(format!(
+                        "{}|descriptor={}|detail_has_array={}",
+                        c.label,
+                        type_descriptor,
+                        c.detail.as_deref().is_some_and(|d| d.contains("[]"))
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        local_candidates.sort();
+
+        let snapshot = format!(
+            "location={:?}\nlocals=\n{}\nlocal_candidates=\n{}",
+            ctx.location,
+            locals.join("\n"),
+            local_candidates.join("\n"),
+        );
+        insta::assert_snapshot!("plain_array_parameter_and_var_materialization", snapshot);
     }
 
     #[test]

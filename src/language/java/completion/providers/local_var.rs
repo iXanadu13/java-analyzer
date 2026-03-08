@@ -31,12 +31,14 @@ impl CompletionProvider for LocalVarProvider {
         scored
             .into_iter()
             .map(|(lv, score)| {
-                let type_simple = lv
-                    .type_internal
-                    .erased_internal()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(lv.type_internal.erased_internal());
+                let type_simple = {
+                    let internal_with_arrays = lv.type_internal.erased_internal_with_arrays();
+                    internal_with_arrays
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(internal_with_arrays.as_str())
+                        .to_string()
+                };
                 CompletionCandidate::new(
                     Arc::clone(&lv.name),
                     lv.name.to_string(),
@@ -244,6 +246,49 @@ mod tests {
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "should complete locals inside TypeAnnotation context due to parsing ambiguity"
+        );
+    }
+
+    #[test]
+    fn test_array_local_detail_and_descriptor_preserve_dims() {
+        let idx = WorkspaceIndex::new();
+        let scope = root_scope();
+        let ctx = make_ctx(
+            "",
+            vec![("numbers", "int[]"), ("parts", "java/lang/String[]")],
+        );
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let numbers = results
+            .iter()
+            .find(|c| c.label.as_ref() == "numbers")
+            .expect("numbers candidate");
+        let parts = results
+            .iter()
+            .find(|c| c.label.as_ref() == "parts")
+            .expect("parts candidate");
+
+        match &numbers.kind {
+            CandidateKind::LocalVariable { type_descriptor } => {
+                assert_eq!(type_descriptor.as_ref(), "int[]");
+            }
+            other => panic!("unexpected candidate kind: {other:?}"),
+        }
+        let numbers_detail = numbers.detail.as_deref().unwrap_or("");
+        assert!(
+            numbers_detail.contains("[]"),
+            "array local detail should indicate array-ness: {numbers_detail}"
+        );
+
+        match &parts.kind {
+            CandidateKind::LocalVariable { type_descriptor } => {
+                assert_eq!(type_descriptor.as_ref(), "java/lang/String[]");
+            }
+            other => panic!("unexpected candidate kind: {other:?}"),
+        }
+        let parts_detail = parts.detail.as_deref().unwrap_or("");
+        assert!(
+            parts_detail.contains("[]"),
+            "array local detail should indicate array-ness: {parts_detail}"
         );
     }
 }

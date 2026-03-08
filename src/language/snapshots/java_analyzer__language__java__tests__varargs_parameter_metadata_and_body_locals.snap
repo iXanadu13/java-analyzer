@@ -9,4 +9,4 @@ locals=
 a:var
 numbers:int[]
 local_candidates=
-a:int[]
+a|descriptor=int[]|detail_has_array=true
