@@ -19,12 +19,20 @@ impl CompletionProvider for OverrideProvider {
         "override"
     }
 
+    fn is_applicable(&self, ctx: &SemanticContext) -> bool {
+        ctx.is_class_member_position && matches!(&ctx.location, CursorLocation::Expression { .. })
+    }
+
     fn provide(
         &self,
         scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
     ) -> Vec<CompletionCandidate> {
+        if !ctx.is_class_member_position {
+            return vec![];
+        }
+
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             _ => return vec![],
@@ -257,8 +265,10 @@ mod tests {
     use crate::index::{
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
     };
+    use crate::language::{Language, ParseEnv, java::JavaLanguage};
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
+    use ropey::Rope;
     use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC};
     use std::sync::Arc;
 
@@ -328,6 +338,33 @@ mod tests {
             None,
             vec![],
         )
+        .with_class_member_position(true)
+    }
+
+    fn ctx_from_marked_source(src_with_cursor: &str) -> SemanticContext {
+        let cursor_byte = src_with_cursor
+            .find('|')
+            .expect("expected | cursor marker in source");
+        let src = src_with_cursor.replacen('|', "", 1);
+        let rope = Rope::from_str(&src);
+        let cursor_char = rope.byte_to_char(cursor_byte);
+        let line = rope.char_to_line(cursor_char) as u32;
+        let col = (cursor_char - rope.line_to_char(line as usize)) as u32;
+
+        let mut parser = crate::language::java::make_java_parser();
+        let tree = parser.parse(&src, None).expect("failed to parse java");
+
+        JavaLanguage
+            .parse_completion_context_with_tree(
+                &src,
+                &rope,
+                tree.root_node(),
+                line,
+                col,
+                None,
+                &ParseEnv { name_table: None },
+            )
+            .expect("context extraction should succeed")
     }
 
     #[test]
@@ -1114,6 +1151,141 @@ mod tests {
             1,
             "run() must not be duplicated: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_override_available_in_class_body_member_position() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_from_marked_source(
+            r#"
+            package com.example;
+            class Child extends Parent {
+                pub|
+            }
+            "#,
+        );
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+
+        assert!(ctx.is_class_member_position, "class body position expected");
+        assert!(
+            results.iter().any(|c| c.label.contains("doWork")),
+            "override candidate should be available at class level"
+        );
+    }
+
+    #[test]
+    fn test_override_skipped_inside_method_body() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_from_marked_source(
+            r#"
+            package com.example;
+            class Child extends Parent {
+                void run() {
+                    pub|
+                }
+            }
+            "#,
+        );
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+
+        assert!(
+            !ctx.is_class_member_position,
+            "method body must not be class member position"
+        );
+        assert!(
+            results.is_empty(),
+            "override must be skipped in method body"
+        );
+    }
+
+    #[test]
+    fn test_override_skipped_inside_constructor_body() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_from_marked_source(
+            r#"
+            package com.example;
+            class Child extends Parent {
+                Child() {
+                    pub|
+                }
+            }
+            "#,
+        );
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+
+        assert!(
+            !ctx.is_class_member_position,
+            "constructor body must not be class member position"
+        );
+        assert!(
+            results.is_empty(),
+            "override must be skipped in constructor body"
+        );
+    }
+
+    #[test]
+    fn test_override_skipped_inside_initializer_block() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_from_marked_source(
+            r#"
+            package com.example;
+            class Child extends Parent {
+                {
+                    pub|
+                }
+            }
+            "#,
+        );
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+
+        assert!(
+            !ctx.is_class_member_position,
+            "initializer block must not be class member position"
+        );
+        assert!(
+            results.is_empty(),
+            "override must be skipped in initializer block"
         );
     }
 }

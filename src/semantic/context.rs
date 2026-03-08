@@ -293,6 +293,9 @@ pub struct SemanticContext {
     pub file_uri: Option<Arc<str>>,
     pub inferred_package: Option<Arc<str>>,
     pub language_id: LanguageId,
+    /// True when cursor is directly at type-member position inside a class/interface/enum body.
+    /// False for executable/nested body contexts (method/constructor/lambda/initializer/local class, etc).
+    pub is_class_member_position: bool,
     pub functional_target_hint: Option<FunctionalTargetHint>,
     pub typed_expr_ctx: Option<TypedExpressionContext>,
     pub typed_chain_receiver: Option<TypedChainReceiver>,
@@ -336,6 +339,7 @@ impl SemanticContext {
             file_uri: None,
             inferred_package: None,
             language_id: LanguageId::new("unknown"),
+            is_class_member_position: false,
             functional_target_hint: None,
             typed_expr_ctx: None,
             typed_chain_receiver: None,
@@ -357,6 +361,11 @@ impl SemanticContext {
 
     pub fn with_language_id(mut self, language_id: LanguageId) -> Self {
         self.language_id = language_id;
+        self
+    }
+
+    pub fn with_class_member_position(mut self, is_class_member_position: bool) -> Self {
+        self.is_class_member_position = is_class_member_position;
         self
     }
 

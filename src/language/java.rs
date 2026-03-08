@@ -373,6 +373,7 @@ impl JavaContextExtractor {
         let local_variables =
             locals::extract_locals_with_type_ctx(&self, root, cursor_node, Some(&type_ctx));
         let existing_static_imports = scope::extract_static_imports(&self, root);
+        let is_class_member_position = scope::is_cursor_in_class_member_position(cursor_node);
         let current_class_members = cursor_node
             .and_then(|n| utils::find_ancestor(n, "class_declaration"))
             .and_then(|cls| cls.child_by_field_name("body"))
@@ -408,6 +409,7 @@ impl JavaContextExtractor {
             existing_imports,
         )
         .with_functional_target_hint(functional_target_hint)
+        .with_class_member_position(is_class_member_position)
         .with_static_imports(existing_static_imports)
         .with_class_members(current_class_members)
         .with_enclosing_member(enclosing_class_member)

@@ -133,3 +133,76 @@ pub(crate) fn extract_enclosing_class_by_offset(
     dfs(root, ctx.offset, ctx.bytes(), &mut result);
     result
 }
+
+pub(crate) fn is_cursor_in_class_member_position(cursor_node: Option<Node>) -> bool {
+    let Some(cursor) = cursor_node else {
+        return false;
+    };
+
+    let Some(type_body) = find_nearest_type_body(cursor) else {
+        return false;
+    };
+
+    let mut current = Some(cursor);
+    while let Some(node) = current {
+        if node.id() == type_body.id() {
+            break;
+        }
+        if is_executable_or_nested_body_context(node.kind()) {
+            return false;
+        }
+        current = node.parent();
+    }
+
+    let Some(owner_decl) = type_body.parent() else {
+        return false;
+    };
+    if !is_type_declaration_kind(owner_decl.kind()) {
+        return false;
+    }
+
+    // Local type declarations (declared inside executable bodies) are not valid override targets.
+    let mut parent = owner_decl.parent();
+    while let Some(node) = parent {
+        if is_executable_or_nested_body_context(node.kind()) {
+            return false;
+        }
+        parent = node.parent();
+    }
+
+    true
+}
+
+fn find_nearest_type_body(start: Node) -> Option<Node> {
+    let mut current = Some(start);
+    while let Some(node) = current {
+        if is_type_body_kind(node.kind()) {
+            return Some(node);
+        }
+        current = node.parent();
+    }
+    None
+}
+
+fn is_type_body_kind(kind: &str) -> bool {
+    matches!(kind, "class_body" | "interface_body" | "enum_body")
+}
+
+fn is_type_declaration_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "class_declaration" | "interface_declaration" | "enum_declaration"
+    )
+}
+
+fn is_executable_or_nested_body_context(kind: &str) -> bool {
+    matches!(
+        kind,
+        "method_declaration"
+            | "constructor_declaration"
+            | "lambda_expression"
+            | "static_initializer"
+            | "instance_initializer"
+            | "block"
+    )
+}
