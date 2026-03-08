@@ -571,7 +571,7 @@ mod tests {
         "#};
         // Find the end of `cl.`
         let offset = src.find("cl.").unwrap() + 3;
-        let (ctx, tree) = setup_ctx(&src, offset);
+        let (ctx, tree) = setup_ctx(src, offset);
         let cursor_node = ctx.find_cursor_node(tree.root_node());
 
         let injected = build_injected_source(&ctx, cursor_node);
@@ -598,7 +598,7 @@ mod tests {
         }
         "#};
         let offset = src.find("new ").unwrap() + 4;
-        let (ctx, tree) = setup_ctx(&src, offset);
+        let (ctx, tree) = setup_ctx(src, offset);
         let cursor_node = ctx.find_cursor_node(tree.root_node());
 
         let injected = build_injected_source(&ctx, cursor_node);
@@ -622,7 +622,7 @@ mod tests {
         }
         "#};
         let offset = src.find("myVa").unwrap() + 4;
-        let (ctx, tree) = setup_ctx(&src, offset);
+        let (ctx, tree) = setup_ctx(src, offset);
         let cursor_node = ctx.find_cursor_node(tree.root_node());
 
         let injected = build_injected_source(&ctx, cursor_node);
@@ -646,7 +646,7 @@ mod tests {
         }
         "#};
         let offset = src.find("java.util.A").unwrap() + 11;
-        let (ctx, tree) = setup_ctx(&src, offset);
+        let (ctx, tree) = setup_ctx(src, offset);
         let cursor_node = ctx.find_cursor_node(tree.root_node());
 
         let injected = build_injected_source(&ctx, cursor_node);
@@ -670,7 +670,7 @@ mod tests {
         }
         "#};
         let offset = src.find("cl.").unwrap() + 3;
-        let (ctx, tree) = setup_ctx(&src, offset);
+        let (ctx, tree) = setup_ctx(src, offset);
         let cursor_node = ctx.find_cursor_node(tree.root_node());
 
         let result = inject_and_determine(&ctx, cursor_node, None);
@@ -701,7 +701,7 @@ mod tests {
         }
         "#};
         let offset = src.find("RandomCla").unwrap() + 9;
-        let (ctx, tree) = setup_ctx(&src, offset);
+        let (ctx, tree) = setup_ctx(src, offset);
         let cursor_node = ctx.find_cursor_node(tree.root_node());
 
         let result = inject_and_determine(&ctx, cursor_node, None);

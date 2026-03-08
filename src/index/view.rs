@@ -70,7 +70,7 @@ impl IndexView {
         if class.inner_class_of.is_some() || class.internal_name.contains('$') {
             // For nested/inner classes, internal name already encodes the owner chain.
             // Converting separators is O(length) and avoids global index scans.
-            return Some(class.internal_name.replace('/', ".").replace('$', "."));
+            return Some(class.internal_name.replace(['/', '$'], "."));
         }
         Some(class.source_name())
     }
@@ -783,7 +783,7 @@ mod tests {
                 }
             }
             if class.internal_name.contains('$') {
-                return Some(class.internal_name.replace('/', ".").replace('$', "."));
+                return Some(class.internal_name.replace(['/', '$'], "."));
             }
             Some(class.source_name())
         }

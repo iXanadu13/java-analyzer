@@ -915,7 +915,7 @@ fn evaluate_type_method_ref_candidates(
         let static_form = (method.access_flags & ACC_STATIC) != 0
             && method_accepts_arity(&method, sam.param_types.len());
         let unbound_form = (method.access_flags & ACC_STATIC) == 0
-            && sam.param_types.len() >= 1
+            && !sam.param_types.is_empty()
             && method_accepts_arity(&method, sam.param_types.len() - 1);
         if !static_form && !unbound_form {
             continue;

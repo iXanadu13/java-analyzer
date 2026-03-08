@@ -102,7 +102,7 @@ pub fn source_fqn_of_meta(meta: &ClassMetadata, index: &IndexView) -> String {
     if let Some(source) = index.get_source_type_name(&meta.internal_name) {
         return source;
     }
-    meta.internal_name.replace('/', ".").replace('$', ".")
+    meta.internal_name.replace(['/', '$'], ".")
 }
 
 /// Extract the list of existing imports from the source text
