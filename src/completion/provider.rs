@@ -25,6 +25,7 @@ pub trait CompletionProvider: Send + Sync {
         ProviderSearchSpace::Narrow
     }
 
+    // TODO: replace with provide_with_limit
     fn provide(
         &self,
         scope: IndexScope,
