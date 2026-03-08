@@ -6,8 +6,9 @@ use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::semantic::LocalVar;
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::types::{
-    ChainSegment, TypeResolver, parse_single_type_to_internal, promoted_numeric_result_type_name,
-    singleton_descriptor_to_type,
+    ChainSegment, TypeResolver, parse_single_type_to_internal, promoted_integral_result_type_name,
+    promoted_numeric_result_type_name, promoted_shift_result_type_name,
+    promoted_unary_integral_result_type_name, singleton_descriptor_to_type,
 };
 use tree_sitter::Node;
 
@@ -138,6 +139,15 @@ fn resolve_ast_node_type(
             resolve_floating_point_literal_type(text)
         }
         "string_literal" | "text_block" => Some(TypeName::new("java/lang/String")),
+        "unary_expression" => resolve_unary_expression_type(
+            node,
+            bytes,
+            locals,
+            enclosing_internal,
+            resolver,
+            type_ctx,
+            view,
+        ),
         "method_invocation" => {
             let text = node.utf8_text(bytes).ok()?;
             resolve_expression_via_existing_resolver(
@@ -175,6 +185,40 @@ fn resolve_expression_via_existing_resolver(
         return resolver.resolve(expr, locals, enclosing_internal);
     }
     evaluate_chain(&chain, locals, enclosing_internal, resolver, type_ctx, view)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_unary_expression_type(
+    node: Node,
+    bytes: &[u8],
+    locals: &[LocalVar],
+    enclosing_internal: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    type_ctx: &SourceTypeCtx,
+    view: &IndexView,
+) -> Option<TypeName> {
+    let op = unary_operator(node, bytes)?;
+    let operand = node.child_by_field_name("operand").or_else(|| {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).next()
+    })?;
+    let operand_type = resolve_ast_node_type(
+        operand,
+        bytes,
+        locals,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+    )?;
+    match op.as_str() {
+        "~" => {
+            let promoted =
+                promoted_unary_integral_result_type_name(operand_type.erased_internal())?;
+            Some(TypeName::new(promoted))
+        }
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -218,6 +262,8 @@ fn resolve_binary_expression_type(
             }
         }
         "-" | "*" | "/" | "%" => numeric_binary_result_type(&left_type, &right_type),
+        "&" | "|" | "^" => integral_binary_result_type(&left_type, &right_type),
+        "<<" | ">>" | ">>>" => shift_binary_result_type(&left_type, &right_type),
         _ => None,
     }
 }
@@ -231,9 +277,22 @@ fn binary_operator<'a>(node: Node<'a>, bytes: &[u8]) -> Option<String> {
     for child in node.children(&mut cursor) {
         if matches!(
             child.kind(),
-            "+" | "-" | "*" | "/" | "%" | "<<" | ">>" | ">>>"
+            "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" | ">>>"
         ) {
             return Some(child.kind().to_string());
+        }
+    }
+    None
+}
+
+fn unary_operator<'a>(node: Node<'a>, bytes: &[u8]) -> Option<String> {
+    if let Some(op) = node.child_by_field_name("operator") {
+        return op.utf8_text(bytes).ok().map(|s| s.trim().to_string());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "~" {
+            return Some("~".to_string());
         }
     }
     None
@@ -268,6 +327,18 @@ fn resolve_floating_point_literal_type(text: &str) -> Option<TypeName> {
 fn numeric_binary_result_type(left: &TypeName, right: &TypeName) -> Option<TypeName> {
     let promoted =
         promoted_numeric_result_type_name(left.erased_internal(), right.erased_internal())?;
+    Some(TypeName::new(promoted))
+}
+
+fn integral_binary_result_type(left: &TypeName, right: &TypeName) -> Option<TypeName> {
+    let promoted =
+        promoted_integral_result_type_name(left.erased_internal(), right.erased_internal())?;
+    Some(TypeName::new(promoted))
+}
+
+fn shift_binary_result_type(left: &TypeName, right: &TypeName) -> Option<TypeName> {
+    let promoted =
+        promoted_shift_result_type_name(left.erased_internal(), right.erased_internal())?;
     Some(TypeName::new(promoted))
 }
 

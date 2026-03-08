@@ -5348,6 +5348,98 @@ mod tests {
     }
 
     #[test]
+    fn test_var_rhs_inference_bitwise_shift_and_unary_not_materialize_integral() {
+        let idx = make_index_with_demo_getint_method();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            None,
+            vec!["java.lang.*".into()],
+            Some(view.build_name_table()),
+        ));
+
+        let mut ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "g".to_string(),
+            },
+            "g",
+            vec![
+                LocalVar {
+                    name: Arc::from("i"),
+                    type_internal: TypeName::new("int"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("w"),
+                    type_internal: TypeName::new("java/lang/Integer"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("a"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("i & 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("b"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("i | 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("c"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("i ^ 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("d"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("w << 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("e"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("w >> 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("f"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("w >>> 1".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("g"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("~w".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("h"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("getInt() + getInt() ^ 1".to_string()),
+                },
+            ],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            None,
+            vec!["java.lang.*".into()],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+        for name in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            let local = ctx
+                .local_variables
+                .iter()
+                .find(|lv| lv.name.as_ref() == name)
+                .unwrap_or_else(|| panic!("expected local {name}"));
+            assert_eq!(
+                local.type_internal.erased_internal(),
+                "int",
+                "local {name} should materialize to int"
+            );
+        }
+    }
+
+    #[test]
     fn test_var_rhs_inference_propagates_receiver_generics_for_chain() {
         use crate::completion::provider::CompletionProvider;
         use crate::language::java::completion::providers::member::MemberProvider;

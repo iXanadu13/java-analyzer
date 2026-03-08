@@ -1151,6 +1151,48 @@ pub(crate) fn promoted_numeric_result_type_name(left: &str, right: &str) -> Opti
     Some("int")
 }
 
+pub(crate) fn promoted_integral_result_type_name(left: &str, right: &str) -> Option<&'static str> {
+    let left = unboxed_primitive_type_name(left)?;
+    let right = unboxed_primitive_type_name(right)?;
+    if !matches!(left, "byte" | "short" | "char" | "int" | "long")
+        || !matches!(right, "byte" | "short" | "char" | "int" | "long")
+    {
+        return None;
+    }
+    if left == "long" || right == "long" {
+        Some("long")
+    } else {
+        Some("int")
+    }
+}
+
+pub(crate) fn promoted_shift_result_type_name(left: &str, right: &str) -> Option<&'static str> {
+    let left = unboxed_primitive_type_name(left)?;
+    let right = unboxed_primitive_type_name(right)?;
+    if !matches!(left, "byte" | "short" | "char" | "int" | "long")
+        || !matches!(right, "byte" | "short" | "char" | "int" | "long")
+    {
+        return None;
+    }
+    if left == "long" {
+        Some("long")
+    } else {
+        Some("int")
+    }
+}
+
+pub(crate) fn promoted_unary_integral_result_type_name(operand: &str) -> Option<&'static str> {
+    let operand = unboxed_primitive_type_name(operand)?;
+    if !matches!(operand, "byte" | "short" | "char" | "int" | "long") {
+        return None;
+    }
+    if operand == "long" {
+        Some("long")
+    } else {
+        Some("int")
+    }
+}
+
 fn normalize_arg_types(arg_count: usize, arg_types: &[TypeName]) -> Vec<TypeName> {
     if arg_types.len() >= arg_count {
         return arg_types[..arg_count].to_vec();
@@ -3056,6 +3098,26 @@ mod tests {
         );
         assert_eq!(
             promoted_numeric_result_type_name("java/lang/Integer", "int"),
+            Some("int")
+        );
+        assert_eq!(
+            promoted_integral_result_type_name("java/lang/Integer", "int"),
+            Some("int")
+        );
+        assert_eq!(
+            promoted_integral_result_type_name("java/lang/Long", "int"),
+            Some("long")
+        );
+        assert_eq!(
+            promoted_shift_result_type_name("java/lang/Long", "int"),
+            Some("long")
+        );
+        assert_eq!(
+            promoted_shift_result_type_name("java/lang/Integer", "long"),
+            Some("int")
+        );
+        assert_eq!(
+            promoted_unary_integral_result_type_name("java/lang/Integer"),
             Some("int")
         );
     }
