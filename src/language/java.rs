@@ -1036,6 +1036,33 @@ mod tests {
             },
             ClassMetadata {
                 package: Some(Arc::from("java/util/function")),
+                name: Arc::from("BiConsumer"),
+                internal_name: Arc::from("java/util/function/BiConsumer"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("accept"),
+                    params: MethodParams::from([
+                        ("Ljava/lang/Object;", "t"),
+                        ("Ljava/lang/Object;", "u"),
+                    ]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC | ACC_ABSTRACT,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from("(TT;TU;)V")),
+                    return_type: Some(Arc::from("V")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from(
+                    "<T:Ljava/lang/Object;U:Ljava/lang/Object;>Ljava/lang/Object;",
+                )),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util/function")),
                 name: Arc::from("Runnable"),
                 internal_name: Arc::from("java/util/function/Runnable"),
                 super_name: Some(Arc::from("java/lang/Object")),
@@ -1247,6 +1274,52 @@ mod tests {
     }
 
     #[test]
+    fn test_lambda_block_body_multi_param_typed_member_completion_from_biconsumer_sam() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src_sb = indoc::indoc! {r#"
+            import java.util.function.BiConsumer;
+            class T {
+                void m() {
+                    BiConsumer<StringBuilder, String> c = (sb, s) -> {
+                        sb.appe|;
+                    };
+                }
+            }
+        "#};
+        let src_s = indoc::indoc! {r#"
+            import java.util.function.BiConsumer;
+            class T {
+                void m() {
+                    BiConsumer<StringBuilder, String> c = (sb, s) -> {
+                        s.subs|;
+                    };
+                }
+            }
+        "#};
+
+        let (mut ctx_sb, labels_sb) = ctx_and_labels_from_marked_source(src_sb, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx_sb);
+        let sb = ctx_sb
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "sb")
+            .expect("expected lambda param sb");
+        assert_eq!(sb.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert!(labels_sb.iter().any(|l| l == "append"), "{labels_sb:?}");
+
+        let (mut ctx_s, labels_s) = ctx_and_labels_from_marked_source(src_s, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx_s);
+        let s = ctx_s
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "s")
+            .expect("expected lambda param s");
+        assert_eq!(s.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels_s.iter().any(|l| l == "substring"), "{labels_s:?}");
+    }
+
+    #[test]
     fn test_lambda_single_param_typed_member_completion_from_function_sam_incomplete_initializer() {
         let idx = make_lambda_scope_index();
         let view = idx.view(root_scope());
@@ -1288,6 +1361,60 @@ mod tests {
             Some("java/lang/String")
         );
         assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_lambda_block_body_return_expression_keeps_typed_param_visibility() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            class T {
+                void m() {
+                    Function<String, Integer> f = value -> {
+                        return value.subs|;
+                    };
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let value = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "value")
+            .expect("expected lambda param value");
+        assert_eq!(value.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_lambda_nested_block_keeps_typed_param_visibility() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Consumer;
+            class T {
+                void m() {
+                    Consumer<StringBuilder> c = sb -> {
+                        {
+                            sb.appe|;
+                        }
+                    };
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let sb = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "sb")
+            .expect("expected lambda param sb");
+        assert_eq!(sb.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert!(labels.iter().any(|l| l == "append"), "{labels:?}");
     }
 
     #[test]
