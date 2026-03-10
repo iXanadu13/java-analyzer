@@ -522,7 +522,6 @@ fn bind_active_lambda_param_types(ctx: &mut SemanticContext) {
         if let Some(local) = ctx
             .local_variables
             .iter_mut()
-            .rev()
             .find(|lv| lv.name == *name && lv.type_internal.erased_internal() == "unknown")
         {
             local.type_internal = ty.clone();

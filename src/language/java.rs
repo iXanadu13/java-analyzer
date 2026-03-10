@@ -862,6 +862,15 @@ mod tests {
                 annotations: vec![],
                 methods: vec![
                     MethodSummary {
+                        name: Arc::from("trim"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Ljava/lang/String;")),
+                    },
+                    MethodSummary {
                         name: Arc::from("substring"),
                         params: MethodParams::from([("I", "beginIndex")]),
                         annotations: vec![],
@@ -1312,6 +1321,205 @@ mod tests {
             Some("java/lang/String")
         );
         assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_lambda_param_shadows_outer_local_for_member_completion() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            class T {
+                void m() {
+                    StringBuilder value = new StringBuilder();
+                    Function<String, Integer> f = value -> value.subs|;
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let value = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "value")
+            .expect("expected visible value binding");
+        assert_eq!(value.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|l| l == "append"),
+            "outer StringBuilder binding must be shadowed: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_outer_local_remains_visible_when_not_shadowed_in_lambda() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.BiFunction;
+            class T {
+                void m() {
+                    String prefix = "x";
+                    BiFunction<String, String, String> f = (left, right) -> prefix.subs|;
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        assert!(
+            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "prefix"),
+            "outer local should remain visible: {:?}",
+            ctx.local_variables
+                .iter()
+                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "left"),
+            "left lambda param should remain visible"
+        );
+        assert!(
+            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "right"),
+            "right lambda param should remain visible"
+        );
+        let prefix = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "prefix")
+            .expect("expected prefix local");
+        assert_eq!(prefix.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_lambda_block_body_merges_params_and_inner_locals() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            class T {
+                void m() {
+                    Function<String, Integer> f = value -> {
+                        String local = value.trim();
+                        return local.subs|;
+                    };
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let local = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "local")
+            .expect("expected inner local");
+        let value = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "value")
+            .expect("expected lambda param");
+        assert_eq!(local.type_internal.erased_internal(), "java/lang/String");
+        assert_eq!(value.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_nested_lambda_scope_prefers_innermost_binding_without_crashing() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            class T {
+                void m() {
+                    Function<String, Function<String, Integer>> f =
+                        value -> value -> value.subs|;
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let visible_values: Vec<_> = ctx
+            .local_variables
+            .iter()
+            .filter(|lv| lv.name.as_ref() == "value")
+            .collect();
+        assert_eq!(
+            visible_values.len(),
+            1,
+            "only the innermost visible binding should remain after scope normalization"
+        );
+        assert_eq!(ctx.active_lambda_param_names, vec![Arc::from("value")]);
+        assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_invalid_lambda_block_redeclaration_recovers_nearest_binding() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            class T {
+                void m() {
+                    Function<String, Integer> f = value -> {
+                        StringBuilder value = new StringBuilder();
+                        return value.appe/*caret*/
+                    };
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let value = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "value")
+            .expect("expected recovered value binding");
+        assert_eq!(value.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            ctx.location
+                .member_access_receiver_semantic_type()
+                .map(|t| t.erased_internal()),
+            Some("java/lang/StringBuilder")
+        );
+        assert!(labels.iter().any(|l| l == "append"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_invalid_plain_block_redeclaration_recovers_nearest_binding() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    String value = "";
+                    {
+                        StringBuilder value = new StringBuilder();
+                        value.appe|;
+                    }
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let value = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "value")
+            .expect("expected recovered inner block value binding");
+        assert_eq!(value.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            ctx.location
+                .member_access_receiver_semantic_type()
+                .map(|t| t.erased_internal()),
+            Some("java/lang/StringBuilder")
+        );
+        assert!(labels.iter().any(|l| l == "append"), "{labels:?}");
     }
 
     #[test]

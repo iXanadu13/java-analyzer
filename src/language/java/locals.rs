@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use tree_sitter::{Node, Query};
 
@@ -13,6 +13,12 @@ use crate::{
     },
     semantic::{LocalVar, types::type_name::TypeName},
 };
+
+#[derive(Debug, Clone)]
+struct RankedLocal {
+    local: LocalVar,
+    declaration_start: usize,
+}
 
 pub fn extract_locals(
     ctx: &JavaContextExtractor,
@@ -47,7 +53,7 @@ pub fn extract_locals_with_type_ctx(
     };
     let type_idx = q.capture_index_for_name("type").unwrap();
     let name_idx = q.capture_index_for_name("name").unwrap();
-    let mut vars: Vec<LocalVar> = run_query(&q, search_root, ctx.bytes(), None)
+    let mut vars: Vec<RankedLocal> = run_query(&q, search_root, ctx.bytes(), None)
         .into_iter()
         .filter_map(|captures| {
             let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
@@ -94,17 +100,23 @@ pub fn extract_locals_with_type_ctx(
             let raw_ty = ty.trim();
 
             if raw_ty == "var" {
-                return Some(LocalVar {
-                    name: Arc::from(name),
-                    type_internal: TypeName::new("var"),
-                    init_expr: get_initializer_text(ty_node, ctx.bytes()),
+                return Some(RankedLocal {
+                    local: LocalVar {
+                        name: Arc::from(name),
+                        type_internal: TypeName::new("var"),
+                        init_expr: get_initializer_text(ty_node, ctx.bytes()),
+                    },
+                    declaration_start: name_node.start_byte(),
                 });
             }
 
-            Some(LocalVar {
-                name: Arc::from(name),
-                type_internal: resolve_declared_source_type(raw_ty, type_ctx),
-                init_expr: None,
+            Some(RankedLocal {
+                local: LocalVar {
+                    name: Arc::from(name),
+                    type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                    init_expr: None,
+                },
+                declaration_start: name_node.start_byte(),
             })
         })
         .collect();
@@ -114,7 +126,7 @@ pub fn extract_locals_with_type_ctx(
     vars.extend(extract_params(ctx, root, cursor_node, type_ctx));
     vars.extend(extract_lambda_params(ctx, cursor_node));
 
-    vars
+    normalize_visible_locals(vars)
 }
 
 fn resolve_declared_source_type(raw_ty: &str, type_ctx: Option<&SourceTypeCtx>) -> TypeName {
@@ -135,7 +147,7 @@ fn extract_misread_var_decls(
     ctx: &JavaContextExtractor,
     root: Node,
     type_ctx: Option<&SourceTypeCtx>,
-) -> Vec<LocalVar> {
+) -> Vec<RankedLocal> {
     let mut result = Vec::new();
     collect_misread_decls(ctx, root, &mut result, type_ctx);
     result
@@ -144,7 +156,7 @@ fn extract_misread_var_decls(
 fn collect_misread_decls(
     ctx: &JavaContextExtractor,
     node: Node,
-    vars: &mut Vec<LocalVar>,
+    vars: &mut Vec<RankedLocal>,
     type_ctx: Option<&SourceTypeCtx>,
 ) {
     let mut cursor = node.walk();
@@ -190,7 +202,10 @@ fn collect_misread_decls(
                                 init_expr: None,
                             }
                         };
-                        vars.push(lv);
+                        vars.push(RankedLocal {
+                            local: lv,
+                            declaration_start: name_node.start_byte(),
+                        });
                     }
                 }
             }
@@ -223,7 +238,7 @@ fn extract_params(
     root: Node,
     cursor_node: Option<Node>,
     type_ctx: Option<&SourceTypeCtx>,
-) -> Vec<LocalVar> {
+) -> Vec<RankedLocal> {
     let method = match cursor_node
         .and_then(|n| find_ancestor(n, "method_declaration"))
         .or_else(|| find_method_by_offset(root, ctx.offset))
@@ -270,16 +285,22 @@ fn extract_params(
                 format!("{}[]", raw_ty.trim())
             };
         }
-        vars.push(LocalVar {
-            name: Arc::from(name),
-            type_internal: resolve_declared_source_type(raw_ty.as_str(), type_ctx),
-            init_expr: None,
+        vars.push(RankedLocal {
+            local: LocalVar {
+                name: Arc::from(name),
+                type_internal: resolve_declared_source_type(raw_ty.as_str(), type_ctx),
+                init_expr: None,
+            },
+            declaration_start: name_node.start_byte(),
         });
     }
     vars
 }
 
-fn extract_lambda_params(ctx: &JavaContextExtractor, cursor_node: Option<Node>) -> Vec<LocalVar> {
+fn extract_lambda_params(
+    ctx: &JavaContextExtractor,
+    cursor_node: Option<Node>,
+) -> Vec<RankedLocal> {
     let mut lambdas = Vec::new();
     let mut current = cursor_node;
     while let Some(node) = current {
@@ -307,13 +328,16 @@ fn extract_lambda_params(ctx: &JavaContextExtractor, cursor_node: Option<Node>) 
     vars
 }
 
-fn extract_lambda_params_from_node(ctx: &JavaContextExtractor, params: Node) -> Vec<LocalVar> {
-    extract_lambda_param_names(ctx, params)
+fn extract_lambda_params_from_node(ctx: &JavaContextExtractor, params: Node) -> Vec<RankedLocal> {
+    extract_lambda_param_names_with_starts(ctx, params)
         .into_iter()
-        .map(|name| LocalVar {
-            name,
-            type_internal: TypeName::new("unknown"),
-            init_expr: None,
+        .map(|(name, declaration_start)| RankedLocal {
+            local: LocalVar {
+                name,
+                type_internal: TypeName::new("unknown"),
+                init_expr: None,
+            },
+            declaration_start,
         })
         .collect()
 }
@@ -342,8 +366,18 @@ pub(crate) fn extract_active_lambda_param_names(
 }
 
 fn extract_lambda_param_names(ctx: &JavaContextExtractor, params: Node) -> Vec<Arc<str>> {
+    extract_lambda_param_names_with_starts(ctx, params)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+fn extract_lambda_param_names_with_starts(
+    ctx: &JavaContextExtractor,
+    params: Node,
+) -> Vec<(Arc<str>, usize)> {
     match params.kind() {
-        "identifier" => vec![Arc::from(ctx.node_text(params))],
+        "identifier" => vec![(Arc::from(ctx.node_text(params)), params.start_byte())],
         "inferred_parameters" => {
             let mut vars = Vec::new();
             let mut cursor = params.walk();
@@ -351,7 +385,7 @@ fn extract_lambda_param_names(ctx: &JavaContextExtractor, params: Node) -> Vec<A
                 if child.kind() != "identifier" {
                     continue;
                 }
-                vars.push(Arc::from(ctx.node_text(child)));
+                vars.push((Arc::from(ctx.node_text(child)), child.start_byte()));
             }
             vars
         }
@@ -365,7 +399,7 @@ fn extract_lambda_param_names(ctx: &JavaContextExtractor, params: Node) -> Vec<A
                 let Some(name_node) = child.child_by_field_name("name") else {
                     continue;
                 };
-                vars.push(Arc::from(ctx.node_text(name_node)));
+                vars.push((Arc::from(ctx.node_text(name_node)), name_node.start_byte()));
             }
             vars
         }
@@ -373,11 +407,26 @@ fn extract_lambda_param_names(ctx: &JavaContextExtractor, params: Node) -> Vec<A
     }
 }
 
+fn normalize_visible_locals(mut vars: Vec<RankedLocal>) -> Vec<LocalVar> {
+    // Normalize the visible local table for editor recovery:
+    // declarations nearest to the caret win duplicate-name conflicts, regardless
+    // of which extractor produced them.
+    vars.sort_by(|a, b| b.declaration_start.cmp(&a.declaration_start));
+    let mut seen: HashSet<Arc<str>> = HashSet::new();
+    let mut visible = Vec::new();
+    for ranked in vars {
+        if seen.insert(Arc::clone(&ranked.local.name)) {
+            visible.push(ranked.local);
+        }
+    }
+    visible
+}
+
 fn extract_locals_from_error_nodes(
     ctx: &JavaContextExtractor,
     root: Node,
     type_ctx: Option<&SourceTypeCtx>,
-) -> Vec<LocalVar> {
+) -> Vec<RankedLocal> {
     let mut result = Vec::new();
     collect_locals_in_errors(ctx, root, &mut result, type_ctx);
     result
@@ -386,7 +435,7 @@ fn extract_locals_from_error_nodes(
 fn collect_locals_in_errors(
     ctx: &JavaContextExtractor,
     node: Node,
-    vars: &mut Vec<LocalVar>,
+    vars: &mut Vec<RankedLocal>,
     type_ctx: Option<&SourceTypeCtx>,
 ) {
     let mut cursor = node.walk();
@@ -402,7 +451,7 @@ fn collect_locals_in_errors(
             if let Ok(q) = Query::new(&tree_sitter_java::LANGUAGE.into(), q_src) {
                 let type_idx = q.capture_index_for_name("type").unwrap();
                 let name_idx = q.capture_index_for_name("name").unwrap();
-                let found: Vec<LocalVar> = run_query(&q, child, ctx.bytes(), None)
+                let found: Vec<RankedLocal> = run_query(&q, child, ctx.bytes(), None)
                     .into_iter()
                     .filter_map(|captures| {
                         let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
@@ -422,17 +471,23 @@ fn collect_locals_in_errors(
                         let raw_ty = ty.trim();
 
                         if raw_ty == "var" {
-                            return Some(LocalVar {
-                                name: Arc::from(name),
-                                type_internal: TypeName::new("var"),
-                                init_expr: get_initializer_text(ty_node, ctx.bytes()),
+                            return Some(RankedLocal {
+                                local: LocalVar {
+                                    name: Arc::from(name),
+                                    type_internal: TypeName::new("var"),
+                                    init_expr: get_initializer_text(ty_node, ctx.bytes()),
+                                },
+                                declaration_start: name_node.start_byte(),
                             });
                         }
 
-                        Some(LocalVar {
-                            name: Arc::from(name),
-                            type_internal: resolve_declared_source_type(raw_ty, type_ctx),
-                            init_expr: None,
+                        Some(RankedLocal {
+                            local: LocalVar {
+                                name: Arc::from(name),
+                                type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                                init_expr: None,
+                            },
+                            declaration_start: name_node.start_byte(),
                         })
                     })
                     .collect();
@@ -717,7 +772,7 @@ mod tests {
         let vars = extract_locals_from_error_nodes(&ctx, tree.root_node(), None);
 
         assert!(
-            vars.iter().any(|v| v.name.as_ref() == "insideError"),
+            vars.iter().any(|v| v.local.name.as_ref() == "insideError"),
             "Should extract locals deeply nested inside ERROR nodes"
         );
     }
