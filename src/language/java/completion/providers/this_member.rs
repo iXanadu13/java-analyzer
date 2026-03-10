@@ -81,20 +81,23 @@ impl CompletionProvider for ThisMemberProvider {
                         defining_class: Arc::from(enclosing),
                     },
                 };
-                let insert_text = if m.is_method() {
-                    if ctx.has_paren_after_cursor() {
-                        m.name().to_string()
-                    } else {
-                        format!("{}(", m.name())
-                    }
-                } else {
-                    m.name().to_string()
-                };
+                let insert_text = m.name().to_string();
                 let detail = render::source_member_detail(enclosing, m, &resolver);
 
-                CompletionCandidate::new(Arc::clone(&m.name()), insert_text, kind, self.name())
-                    .with_detail(detail)
-                    .with_score(60.0 + score as f32 * 0.1)
+                let candidate =
+                    CompletionCandidate::new(Arc::clone(&m.name()), insert_text, kind, self.name())
+                        .with_detail(detail)
+                        .with_score(60.0 + score as f32 * 0.1);
+
+                if let crate::semantic::context::CurrentClassMember::Method(md) = m {
+                    candidate.with_callable_insert(
+                        md.name.as_ref(),
+                        &md.params.param_names(),
+                        ctx.has_paren_after_cursor(),
+                    )
+                } else {
+                    candidate
+                }
             })
             .collect();
 
@@ -156,17 +159,17 @@ impl CompletionProvider for ThisMemberProvider {
                             defining_class: Arc::clone(&class_meta.internal_name),
                         }
                     };
-                    let insert_text = if ctx.has_paren_after_cursor() {
-                        method.name.to_string()
-                    } else {
-                        format!("{}(", method.name)
-                    };
                     results.push(
                         CompletionCandidate::new(
                             Arc::clone(&method.name),
-                            insert_text,
+                            method.name.to_string(),
                             kind,
                             self.name(),
+                        )
+                        .with_callable_insert(
+                            method.name.as_ref(),
+                            &method.params.param_names(),
+                            ctx.has_paren_after_cursor(),
                         )
                         .with_detail(render::method_detail(
                             class_meta.internal_name.as_ref(),

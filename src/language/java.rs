@@ -460,8 +460,8 @@ impl JavaContextExtractor {
 mod tests {
     use super::*;
     use crate::{
-        completion::CompletionCandidate,
         completion::engine::CompletionEngine,
+        completion::{CandidateKind, CompletionCandidate},
         index::{
             ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
             WorkspaceIndex,
@@ -2984,6 +2984,121 @@ mod tests {
             labels.iter().any(|l| l == "toString"),
             "member completion should still work in method arguments, labels={labels:?}"
         );
+    }
+
+    #[test]
+    fn test_method_completion_inserts_parentheses() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void foo() {}
+            void m() {
+                fo|;
+            }
+        }
+        "#};
+
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let foo = candidates
+            .iter()
+            .find(|c| c.label.as_ref() == "foo" && matches!(c.kind, CandidateKind::Method { .. }))
+            .expect("expected method candidate foo");
+        assert_eq!(foo.insert_text, "foo()");
+    }
+
+    #[test]
+    fn test_method_completion_inserts_parameter_slots() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void print(String s, int n) {}
+            void m() {
+                pri|;
+            }
+        }
+        "#};
+
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let print = candidates
+            .iter()
+            .find(|c| c.label.as_ref() == "print" && matches!(c.kind, CandidateKind::Method { .. }))
+            .expect("expected method candidate print");
+        assert_eq!(print.insert_text, "print(${1:s}, ${2:n})$0");
+    }
+
+    #[test]
+    fn test_method_completion_avoids_duplicate_parentheses() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void foo(int x) {}
+            void m() {
+                this.fo|();
+            }
+        }
+        "#};
+
+        let (ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        assert!(
+            ctx.has_paren_after_cursor(),
+            "expected parser to detect existing '(' after cursor"
+        );
+        let foo = candidates
+            .iter()
+            .find(|c| c.label.as_ref() == "foo" && matches!(c.kind, CandidateKind::Method { .. }))
+            .expect("expected method candidate foo");
+        assert_eq!(
+            foo.insert_text, "foo",
+            "must avoid adding duplicate parentheses when '(' already exists"
+        );
+    }
+
+    #[test]
+    fn test_constructor_completion_inserts_parameter_slots() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("org/cubewhy")),
+            name: Arc::from("Printer"),
+            internal_name: Arc::from("org/cubewhy/Printer"),
+            super_name: Some(Arc::from("java/lang/Object")),
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("<init>"),
+                params: MethodParams::from([("Ljava/lang/String;", "message"), ("I", "count")]),
+                annotations: vec![],
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        package org.cubewhy;
+        class T {
+            void m() {
+                new Pri|;
+            }
+        }
+        "#};
+
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let ctor = candidates
+            .iter()
+            .find(|c| {
+                c.label.as_ref() == "Printer" && matches!(c.kind, CandidateKind::Constructor { .. })
+            })
+            .expect("expected constructor candidate Printer");
+        assert_eq!(ctor.insert_text, "Printer(${1:message}, ${2:count})$0");
     }
 
     #[test]

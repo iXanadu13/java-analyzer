@@ -3,11 +3,9 @@ use tower_lsp::lsp_types::*;
 use tracing::debug;
 
 use super::super::converters::candidate_to_lsp;
-use crate::completion::CandidateKind;
-use crate::completion::candidate::CompletionCandidate;
+use crate::completion::candidate::{CompletionCandidate, InsertTextMode, ReplacementMode};
 use crate::completion::engine::{CompletionEngine, CompletionMetadata, CompletionPolicy};
 use crate::language::{LanguageRegistry, ParseEnv};
-use crate::semantic::CursorLocation;
 use crate::workspace::Workspace;
 
 pub async fn handle_completion(
@@ -101,7 +99,6 @@ pub async fn handle_completion(
     let completion_list = build_completion_list(
         metadata,
         &candidates,
-        &ctx.location,
         &source_for_edits,
         position,
         MAX_ITEMS,
@@ -123,7 +120,6 @@ pub async fn handle_completion(
 fn build_completion_list(
     metadata: CompletionMetadata,
     candidates: &[CompletionCandidate],
-    location: &CursorLocation,
     source_for_edits: &str,
     position: Position,
     max_items: usize,
@@ -131,7 +127,7 @@ fn build_completion_list(
     let items: Vec<CompletionItem> = candidates
         .iter()
         .take(max_items)
-        .map(|c| map_candidate_item(c, location, source_for_edits, position))
+        .map(|c| map_candidate_item(c, source_for_edits, position))
         .collect();
 
     let is_incomplete = metadata.is_incomplete() || candidates.len() > max_items;
@@ -157,56 +153,28 @@ impl From<crate::completion::engine::CompletionOutput> for CompletionOutputParts
 
 fn map_candidate_item(
     c: &CompletionCandidate,
-    location: &CursorLocation,
     source_for_edits: &str,
     position: Position,
 ) -> CompletionItem {
     let mut item = candidate_to_lsp(c, source_for_edits);
 
-    if matches!(location, CursorLocation::Import { .. }) {
-        if let Some(edit) = crate::completion::import_completion::make_import_text_edit(
-            &c.insert_text,
-            source_for_edits,
-            position,
-        ) {
-            item.text_edit = Some(edit);
-            item.insert_text = None;
-            item.insert_text_format = None;
-        }
-        item.filter_text = Some(c.insert_text.clone());
-    } else if matches!(
-        location,
-        CursorLocation::MemberAccess { .. } | CursorLocation::StaticAccess { .. }
-    ) && matches!(c.kind, CandidateKind::ClassName)
+    if let Some(edit) = make_text_edit(c, source_for_edits, position) {
+        item.text_edit = Some(edit);
+        // Keep snippet semantics when new_text contains snippet placeholders.
+        item.insert_text_format = match c.insertion.mode {
+            InsertTextMode::Snippet => Some(InsertTextFormat::SNIPPET),
+            InsertTextMode::PlainText => None,
+        };
+        item.insert_text = None;
+    }
+
+    if let Some(filter) = c
+        .insertion
+        .filter_text
+        .clone()
+        .or_else(|| default_filter_text(c))
     {
-        // In member/static access contexts, only replace the current member segment.
-        // For `ChainCheck.;`, this becomes a zero-width insert right after the dot.
-        if let Some(edit) = make_member_access_text_edit(&c.insert_text, source_for_edits, position)
-        {
-            item.text_edit = Some(edit);
-            item.insert_text = None;
-            item.insert_text_format = None;
-        }
-        item.filter_text = Some(c.label.to_string());
-    } else if matches!(c.kind, CandidateKind::Package | CandidateKind::ClassName)
-        && matches!(
-            location,
-            CursorLocation::Expression { .. } | CursorLocation::TypeAnnotation { .. }
-        )
-    {
-        if let Some(edit) = make_package_text_edit(&c.insert_text, source_for_edits, position) {
-            item.text_edit = Some(edit);
-            item.insert_text = None;
-            item.insert_text_format = None;
-        }
-        item.filter_text = Some(c.label.to_string());
-    } else if c.source == "override" {
-        if let Some(edit) = make_override_text_edit(&c.insert_text, source_for_edits, position) {
-            item.text_edit = Some(edit);
-            item.insert_text = None;
-            item.insert_text_format = None;
-        }
-        item.filter_text = Some(c.label.to_string());
+        item.filter_text = Some(filter);
     }
 
     tracing::debug!(
@@ -224,8 +192,34 @@ fn map_candidate_item(
     item
 }
 
-/// Override candidate textEdit: Replace the entire access-modifier prefix before the cursor with the full method stub
-fn make_override_text_edit(
+fn make_text_edit(
+    candidate: &CompletionCandidate,
+    source: &str,
+    position: Position,
+) -> Option<CompletionTextEdit> {
+    let insertion_text = candidate.insertion.text.as_str();
+    match candidate.insertion.replacement {
+        ReplacementMode::Identifier => make_identifier_text_edit(insertion_text, source, position),
+        ReplacementMode::MemberSegment => {
+            make_member_segment_text_edit(insertion_text, source, position)
+        }
+        ReplacementMode::PackagePath => {
+            make_package_path_text_edit(insertion_text, source, position)
+        }
+        ReplacementMode::ImportPath => crate::completion::import_completion::make_import_text_edit(
+            insertion_text,
+            source,
+            position,
+        ),
+        ReplacementMode::AccessModifierPrefix => {
+            make_access_modifier_text_edit(insertion_text, source, position)
+        }
+        ReplacementMode::ClientDefault => None,
+    }
+}
+
+/// Replace access-modifier prefix before cursor with override stub.
+fn make_access_modifier_text_edit(
     insert_text: &str,
     source: &str,
     position: Position,
@@ -253,9 +247,8 @@ fn make_override_text_edit(
     }))
 }
 
-/// Expression/MemberAccess 场景下 Package 候选的 textEdit：
-/// 替换光标所在的整个"包路径词"（从行首非空白到光标）
-fn make_package_text_edit(
+/// Replace package-like path up to cursor (letters, numbers, underscore and dots).
+fn make_package_path_text_edit(
     insert_text: &str,
     source: &str,
     position: Position,
@@ -282,7 +275,16 @@ fn make_package_text_edit(
     }))
 }
 
-fn make_member_access_text_edit(
+fn make_identifier_text_edit(
+    insert_text: &str,
+    source: &str,
+    position: Position,
+) -> Option<CompletionTextEdit> {
+    make_member_segment_text_edit(insert_text, source, position)
+}
+
+/// Replace only member segment after dot (alphanumeric + underscore).
+fn make_member_segment_text_edit(
     insert_text: &str,
     source: &str,
     position: Position,
@@ -309,9 +311,20 @@ fn make_member_access_text_edit(
     }))
 }
 
+fn default_filter_text(c: &CompletionCandidate) -> Option<String> {
+    match c.insertion.replacement {
+        ReplacementMode::ImportPath => Some(c.insertion.text.clone()),
+        ReplacementMode::MemberSegment
+        | ReplacementMode::PackagePath
+        | ReplacementMode::AccessModifierPrefix => Some(c.label.to_string()),
+        ReplacementMode::Identifier | ReplacementMode::ClientDefault => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::completion::candidate::CandidateKind;
     use crate::completion::engine::CompletionMetadata;
     use std::sync::Arc;
 
@@ -336,7 +349,7 @@ mod tests {
             line: 0,
             character: "ChainCheck.".len() as u32,
         };
-        let edit = make_member_access_text_edit("Box", src, pos).expect("text edit");
+        let edit = make_member_segment_text_edit("Box", src, pos).expect("text edit");
         let range = edit_range(&edit);
         assert_eq!(range.start.character, pos.character);
         assert_eq!(range.end.character, pos.character);
@@ -350,7 +363,7 @@ mod tests {
             line: 0,
             character: "ChainCheck.Bo".len() as u32,
         };
-        let edit = make_member_access_text_edit("Box", src, pos).expect("text edit");
+        let edit = make_member_segment_text_edit("Box", src, pos).expect("text edit");
         let range = edit_range(&edit);
         assert_eq!(range.start.character, "ChainCheck.".len() as u32);
         assert_eq!(range.end.character, pos.character);
@@ -364,17 +377,14 @@ mod tests {
             "Box",
             CandidateKind::ClassName,
             "expression",
-        );
-        let loc = CursorLocation::StaticAccess {
-            class_internal_name: Arc::from("org/cubewhy/ChainCheck"),
-            member_prefix: String::new(),
-        };
+        )
+        .with_replacement_mode(ReplacementMode::MemberSegment);
         let src = "ChainCheck.;";
         let pos = Position {
             line: 0,
             character: "ChainCheck.".len() as u32,
         };
-        let item = map_candidate_item(&c, &loc, src, pos);
+        let item = map_candidate_item(&c, src, pos);
         let edit = item.text_edit.expect("text_edit expected");
         let range = edit_range(&edit);
         assert_eq!(item.label, "Box");
@@ -382,6 +392,49 @@ mod tests {
         assert_eq!(range.start.character, pos.character);
         assert_eq!(range.end.character, pos.character);
         assert_eq!(edit_text(&edit), "Box");
+    }
+
+    #[test]
+    fn test_map_candidate_item_snippet_text_edit_keeps_snippet_format() {
+        let c = CompletionCandidate::new(
+            Arc::from("println"),
+            "println(${1:x})$0",
+            CandidateKind::Method {
+                descriptor: Arc::from("(Ljava/lang/String;)V"),
+                defining_class: Arc::from("java/io/PrintStream"),
+            },
+            "member",
+        )
+        .with_insert_mode(InsertTextMode::Snippet);
+        let src = "System.out.pri";
+        let pos = Position {
+            line: 0,
+            character: "System.out.pri".len() as u32,
+        };
+        let item = map_candidate_item(&c, src, pos);
+        let edit = item.text_edit.expect("text_edit expected");
+        assert_eq!(edit_text(&edit), "println(${1:x})$0");
+        assert_eq!(item.insert_text, None);
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+    }
+
+    #[test]
+    fn test_map_candidate_item_plain_text_edit_has_no_snippet_format() {
+        let c = CompletionCandidate::new(
+            Arc::from("intValue"),
+            "intValue",
+            CandidateKind::LocalVariable {
+                type_descriptor: Arc::from("I"),
+            },
+            "local_var",
+        );
+        let src = "intVa";
+        let pos = Position {
+            line: 0,
+            character: "intVa".len() as u32,
+        };
+        let item = map_candidate_item(&c, src, pos);
+        assert_eq!(item.insert_text_format, None);
     }
 
     fn mk_candidate(label: &str) -> CompletionCandidate {
@@ -399,9 +452,6 @@ mod tests {
         let list = build_completion_list(
             CompletionMetadata::default(),
             &candidates,
-            &CursorLocation::Expression {
-                prefix: "A".to_string(),
-            },
             "A",
             Position::new(0, 1),
             10,
@@ -419,9 +469,6 @@ mod tests {
                 ..CompletionMetadata::default()
             },
             &candidates,
-            &CursorLocation::Expression {
-                prefix: String::new(),
-            },
             "",
             Position::new(0, 0),
             3,
@@ -436,9 +483,6 @@ mod tests {
         let list = build_completion_list(
             CompletionMetadata::default(),
             &candidates,
-            &CursorLocation::Expression {
-                prefix: "A".to_string(),
-            },
             "A",
             Position::new(0, 1),
             2,
@@ -456,9 +500,6 @@ mod tests {
                 ..CompletionMetadata::default()
             },
             &candidates,
-            &CursorLocation::Expression {
-                prefix: String::new(),
-            },
             "",
             Position::new(0, 0),
             10,

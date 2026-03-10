@@ -1,6 +1,7 @@
 use crate::{
     completion::{
-        CandidateKind, CompletionCandidate, provider::CompletionProvider, scorer::AccessFilter,
+        CandidateKind, CompletionCandidate, candidate::ReplacementMode,
+        provider::CompletionProvider, scorer::AccessFilter,
     },
     index::{IndexScope, IndexView},
     language::java::render,
@@ -110,16 +111,17 @@ impl CompletionProvider for StaticMemberProvider {
             results.push(
                 CompletionCandidate::new(
                     Arc::clone(&method.name),
-                    if ctx.has_paren_after_cursor() {
-                        method.name.to_string()
-                    } else {
-                        format!("{}(", method.name)
-                    },
+                    method.name.to_string(),
                     CandidateKind::StaticMethod {
                         descriptor: method.desc(),
                         defining_class: Arc::from(class_name),
                     },
                     self.name(),
+                )
+                .with_callable_insert(
+                    method.name.as_ref(),
+                    &method.params.param_names(),
+                    ctx.has_paren_after_cursor(),
                 )
                 .with_detail(render::method_detail(
                     class_name,
@@ -172,6 +174,8 @@ impl CompletionProvider for StaticMemberProvider {
                     CandidateKind::ClassName,
                     self.name(),
                 )
+                .with_replacement_mode(ReplacementMode::MemberSegment)
+                .with_filter_text(inner.name.to_string())
                 .with_detail(inner.source_name())
                 .with_score(62.0),
             );
@@ -215,15 +219,7 @@ impl StaticMemberProvider {
                     }
                 };
 
-                let insert_text = if m.is_method() {
-                    if ctx.has_paren_after_cursor() {
-                        m.name().to_string()
-                    } else {
-                        format!("{}(", m.name())
-                    }
-                } else {
-                    m.name().to_string()
-                };
+                let insert_text = m.name().to_string();
 
                 let detail = format!(
                     "{} static {}",
@@ -231,9 +227,19 @@ impl StaticMemberProvider {
                     m.name()
                 );
 
-                CompletionCandidate::new(m.name(), insert_text, kind, self.name())
+                let candidate = CompletionCandidate::new(m.name(), insert_text, kind, self.name())
                     .with_detail(detail)
-                    .with_score(70.0 + score as f32 * 0.1)
+                    .with_score(70.0 + score as f32 * 0.1);
+
+                if let crate::semantic::context::CurrentClassMember::Method(md) = m {
+                    candidate.with_callable_insert(
+                        md.name.as_ref(),
+                        &md.params.param_names(),
+                        ctx.has_paren_after_cursor(),
+                    )
+                } else {
+                    candidate
+                }
             })
             .collect()
     }

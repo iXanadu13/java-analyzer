@@ -1,6 +1,8 @@
 use crate::{
     completion::{
-        CandidateKind, CompletionCandidate, fuzzy,
+        CandidateKind, CompletionCandidate,
+        candidate::ReplacementMode,
+        fuzzy,
         import_utils::is_import_needed,
         provider::{CompletionProvider, ProviderCompletionResult, ProviderSearchSpace},
     },
@@ -108,6 +110,8 @@ impl ExpressionProvider {
                         CandidateKind::ClassName,
                         self.name(),
                     )
+                    .with_replacement_mode(ReplacementMode::MemberSegment)
+                    .with_filter_text(inner.name.to_string())
                     .with_detail(inner.source_name())
                     .with_score(88.0 + score),
                 );
@@ -153,6 +157,8 @@ impl ExpressionProvider {
                         CandidateKind::ClassName,
                         self.name(),
                     )
+                    .with_replacement_mode(ReplacementMode::MemberSegment)
+                    .with_filter_text(inner.name.to_string())
                     .with_detail(inner.source_name())
                     .with_score(88.0 + score),
                 );

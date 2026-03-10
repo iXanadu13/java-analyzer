@@ -1,5 +1,5 @@
 use crate::{
-    completion::{CompletionCandidate, provider::CompletionProvider},
+    completion::{CompletionCandidate, candidate::ReplacementMode, provider::CompletionProvider},
     index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
@@ -22,6 +22,13 @@ impl CompletionProvider for ImportProvider {
             _ => return vec![],
         };
         crate::completion::import_completion::candidates_for_import(prefix, scope, index)
+            .into_iter()
+            .map(|c| {
+                let filter_text = c.insert_text.clone();
+                c.with_replacement_mode(ReplacementMode::ImportPath)
+                    .with_filter_text(filter_text)
+            })
+            .collect()
     }
 }
 

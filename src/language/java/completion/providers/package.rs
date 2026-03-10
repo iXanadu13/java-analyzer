@@ -1,5 +1,5 @@
 use crate::{
-    completion::{CompletionCandidate, provider::CompletionProvider},
+    completion::{CompletionCandidate, candidate::ReplacementMode, provider::CompletionProvider},
     index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
@@ -48,12 +48,26 @@ impl CompletionProvider for PackageProvider {
         match &ctx.location {
             CursorLocation::Import { prefix } => {
                 crate::completion::import_completion::candidates_for_import(prefix, scope, index)
+                    .into_iter()
+                    .map(|c| {
+                        let filter_text = c.insert_text.clone();
+                        c.with_replacement_mode(ReplacementMode::ImportPath)
+                            .with_filter_text(filter_text)
+                    })
+                    .collect()
             }
             CursorLocation::Expression { prefix } | CursorLocation::TypeAnnotation { prefix } => {
                 if !prefix.contains('.') {
                     return vec![];
                 }
                 crate::completion::import_completion::candidates_for_import(prefix, scope, index)
+                    .into_iter()
+                    .map(|c| {
+                        let filter_text = c.label.to_string();
+                        c.with_replacement_mode(ReplacementMode::PackagePath)
+                            .with_filter_text(filter_text)
+                    })
+                    .collect()
             }
             CursorLocation::MemberAccess {
                 receiver_expr,
@@ -81,6 +95,13 @@ impl CompletionProvider for PackageProvider {
                     scope,
                     index,
                 )
+                .into_iter()
+                .map(|c| {
+                    let filter_text = c.label.to_string();
+                    c.with_replacement_mode(ReplacementMode::MemberSegment)
+                        .with_filter_text(filter_text)
+                })
+                .collect()
             }
             _ => vec![],
         }

@@ -2,7 +2,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::{
     completion::{
-        candidate::{CandidateKind, CompletionCandidate},
+        candidate::{CandidateKind, CompletionCandidate, CompletionInsertion, InsertTextMode},
         import_utils::{
             extract_imports_from_source, extract_package_from_source, is_import_needed,
         },
@@ -36,14 +36,8 @@ pub fn candidate_to_lsp(candidate: &CompletionCandidate, source: &str) -> Comple
             }]
         });
 
-    let (insert_text_format, insert_text) = if candidate.kind == CandidateKind::Snippet {
-        (
-            Some(InsertTextFormat::SNIPPET),
-            Some(candidate.insert_text.clone()),
-        )
-    } else {
-        (None, None)
-    };
+    let (insert_text_format, insert_text) =
+        insertion_to_lsp(&candidate.insertion, &candidate.label);
 
     CompletionItem {
         label: candidate.label.to_string(),
@@ -54,6 +48,25 @@ pub fn candidate_to_lsp(candidate: &CompletionCandidate, source: &str) -> Comple
         insert_text_format,
         sort_text: Some(format!("{:010.4}", 10000.0 - candidate.score)),
         ..Default::default()
+    }
+}
+
+fn insertion_to_lsp(
+    insertion: &CompletionInsertion,
+    label: &str,
+) -> (Option<InsertTextFormat>, Option<String>) {
+    match insertion.mode {
+        InsertTextMode::Snippet => (
+            Some(InsertTextFormat::SNIPPET),
+            Some(insertion.text.clone()),
+        ),
+        InsertTextMode::PlainText => {
+            if insertion.text == label {
+                (None, None)
+            } else {
+                (None, Some(insertion.text.clone()))
+            }
+        }
     }
 }
 
@@ -328,6 +341,24 @@ mod tests {
             item.additional_text_edits.is_none()
                 || item.additional_text_edits.as_ref().unwrap().is_empty()
         );
+    }
+
+    #[test]
+    fn test_candidate_to_lsp_method_snippet_mode_sets_snippet_format() {
+        let c = CompletionCandidate::new(
+            Arc::from("println"),
+            "println(${1:x})$0",
+            CandidateKind::Method {
+                descriptor: Arc::from("(Ljava/lang/String;)V"),
+                defining_class: Arc::from("java/io/PrintStream"),
+            },
+            "member",
+        )
+        .with_insert_mode(crate::completion::candidate::InsertTextMode::Snippet);
+
+        let item = candidate_to_lsp(&c, "class A {}");
+        assert_eq!(item.insert_text.as_deref(), Some("println(${1:x})$0"));
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
     }
 
     #[test]

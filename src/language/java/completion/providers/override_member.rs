@@ -4,7 +4,10 @@ use std::sync::Arc;
 use rust_asm::constants::{ACC_FINAL, ACC_PRIVATE, ACC_STATIC};
 
 use crate::{
-    completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
+    completion::{
+        CandidateKind, CompletionCandidate, candidate::ReplacementMode,
+        provider::CompletionProvider,
+    },
     index::{IndexScope, IndexView, MethodSummary},
     semantic::{
         context::{CursorLocation, SemanticContext},
@@ -254,6 +257,8 @@ fn build_candidate(
         },
         source,
     )
+    .with_replacement_mode(ReplacementMode::AccessModifierPrefix)
+    .with_filter_text(label_text)
     .with_detail(detail)
     .with_score(65.0)
 }

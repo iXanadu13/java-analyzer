@@ -130,6 +130,7 @@ impl ConstructorProvider {
                     },
                     self.name(),
                 )
+                .with_callable_insert(meta.name.as_ref(), &[], ctx.has_paren_after_cursor())
                 .with_detail(format!("new {}()", fqn))
                 .with_score(type_score_boost);
 
@@ -148,16 +149,20 @@ impl ConstructorProvider {
                     break;
                 }
                 let readable_params = descriptor_params_to_readable(&ctor.desc());
-                let insert_text = format!("{}(", meta.name);
                 let detail = format!("new {}({})", fqn, readable_params);
                 let candidate = CompletionCandidate::new(
                     Arc::clone(&meta.name),
-                    insert_text,
+                    meta.name.to_string(),
                     CandidateKind::Constructor {
                         descriptor: Arc::clone(&ctor.desc()),
                         defining_class: Arc::clone(&meta.name),
                     },
                     self.name(),
+                )
+                .with_callable_insert(
+                    meta.name.as_ref(),
+                    &ctor.params.param_names(),
+                    ctx.has_paren_after_cursor(),
                 )
                 .with_detail(detail)
                 .with_score(type_score_boost);

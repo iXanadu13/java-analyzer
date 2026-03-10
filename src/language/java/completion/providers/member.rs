@@ -119,11 +119,6 @@ impl CompletionProvider for MemberProvider {
                                 defining_class: Arc::clone(&class_meta.internal_name),
                             }
                         };
-                        let insert_text = if has_paren_after_cursor {
-                            method.name.to_string()
-                        } else {
-                            format!("{}(", method.name)
-                        };
                         let detail = if i == 0 {
                             render::method_detail(
                                 ctx.enclosing_internal_name.as_deref().unwrap_or(""),
@@ -137,9 +132,14 @@ impl CompletionProvider for MemberProvider {
                         results.push(
                             CompletionCandidate::new(
                                 Arc::clone(&method.name),
-                                insert_text,
+                                method.name.to_string(),
                                 kind,
                                 self.name(),
+                            )
+                            .with_callable_insert(
+                                method.name.as_ref(),
+                                &method.params.param_names(),
+                                has_paren_after_cursor,
                             )
                             .with_detail(detail)
                             .with_score(if i == 0 {
@@ -345,13 +345,14 @@ impl CompletionProvider for MemberProvider {
                 results.push(
                     CompletionCandidate::new(
                         Arc::clone(&method.name),
-                        if has_paren_after_cursor {
-                            method.name.to_string()
-                        } else {
-                            format!("{}(", method.name)
-                        },
+                        method.name.to_string(),
                         kind,
                         self.name(),
+                    )
+                    .with_callable_insert(
+                        method.name.as_ref(),
+                        &method.params.param_names(),
+                        has_paren_after_cursor,
                     )
                     .with_detail({
                         let detail = render::method_detail(
@@ -476,24 +477,26 @@ impl MemberProvider {
                         defining_class: Arc::from(enclosing),
                     },
                 };
-                let insert_text = if m.is_method() {
-                    if ctx.has_paren_after_cursor() {
-                        m.name().to_string()
-                    } else {
-                        format!("{}(", m.name())
-                    }
-                } else {
-                    m.name().to_string()
-                };
+                let insert_text = m.name().to_string();
                 let detail = format!(
                     "{} {} {}",
                     if m.is_private() { "private" } else { "public" },
                     if m.is_static() { "static" } else { "" },
                     m.name()
                 );
-                CompletionCandidate::new(m.name(), insert_text, kind, self.name())
+                let candidate = CompletionCandidate::new(m.name(), insert_text, kind, self.name())
                     .with_detail(detail)
-                    .with_score(70.0 + score as f32 * 0.1)
+                    .with_score(70.0 + score as f32 * 0.1);
+
+                if let crate::semantic::context::CurrentClassMember::Method(md) = m {
+                    candidate.with_callable_insert(
+                        md.name.as_ref(),
+                        &md.params.param_names(),
+                        ctx.has_paren_after_cursor(),
+                    )
+                } else {
+                    candidate
+                }
             })
             .collect()
     }

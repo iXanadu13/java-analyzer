@@ -107,16 +107,17 @@ fn all_static_members(
         out.push(
             CompletionCandidate::new(
                 Arc::clone(&method.name),
-                if ctx.has_paren_after_cursor() {
-                    method.name.to_string()
-                } else {
-                    format!("{}(", method.name)
-                },
+                method.name.to_string(),
                 CandidateKind::StaticMethod {
                     descriptor: method.desc(),
                     defining_class: Arc::from(class_path),
                 },
                 source,
+            )
+            .with_callable_insert(
+                method.name.as_ref(),
+                &method.params.param_names(),
+                ctx.has_paren_after_cursor(),
             )
             .with_detail(render::method_detail(class_path, meta, method, &resolver))
             .with_score(75.0),
@@ -168,16 +169,17 @@ fn specific_static_member(
         out.push(
             CompletionCandidate::new(
                 Arc::clone(&method.name),
-                if ctx.has_paren_after_cursor() {
-                    method.name.to_string()
-                } else {
-                    format!("{}(", method.name)
-                },
+                method.name.to_string(),
                 CandidateKind::StaticMethod {
                     descriptor: method.desc(),
                     defining_class: Arc::from(class_path),
                 },
                 source,
+            )
+            .with_callable_insert(
+                method.name.as_ref(),
+                &method.params.param_names(),
+                ctx.has_paren_after_cursor(),
             )
             .with_detail(render::method_detail(class_path, meta, method, &resolver))
             .with_score(80.0),
