@@ -57,11 +57,18 @@ pub enum ReplacementMode {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct MemberAccessRewrite {
+    pub receiver_expr: String,
+    pub cast_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CompletionInsertion {
     pub text: String,
     pub mode: InsertTextMode,
     pub replacement: ReplacementMode,
     pub filter_text: Option<String>,
+    pub member_access_rewrite: Option<MemberAccessRewrite>,
 }
 
 impl CompletionInsertion {
@@ -71,6 +78,7 @@ impl CompletionInsertion {
             mode: InsertTextMode::PlainText,
             replacement: ReplacementMode::Identifier,
             filter_text: None,
+            member_access_rewrite: None,
         }
     }
 
@@ -80,6 +88,7 @@ impl CompletionInsertion {
             mode: InsertTextMode::Snippet,
             replacement: ReplacementMode::Identifier,
             filter_text: None,
+            member_access_rewrite: None,
         }
     }
 }
@@ -164,6 +173,20 @@ impl CompletionCandidate {
         let text = text.into();
         self.insert_text = text.clone();
         self.insertion.text = text;
+        self
+    }
+
+    pub fn with_member_access_cast_rewrite(
+        mut self,
+        receiver_expr: impl Into<String>,
+        cast_type: impl Into<String>,
+    ) -> Self {
+        let receiver_expr = receiver_expr.into();
+        let cast_type = cast_type.into();
+        self.insertion.member_access_rewrite = Some(MemberAccessRewrite {
+            receiver_expr,
+            cast_type,
+        });
         self
     }
 

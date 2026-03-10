@@ -14,6 +14,13 @@ use crate::{
 };
 use std::sync::Arc;
 
+#[derive(Debug, Clone)]
+struct FlowReceiverCastPlan {
+    receiver_expr: String,
+    cast_type: String,
+    declared_type: TypeName,
+}
+
 pub struct MemberProvider;
 
 impl CompletionProvider for MemberProvider {
@@ -277,6 +284,8 @@ impl CompletionProvider for MemberProvider {
         };
         let has_paren_after_cursor = ctx.has_paren_after_cursor();
         let mut results = Vec::new();
+        let flow_receiver_cast_plan =
+            build_flow_receiver_cast_plan(ctx, index, receiver_expr, &resolved_effective);
 
         let t_mro = trace_timing.then(Instant::now);
         let mro = index.mro(base_class_internal);
@@ -341,36 +350,49 @@ impl CompletionProvider for MemberProvider {
                         defining_class: Arc::from(class_internal.as_str()),
                     }
                 };
-                results.push(
-                    CompletionCandidate::new(
-                        Arc::clone(&method.name),
-                        method.name.to_string(),
-                        kind,
-                        self.name(),
-                    )
-                    .with_callable_insert(
-                        method.name.as_ref(),
-                        &method.params.param_names(),
-                        has_paren_after_cursor,
-                    )
-                    .with_detail({
-                        let detail = render::method_detail(
-                            &class_internal_for_substitution,
-                            class_meta,
-                            method,
-                            &resolver,
+                let mut candidate = CompletionCandidate::new(
+                    Arc::clone(&method.name),
+                    method.name.to_string(),
+                    kind,
+                    self.name(),
+                )
+                .with_callable_insert(
+                    method.name.as_ref(),
+                    &method.params.param_names(),
+                    has_paren_after_cursor,
+                )
+                .with_detail({
+                    let detail = render::method_detail(
+                        &class_internal_for_substitution,
+                        class_meta,
+                        method,
+                        &resolver,
+                    );
+                    if trace_add {
+                        tracing::debug!(
+                            method_name = %method.name,
+                            method_desc = %method.desc(),
+                            detail,
+                            "member_provider: add overload candidate after detail rendering"
                         );
-                        if trace_add {
-                            tracing::debug!(
-                                method_name = %method.name,
-                                method_desc = %method.desc(),
-                                detail,
-                                "member_provider: add overload candidate after detail rendering"
-                            );
-                        }
-                        detail
-                    }),
-                );
+                    }
+                    detail
+                });
+                if !is_static
+                    && let Some(plan) = flow_receiver_cast_plan.as_ref()
+                    && needs_cast_for_method(
+                        index,
+                        &plan.declared_type,
+                        method.name.as_ref(),
+                        method.desc().as_ref(),
+                    )
+                {
+                    candidate = candidate.with_member_access_cast_rewrite(
+                        plan.receiver_expr.clone(),
+                        plan.cast_type.clone(),
+                    );
+                }
+                results.push(candidate);
             }
 
             for field in &class_meta.fields {
@@ -395,20 +417,33 @@ impl CompletionProvider for MemberProvider {
                         defining_class: Arc::from(class_internal.as_str()),
                     }
                 };
-                results.push(
-                    CompletionCandidate::new(
-                        Arc::clone(&field.name),
-                        field.name.to_string(),
-                        kind,
-                        self.name(),
+                let mut candidate = CompletionCandidate::new(
+                    Arc::clone(&field.name),
+                    field.name.to_string(),
+                    kind,
+                    self.name(),
+                )
+                .with_detail(render::field_detail(
+                    &class_internal_for_substitution,
+                    class_meta,
+                    field,
+                    &resolver,
+                ));
+                if !is_static
+                    && let Some(plan) = flow_receiver_cast_plan.as_ref()
+                    && needs_cast_for_field(
+                        index,
+                        &plan.declared_type,
+                        field.name.as_ref(),
+                        field.descriptor.as_ref(),
                     )
-                    .with_detail(render::field_detail(
-                        &class_internal_for_substitution,
-                        class_meta,
-                        field,
-                        &resolver,
-                    )),
-                );
+                {
+                    candidate = candidate.with_member_access_cast_rewrite(
+                        plan.receiver_expr.clone(),
+                        plan.cast_type.clone(),
+                    );
+                }
+                results.push(candidate);
             }
         }
         if let (Some(t_collect), Some(t_total)) = (t_collect, t_total) {
@@ -425,6 +460,88 @@ impl CompletionProvider for MemberProvider {
         }
         results
     }
+}
+
+fn build_flow_receiver_cast_plan(
+    ctx: &SemanticContext,
+    index: &IndexView,
+    receiver_expr: &str,
+    resolved_effective: &TypeName,
+) -> Option<FlowReceiverCastPlan> {
+    let receiver_expr = receiver_expr.trim();
+    if !is_simple_identifier(receiver_expr) {
+        return None;
+    }
+
+    let narrowed = ctx.flow_override_for_local(receiver_expr)?;
+    if narrowed.erased_internal() != resolved_effective.erased_internal() {
+        return None;
+    }
+
+    let declared = ctx
+        .local_variables
+        .iter()
+        .find(|lv| lv.name.as_ref() == receiver_expr)
+        .map(|lv| lv.type_internal.clone())?;
+    if declared.erased_internal() == narrowed.erased_internal() {
+        return None;
+    }
+
+    // Keep cast rewrites for concrete known owner types only.
+    if index.get_class(declared.erased_internal()).is_none()
+        || index.get_class(narrowed.erased_internal()).is_none()
+    {
+        return None;
+    }
+
+    Some(FlowReceiverCastPlan {
+        receiver_expr: receiver_expr.to_string(),
+        cast_type: render_cast_type(narrowed),
+        declared_type: declared,
+    })
+}
+
+fn needs_cast_for_method(
+    index: &IndexView,
+    declared_type: &TypeName,
+    method_name: &str,
+    method_desc: &str,
+) -> bool {
+    let (methods, _) = index.collect_inherited_members(declared_type.erased_internal());
+    !methods
+        .iter()
+        .any(|m| m.name.as_ref() == method_name && m.desc().as_ref() == method_desc)
+}
+
+fn needs_cast_for_field(
+    index: &IndexView,
+    declared_type: &TypeName,
+    field_name: &str,
+    field_desc: &str,
+) -> bool {
+    let (_, fields) = index.collect_inherited_members(declared_type.erased_internal());
+    !fields
+        .iter()
+        .any(|f| f.name.as_ref() == field_name && f.descriptor.as_ref() == field_desc)
+}
+
+fn render_cast_type(ty: &TypeName) -> String {
+    let mut base = ty.erased_internal().replace('/', ".").replace('$', ".");
+    if ty.array_dims > 0 {
+        base.push_str(&"[]".repeat(ty.array_dims));
+    }
+    base
+}
+
+fn is_simple_identifier(expr: &str) -> bool {
+    let mut chars = expr.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 fn name_matches_member_prefix(name: &str, prefix_lower: Option<&str>) -> bool {

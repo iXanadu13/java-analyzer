@@ -27,6 +27,7 @@ pub mod class_parser;
 pub mod completion;
 pub mod completion_context;
 pub mod expression_typing;
+pub mod flow;
 pub mod injection;
 pub mod locals;
 pub mod location;
@@ -373,6 +374,12 @@ impl JavaContextExtractor {
         ));
         let local_variables =
             locals::extract_locals_with_type_ctx(&self, root, cursor_node, Some(&type_ctx));
+        let flow_type_overrides = flow::extract_instanceof_true_branch_overrides(
+            &self,
+            cursor_node,
+            &type_ctx,
+            &local_variables,
+        );
         let existing_static_imports = scope::extract_static_imports(&self, root);
         let is_class_member_position = scope::is_cursor_in_class_member_position(cursor_node);
         let current_class_members = cursor_node
@@ -410,6 +417,7 @@ impl JavaContextExtractor {
             existing_imports,
         )
         .with_functional_target_hint(functional_target_hint)
+        .with_flow_type_overrides(flow_type_overrides)
         .with_class_member_position(is_class_member_position)
         .with_static_imports(existing_static_imports)
         .with_class_members(current_class_members)
@@ -719,11 +727,176 @@ mod tests {
         idx
     }
 
+    fn make_instanceof_narrowing_index() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("toString"),
+                    params: MethodParams::empty(),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Ljava/lang/String;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("StringBuilder"),
+                internal_name: Arc::from("java/lang/StringBuilder"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("append"),
+                    params: MethodParams::from([("Ljava/lang/String;", "str")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Ljava/lang/StringBuilder;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            make_class("java/lang", "String"),
+        ]);
+        idx
+    }
+
     #[test]
     fn test_import() {
         let src = "import com.example.Foo;";
         let ctx = end_of(src);
         assert!(matches!(ctx.location, CursorLocation::Import { .. }));
+    }
+
+    #[test]
+    fn test_instanceof_true_branch_exposes_narrowed_members() {
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    Object sb = new StringBuilder();
+                    if (sb instanceof StringBuilder) {
+                        sb.appe|
+                    }
+                }
+            }
+        "#};
+        let idx = make_instanceof_narrowing_index();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        assert!(
+            candidates.iter().any(|c| c.label.as_ref() == "append"),
+            "append should be available via flow narrowing in true branch"
+        );
+    }
+
+    #[test]
+    fn test_instanceof_narrowed_member_insert_rewrites_receiver_with_cast() {
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    Object sb = new StringBuilder();
+                    if (sb instanceof StringBuilder) {
+                        sb.appe|
+                    }
+                }
+            }
+        "#};
+        let idx = make_instanceof_narrowing_index();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let append = candidates
+            .iter()
+            .find(|c| c.label.as_ref() == "append")
+            .expect("append candidate should exist in narrowed branch");
+        assert!(
+            append.insert_text.starts_with("append("),
+            "primary insert text should remain selector-local, got: {}",
+            append.insert_text
+        );
+        let rewrite = append
+            .insertion
+            .member_access_rewrite
+            .as_ref()
+            .expect("narrowed append should carry cast rewrite metadata");
+        assert_eq!(rewrite.receiver_expr, "sb");
+        assert_eq!(rewrite.cast_type, "java.lang.StringBuilder");
+        assert!(
+            append.insertion.filter_text.is_none(),
+            "cast rewrite should not force custom filter_text here"
+        );
+    }
+
+    #[test]
+    fn test_typed_receiver_member_insert_stays_plain_without_cast() {
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    StringBuilder sb = new StringBuilder();
+                    sb.appe|
+                }
+            }
+        "#};
+        let idx = make_instanceof_narrowing_index();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let append = candidates
+            .iter()
+            .find(|c| c.label.as_ref() == "append")
+            .expect("append candidate should exist for typed receiver");
+        assert!(
+            append.insert_text.starts_with("append("),
+            "typed receiver insertion should not include cast, got: {}",
+            append.insert_text
+        );
+        assert!(
+            !append
+                .insert_text
+                .contains("((java.lang.StringBuilder) sb)"),
+            "typed receiver insertion should not cast"
+        );
+        assert!(
+            append.insertion.member_access_rewrite.is_none(),
+            "typed receiver should not carry cast rewrite metadata"
+        );
+    }
+
+    #[test]
+    fn test_instanceof_narrowing_does_not_leak_outside_true_branch() {
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    Object sb = new StringBuilder();
+                    if (sb instanceof StringBuilder) {
+                    }
+                    sb.appe|
+                }
+            }
+        "#};
+        let idx = make_instanceof_narrowing_index();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        assert!(
+            !candidates.iter().any(|c| c.label.as_ref() == "append"),
+            "append should not be available outside instanceof true branch"
+        );
     }
 
     #[test]

@@ -122,76 +122,85 @@ impl<'a> ContextEnricher<'a> {
             }
         }
 
-        if let CursorLocation::MemberAccess { .. } = &ctx.location
-            && let CursorLocation::MemberAccess {
-                receiver_semantic_type,
-                receiver_type,
-                receiver_expr,
-                ..
-            } = &mut ctx.location
+        let resolved_member_receiver = if let CursorLocation::MemberAccess {
+            receiver_type,
+            receiver_expr,
+            ..
+        } = &ctx.location
             && receiver_type.is_none()
             && !receiver_expr.is_empty()
         {
             let resolver = TypeResolver::new(self.view);
-            let resolved = expression_typing::resolve_expression_type(
-                receiver_expr,
+            let resolved = resolve_member_receiver_with_flow(
                 &ctx.local_variables,
+                &ctx.flow_type_overrides,
                 ctx.enclosing_internal_name.as_ref(),
-                &resolver,
                 &type_ctx,
                 self.view,
+                &resolver,
+                receiver_expr,
             );
             tracing::debug!(
                 ?resolved,
                 receiver_expr,
                 "enrich_context: resolved receiver expression"
             );
-
             tracing::debug!(?resolved, "enrich_context: resolved before final match");
-
-            // Normalize to a canonical semantic receiver type before writing either field.
-            let resolved_semantic = canonicalize_receiver_semantic(resolved, &type_ctx);
-            let typed_chain_receiver = resolved_semantic.as_ref().map(build_typed_chain_receiver);
-            ctx.typed_chain_receiver = typed_chain_receiver;
+            canonicalize_receiver_semantic(resolved, &type_ctx)
+        } else {
+            None
+        };
+        if let Some(resolved_semantic) = resolved_member_receiver
+            && let CursorLocation::MemberAccess {
+                receiver_semantic_type,
+                receiver_type,
+                ..
+            } = &mut ctx.location
+        {
+            ctx.typed_chain_receiver = Some(build_typed_chain_receiver(&resolved_semantic));
 
             if receiver_semantic_type.is_none() {
-                *receiver_semantic_type = resolved_semantic.clone();
+                *receiver_semantic_type = Some(resolved_semantic.clone());
             }
 
-            *receiver_type = resolved_semantic
-                .as_ref()
-                .map(|t| Arc::from(t.erased_internal()));
+            *receiver_type = Some(Arc::from(resolved_semantic.erased_internal()));
         }
 
         // C3a: if receiver fields were pre-filled and skipped the main branch above,
         // still compute and commit functional-chain concretization into typed chain state.
-        if let CursorLocation::MemberAccess {
-            receiver_semantic_type,
-            receiver_type,
-            receiver_expr,
-            ..
-        } = &mut ctx.location
+        let resolved_chain_receiver = if let CursorLocation::MemberAccess { receiver_expr, .. } =
+            &ctx.location
             && ctx.typed_chain_receiver.is_none()
             && !receiver_expr.is_empty()
             && (receiver_expr.contains('(') || receiver_expr.contains("::"))
         {
             let resolver = TypeResolver::new(self.view);
-            let resolved = expression_typing::resolve_expression_type(
-                receiver_expr,
+            let resolved = resolve_member_receiver_with_flow(
                 &ctx.local_variables,
+                &ctx.flow_type_overrides,
                 ctx.enclosing_internal_name.as_ref(),
-                &resolver,
                 &type_ctx,
                 self.view,
+                &resolver,
+                receiver_expr,
             );
-            if let Some(ty) = canonicalize_receiver_semantic(resolved, &type_ctx) {
-                ctx.typed_chain_receiver = Some(build_typed_chain_receiver(&ty));
-                if receiver_semantic_type.is_none() {
-                    *receiver_semantic_type = Some(ty.clone());
-                }
-                if receiver_type.is_none() {
-                    *receiver_type = Some(Arc::from(ty.erased_internal()));
-                }
+            canonicalize_receiver_semantic(resolved, &type_ctx)
+        } else {
+            None
+        };
+        if let Some(ty) = resolved_chain_receiver
+            && let CursorLocation::MemberAccess {
+                receiver_semantic_type,
+                receiver_type,
+                ..
+            } = &mut ctx.location
+        {
+            ctx.typed_chain_receiver = Some(build_typed_chain_receiver(&ty));
+            if receiver_semantic_type.is_none() {
+                *receiver_semantic_type = Some(ty.clone());
+            }
+            if receiver_type.is_none() {
+                *receiver_type = Some(Arc::from(ty.erased_internal()));
             }
         }
 
@@ -649,6 +658,42 @@ fn resolve_hint_receiver_type(
     let mut scoped = resolve_type_name_with_scoped_inner_fallback(ctx, type_ctx, view, &ty)?;
     scoped.array_dims = ty.array_dims;
     Some(scoped)
+}
+
+fn resolve_member_receiver_with_flow(
+    local_variables: &[crate::semantic::LocalVar],
+    flow_type_overrides: &std::collections::HashMap<Arc<str>, TypeName>,
+    enclosing_internal: Option<&Arc<str>>,
+    type_ctx: &SourceTypeCtx,
+    view: &IndexView,
+    resolver: &TypeResolver,
+    receiver_expr: &str,
+) -> Option<TypeName> {
+    let receiver_expr = receiver_expr.trim();
+    if is_simple_identifier(receiver_expr)
+        && let Some(narrowed) = flow_type_overrides.get(receiver_expr)
+    {
+        return Some(narrowed.clone());
+    }
+    expression_typing::resolve_expression_type(
+        receiver_expr,
+        local_variables,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+    )
+}
+
+fn is_simple_identifier(expr: &str) -> bool {
+    let mut chars = expr.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 fn resolve_type_name_with_scoped_inner_fallback(

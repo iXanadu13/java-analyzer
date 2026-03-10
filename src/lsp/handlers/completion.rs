@@ -168,6 +168,19 @@ fn map_candidate_item(
         item.insert_text = None;
     }
 
+    if let Some(rewrite) = c.insertion.member_access_rewrite.as_ref()
+        && let Some(mut rewrite_edits) = make_member_access_cast_additional_edits(
+            source_for_edits,
+            position,
+            &rewrite.receiver_expr,
+            &rewrite.cast_type,
+        )
+    {
+        let mut merged = item.additional_text_edits.take().unwrap_or_default();
+        merged.append(&mut rewrite_edits);
+        item.additional_text_edits = Some(merged);
+    }
+
     if let Some(filter) = c
         .insertion
         .filter_text
@@ -175,6 +188,9 @@ fn map_candidate_item(
         .or_else(|| default_filter_text(c))
     {
         item.filter_text = Some(filter);
+    }
+    if c.insertion.member_access_rewrite.is_some() && item.filter_text.is_none() {
+        item.filter_text = Some(item.label.clone());
     }
 
     tracing::debug!(
@@ -198,7 +214,7 @@ fn make_text_edit(
     position: Position,
 ) -> Option<CompletionTextEdit> {
     let insertion_text = candidate.insertion.text.as_str();
-    match candidate.insertion.replacement {
+    match &candidate.insertion.replacement {
         ReplacementMode::Identifier => make_identifier_text_edit(insertion_text, source, position),
         ReplacementMode::MemberSegment => {
             make_member_segment_text_edit(insertion_text, source, position)
@@ -309,6 +325,48 @@ fn make_member_segment_text_edit(
         },
         new_text: insert_text.to_string(),
     }))
+}
+
+fn make_member_access_cast_additional_edits(
+    source: &str,
+    position: Position,
+    receiver_expr: &str,
+    cast_type: &str,
+) -> Option<Vec<TextEdit>> {
+    let line = source.lines().nth(position.line as usize)?;
+    let before_cursor = &line[..position.character as usize];
+    let needle = format!("{}.", receiver_expr.trim());
+    let receiver_start = before_cursor.rfind(&needle)? as u32;
+    let receiver_end = receiver_start + receiver_expr.trim().len() as u32;
+
+    Some(vec![
+        TextEdit {
+            range: Range {
+                start: Position {
+                    line: position.line,
+                    character: receiver_start,
+                },
+                end: Position {
+                    line: position.line,
+                    character: receiver_start,
+                },
+            },
+            new_text: format!("(({}) ", cast_type),
+        },
+        TextEdit {
+            range: Range {
+                start: Position {
+                    line: position.line,
+                    character: receiver_end,
+                },
+                end: Position {
+                    line: position.line,
+                    character: receiver_end,
+                },
+            },
+            new_text: ")".to_string(),
+        },
+    ])
 }
 
 fn default_filter_text(c: &CompletionCandidate) -> Option<String> {
@@ -435,6 +493,166 @@ mod tests {
         };
         let item = map_candidate_item(&c, src, pos);
         assert_eq!(item.insert_text_format, None);
+    }
+
+    #[test]
+    fn test_member_access_cast_rewrite_uses_narrow_primary_edit_and_additional_edits() {
+        let c = CompletionCandidate::new(
+            Arc::from("append"),
+            "append(${1:str})$0",
+            CandidateKind::Method {
+                descriptor: Arc::from("(Ljava/lang/String;)Ljava/lang/StringBuilder;"),
+                defining_class: Arc::from("java/lang/StringBuilder"),
+            },
+            "member",
+        )
+        .with_insert_mode(InsertTextMode::Snippet)
+        .with_member_access_cast_rewrite("sb", "java.lang.StringBuilder");
+
+        let src = "if (sb instanceof StringBuilder) { sb.appe }";
+        let pos = Position {
+            line: 0,
+            character: "if (sb instanceof StringBuilder) { sb.appe".len() as u32,
+        };
+        let item = map_candidate_item(&c, src, pos);
+        match item.text_edit.expect("text_edit expected") {
+            CompletionTextEdit::Edit(te) => {
+                assert_eq!(
+                    te.range.start.character,
+                    "if (sb instanceof StringBuilder) { sb.".len() as u32
+                );
+                assert_eq!(te.range.end.character, pos.character);
+                assert_eq!(te.new_text, "append(${1:str})$0");
+            }
+            CompletionTextEdit::InsertAndReplace(ir) => {
+                panic!("expected narrow Edit, got InsertAndReplace({ir:?})");
+            }
+        }
+        let edits = item
+            .additional_text_edits
+            .expect("cast rewrite additional edits expected");
+        assert_eq!(edits.len(), 2);
+        assert_eq!(
+            edits[0].new_text, "((java.lang.StringBuilder) ",
+            "first edit inserts cast prefix"
+        );
+        assert_eq!(edits[1].new_text, ")", "second edit inserts cast suffix");
+        assert!(edits[0].range.end <= edits[1].range.start);
+    }
+
+    #[test]
+    fn test_append_vs_clone_item_shape_for_vscode_filtering() {
+        let append = CompletionCandidate::new(
+            Arc::from("append"),
+            "append(${1:str})$0",
+            CandidateKind::Method {
+                descriptor: Arc::from("(Ljava/lang/String;)Ljava/lang/StringBuilder;"),
+                defining_class: Arc::from("java/lang/StringBuilder"),
+            },
+            "member",
+        )
+        .with_insert_mode(InsertTextMode::Snippet)
+        .with_member_access_cast_rewrite("sb", "java.lang.StringBuilder");
+
+        let clone = CompletionCandidate::new(
+            Arc::from("clone"),
+            "clone()",
+            CandidateKind::Method {
+                descriptor: Arc::from("()Ljava/lang/Object;"),
+                defining_class: Arc::from("java/lang/Object"),
+            },
+            "member",
+        );
+
+        let src = "if (sb instanceof StringBuilder) { sb.appe }";
+        let pos = Position {
+            line: 0,
+            character: "if (sb instanceof StringBuilder) { sb.appe".len() as u32,
+        };
+
+        let append_item = map_candidate_item(&append, src, pos);
+        let clone_item = map_candidate_item(&clone, src, pos);
+
+        assert_eq!(append_item.label, "append");
+        assert_eq!(clone_item.label, "clone");
+        assert_eq!(append_item.filter_text.as_deref(), Some("append"));
+        assert_eq!(clone_item.filter_text, None);
+        assert_eq!(append_item.sort_text, clone_item.sort_text);
+        assert_eq!(append_item.insert_text, None);
+        assert_eq!(clone_item.insert_text, None);
+        assert_eq!(
+            append_item.insert_text_format,
+            Some(InsertTextFormat::SNIPPET)
+        );
+        assert_eq!(clone_item.insert_text_format, None);
+
+        match append_item.text_edit.expect("append text_edit") {
+            CompletionTextEdit::Edit(te) => {
+                assert_eq!(
+                    te.range.start.character,
+                    "if (sb instanceof StringBuilder) { sb.".len() as u32
+                );
+                assert_eq!(te.range.end.character, pos.character);
+                assert_eq!(te.new_text, "append(${1:str})$0");
+            }
+            CompletionTextEdit::InsertAndReplace(ir) => {
+                panic!("append should not use InsertAndReplace({ir:?})");
+            }
+        }
+        let append_additional = append_item
+            .additional_text_edits
+            .as_ref()
+            .expect("append should include cast additional edits");
+        assert_eq!(append_additional.len(), 2);
+        assert_eq!(append_additional[0].new_text, "((java.lang.StringBuilder) ");
+        assert_eq!(append_additional[1].new_text, ")");
+
+        match clone_item.text_edit.expect("clone text_edit") {
+            CompletionTextEdit::Edit(te) => {
+                assert_eq!(
+                    te.range.start.character,
+                    "if (sb instanceof StringBuilder) { sb.".len() as u32
+                );
+                assert_eq!(te.range.end.character, pos.character);
+                assert_eq!(te.new_text, "clone()");
+            }
+            CompletionTextEdit::InsertAndReplace(ir) => {
+                panic!("expected clone Edit text_edit, got InsertAndReplace({ir:?})");
+            }
+        }
+        assert!(
+            clone_item
+                .additional_text_edits
+                .as_ref()
+                .is_none_or(|edits| edits.is_empty()),
+            "clone should not have cast rewrite additional edits"
+        );
+    }
+
+    #[test]
+    fn test_completion_item_does_not_emit_invalid_insert_replace_shape() {
+        let c = CompletionCandidate::new(
+            Arc::from("append"),
+            "append(${1:str})$0",
+            CandidateKind::Method {
+                descriptor: Arc::from("(Ljava/lang/String;)Ljava/lang/StringBuilder;"),
+                defining_class: Arc::from("java/lang/StringBuilder"),
+            },
+            "member",
+        )
+        .with_insert_mode(InsertTextMode::Snippet)
+        .with_member_access_cast_rewrite("sb", "java.lang.StringBuilder");
+        let src = "if (sb instanceof StringBuilder) { sb.appe }";
+        let pos = Position {
+            line: 0,
+            character: "if (sb instanceof StringBuilder) { sb.appe".len() as u32,
+        };
+        let item = map_candidate_item(&c, src, pos);
+        if let Some(edit) = item.text_edit {
+            if let CompletionTextEdit::InsertAndReplace(ir) = edit {
+                assert_eq!(ir.insert.start, ir.replace.start);
+            }
+        }
     }
 
     fn mk_candidate(label: &str) -> CompletionCandidate {

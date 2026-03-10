@@ -305,6 +305,9 @@ pub struct SemanticContext {
     pub typed_chain_receiver: Option<TypedChainReceiver>,
     pub expected_functional_interface: Option<TypeName>,
     pub expected_sam: Option<SamSignature>,
+    /// Flow-sensitive local type overrides scoped to the current cursor region
+    /// (e.g. `if (x instanceof T) { ... }` => `x -> T` inside the true branch).
+    pub flow_type_overrides: HashMap<Arc<str>, TypeName>,
     pub ext: Option<Arc<dyn Any + Send + Sync>>,
 }
 
@@ -349,6 +352,7 @@ impl SemanticContext {
             typed_chain_receiver: None,
             expected_functional_interface: None,
             expected_sam: None,
+            flow_type_overrides: HashMap::new(),
             ext: None,
         }
     }
@@ -432,6 +436,15 @@ impl SemanticContext {
     pub fn with_char_after_cursor(mut self, c: Option<char>) -> Self {
         self.char_after_cursor = c;
         self
+    }
+
+    pub fn with_flow_type_overrides(mut self, overrides: HashMap<Arc<str>, TypeName>) -> Self {
+        self.flow_type_overrides = overrides;
+        self
+    }
+
+    pub fn flow_override_for_local(&self, name: &str) -> Option<&TypeName> {
+        self.flow_type_overrides.get(name)
     }
 
     /// The cursor is immediately followed by '(', and method completion does not require additional parentheses.
