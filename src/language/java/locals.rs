@@ -18,6 +18,13 @@ use crate::{
 struct RankedLocal {
     local: LocalVar,
     declaration_start: usize,
+    visibility_scope: ScopeRange,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScopeRange {
+    start: usize,
+    end: usize,
 }
 
 pub fn extract_locals(
@@ -64,7 +71,9 @@ pub fn extract_locals_with_type_ctx(
 
             let declarator = name_node.parent()?; // variable_declarator
             let decl = declarator.parent()?; // local_variable_declaration
+            let visibility_scope = local_visibility_scope(decl)?;
             if !is_visible_local_declaration_before_cursor(ctx.offset, name_node, declarator, decl)
+                || !scope_contains_offset(visibility_scope, ctx.offset)
             {
                 return None;
             }
@@ -107,6 +116,7 @@ pub fn extract_locals_with_type_ctx(
                         init_expr: get_initializer_text(ty_node, ctx.bytes()),
                     },
                     declaration_start: name_node.start_byte(),
+                    visibility_scope,
                 });
             }
 
@@ -117,6 +127,7 @@ pub fn extract_locals_with_type_ctx(
                     init_expr: None,
                 },
                 declaration_start: name_node.start_byte(),
+                visibility_scope,
             })
         })
         .collect();
@@ -205,6 +216,8 @@ fn collect_misread_decls(
                         vars.push(RankedLocal {
                             local: lv,
                             declaration_start: name_node.start_byte(),
+                            visibility_scope: local_visibility_scope(child)
+                                .unwrap_or_else(|| fallback_visibility_scope(ctx.offset)),
                         });
                     }
                 }
@@ -292,6 +305,8 @@ fn extract_params(
                 init_expr: None,
             },
             declaration_start: name_node.start_byte(),
+            visibility_scope: method_like_body_scope(method)
+                .unwrap_or_else(|| fallback_visibility_scope(ctx.offset)),
         });
     }
     vars
@@ -338,6 +353,8 @@ fn extract_lambda_params_from_node(ctx: &JavaContextExtractor, params: Node) -> 
                 init_expr: None,
             },
             declaration_start,
+            visibility_scope: lambda_param_visibility_scope(params)
+                .unwrap_or_else(|| fallback_visibility_scope(ctx.offset)),
         })
         .collect()
 }
@@ -411,7 +428,12 @@ fn normalize_visible_locals(mut vars: Vec<RankedLocal>) -> Vec<LocalVar> {
     // Normalize the visible local table for editor recovery:
     // declarations nearest to the caret win duplicate-name conflicts, regardless
     // of which extractor produced them.
-    vars.sort_by(|a, b| b.declaration_start.cmp(&a.declaration_start));
+    vars.sort_by(|a, b| {
+        b.declaration_start
+            .cmp(&a.declaration_start)
+            .then_with(|| b.visibility_scope.start.cmp(&a.visibility_scope.start))
+            .then_with(|| b.visibility_scope.end.cmp(&a.visibility_scope.end))
+    });
     let mut seen: HashSet<Arc<str>> = HashSet::new();
     let mut visible = Vec::new();
     for ranked in vars {
@@ -461,9 +483,11 @@ fn collect_locals_in_errors(
                         }
                         let declarator = name_node.parent()?;
                         let decl = declarator.parent()?;
+                        let visibility_scope = local_visibility_scope(decl)?;
                         if !is_visible_local_declaration_before_cursor(
                             ctx.offset, name_node, declarator, decl,
-                        ) {
+                        ) || !scope_contains_offset(visibility_scope, ctx.offset)
+                        {
                             return None;
                         }
                         let ty = ty_node.utf8_text(ctx.bytes()).ok()?;
@@ -478,6 +502,7 @@ fn collect_locals_in_errors(
                                     init_expr: get_initializer_text(ty_node, ctx.bytes()),
                                 },
                                 declaration_start: name_node.start_byte(),
+                                visibility_scope,
                             });
                         }
 
@@ -488,6 +513,7 @@ fn collect_locals_in_errors(
                                 init_expr: None,
                             },
                             declaration_start: name_node.start_byte(),
+                            visibility_scope,
                         })
                     })
                     .collect();
@@ -513,6 +539,80 @@ fn is_visible_local_declaration_before_cursor(
     name_node.start_byte() < offset
         && declarator.start_byte() < offset
         && decl.start_byte() < offset
+}
+
+fn local_visibility_scope(decl: Node) -> Option<ScopeRange> {
+    let owner = nearest_local_scope_owner(decl)?;
+    scope_range_for_owner(owner)
+}
+
+fn lambda_param_visibility_scope(params: Node) -> Option<ScopeRange> {
+    let lambda = params.parent()?;
+    if lambda.kind() != "lambda_expression" {
+        return None;
+    }
+    let body = lambda.child_by_field_name("body")?;
+    Some(node_scope_range(body))
+}
+
+fn method_like_body_scope(method: Node) -> Option<ScopeRange> {
+    scope_range_for_owner(method)
+}
+
+fn nearest_local_scope_owner(node: Node) -> Option<Node> {
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        if is_local_scope_owner(candidate.kind()) {
+            return Some(candidate);
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+fn is_local_scope_owner(kind: &str) -> bool {
+    matches!(
+        kind,
+        "block"
+            | "for_statement"
+            | "enhanced_for_statement"
+            | "catch_clause"
+            | "switch_block_statement_group"
+            | "switch_rule"
+            | "method_declaration"
+            | "constructor_declaration"
+            | "lambda_expression"
+            | "static_initializer"
+            | "instance_initializer"
+    )
+}
+
+fn scope_range_for_owner(owner: Node) -> Option<ScopeRange> {
+    let scope_node = match owner.kind() {
+        "method_declaration" | "constructor_declaration" | "lambda_expression" => {
+            owner.child_by_field_name("body")?
+        }
+        _ => owner,
+    };
+    Some(node_scope_range(scope_node))
+}
+
+fn node_scope_range(node: Node) -> ScopeRange {
+    ScopeRange {
+        start: node.start_byte(),
+        end: node.end_byte(),
+    }
+}
+
+fn scope_contains_offset(scope: ScopeRange, offset: usize) -> bool {
+    scope.start <= offset && offset < scope.end
+}
+
+fn fallback_visibility_scope(offset: usize) -> ScopeRange {
+    ScopeRange {
+        start: 0,
+        end: offset.saturating_add(1),
+    }
 }
 
 #[cfg(test)]
@@ -690,6 +790,91 @@ mod tests {
 
         assert!(vars.iter().any(|v| v.name.as_ref() == "visible"));
         assert!(!vars.iter().any(|v| v.name.as_ref() == "invisible"));
+    }
+
+    #[test]
+    fn test_inner_block_local_does_not_leak_in_method_body() {
+        let src = indoc::indoc! {r#"
+        class T {
+            void m() {
+                {
+                    String s1 = "";
+                }
+                s1
+            }
+        }
+        "#};
+        let offset = src.find("s1\n").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            !vars.iter().any(|v| v.name.as_ref() == "s1"),
+            "inner-block local must not leak: {:?}",
+            vars.iter().map(|v| v.name.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_inner_block_local_stays_visible_inside_own_block() {
+        let src = indoc::indoc! {r#"
+        class T {
+            void m() {
+                {
+                    String s1 = "";
+                    s1
+                }
+            }
+        }
+        "#};
+        let offset = src.rfind("s1\n").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            vars.iter().any(|v| v.name.as_ref() == "s1"),
+            "inner-block local should stay visible inside block: {:?}",
+            vars.iter().map(|v| v.name.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_lambda_inner_block_local_does_not_leak_after_block() {
+        let src = indoc::indoc! {r#"
+        import java.util.function.Function;
+
+        class T {
+            void m() {
+                Function<String, Void> f = s -> {
+                    {
+                        String s1 = s.trim();
+                    }
+                    s1
+                    return null;
+                };
+            }
+        }
+        "#};
+        let offset = src.find("s1\n").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            vars.iter().any(|v| v.name.as_ref() == "s"),
+            "lambda parameter should remain visible: {:?}",
+            vars.iter().map(|v| v.name.as_ref()).collect::<Vec<_>>()
+        );
+        assert!(
+            !vars.iter().any(|v| v.name.as_ref() == "s1"),
+            "expired inner-block local must not leak out of lambda block: {:?}",
+            vars.iter().map(|v| v.name.as_ref()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

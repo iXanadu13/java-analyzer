@@ -955,6 +955,7 @@ mod tests {
                 origin: ClassOrigin::Unknown,
             },
             make_class("java/lang", "Integer"),
+            make_class("java/lang", "Void"),
             make_class("java/lang", "CharSequence"),
             make_class("java/lang", "System"),
             ClassMetadata {
@@ -1460,6 +1461,107 @@ mod tests {
     }
 
     #[test]
+    fn test_lambda_inner_block_local_does_not_leak_after_block() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            class T {
+                void m() {
+                    Function<String, Void> f = s -> {
+                        {
+                            String s1 = s.trim();
+                        }
+                        s1/*caret*/
+                        return null;
+                    };
+                }
+            }
+        "#};
+
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "s"),
+            "lambda param should stay visible: {:?}",
+            ctx.local_variables
+                .iter()
+                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "s1"),
+            "inner-block local must not leak after block: {:?}",
+            ctx.local_variables
+                .iter()
+                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .collect::<Vec<_>>()
+        );
+        assert!(!labels.iter().any(|l| l == "s1"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_lambda_inner_block_local_member_completion_stays_visible_inside_block() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            class T {
+                void m() {
+                    Function<String, Void> f = s -> {
+                        {
+                            String s1 = s.trim();
+                            s1.subs|
+                        }
+                        return null;
+                    };
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let s1 = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "s1")
+            .expect("expected inner-block local s1");
+        assert_eq!(s1.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_lambda_param_remains_visible_after_inner_block() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.function.Function;
+            class T {
+                void m() {
+                    Function<String, Void> f = s -> {
+                        {
+                            String s1 = s.trim();
+                        }
+                        s.subs|
+                        return null;
+                    };
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        assert!(
+            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "s"),
+            "expected lambda param s to remain visible"
+        );
+        assert!(
+            !ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "s1"),
+            "expired inner-block local must not remain visible"
+        );
+        assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
     fn test_lambda_block_body_typed_member_completion_from_consumer_sam_incomplete_statement() {
         let idx = make_lambda_scope_index();
         let view = idx.view(root_scope());
@@ -1560,6 +1662,60 @@ mod tests {
             .expect("expected prefix local");
         assert_eq!(prefix.type_internal.erased_internal(), "java/lang/String");
         assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_method_inner_block_local_does_not_leak_after_block() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    {
+                        String s1 = "";
+                    }
+                    s1/*caret*/
+                }
+            }
+        "#};
+
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            !ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "s1"),
+            "method inner-block local must not leak: {:?}",
+            ctx.local_variables
+                .iter()
+                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .collect::<Vec<_>>()
+        );
+        assert!(!labels.iter().any(|l| l == "s1"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_nested_block_shadowing_still_prefers_innermost_local() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    String s = "";
+                    {
+                        StringBuilder s = new StringBuilder();
+                        s.appe|
+                    }
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let s = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "s")
+            .expect("expected visible local s");
+        assert_eq!(s.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert!(labels.iter().any(|l| l == "append"), "{labels:?}");
     }
 
     #[test]
