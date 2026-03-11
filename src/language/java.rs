@@ -1212,7 +1212,48 @@ mod tests {
     fn make_lambda_scope_index() -> WorkspaceIndex {
         let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
-            make_class("java/lang", "Object"),
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("toString"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Ljava/lang/String;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("hashCode"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("I")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("equals"),
+                        params: MethodParams::from([("Ljava/lang/Object;", "obj")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Z")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
             ClassMetadata {
                 package: Some(Arc::from("java/lang")),
                 name: Arc::from("String"),
@@ -1365,6 +1406,28 @@ mod tests {
             },
             ClassMetadata {
                 package: Some(Arc::from("java/util/function")),
+                name: Arc::from("Predicate"),
+                internal_name: Arc::from("java/util/function/Predicate"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("test"),
+                    params: MethodParams::from([("Ljava/lang/Object;", "t")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC | ACC_ABSTRACT,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from("(TT;)Z")),
+                    return_type: Some(Arc::from("Z")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util/function")),
                 name: Arc::from("BiConsumer"),
                 internal_name: Arc::from("java/util/function/BiConsumer"),
                 super_name: Some(Arc::from("java/lang/Object")),
@@ -1410,6 +1473,76 @@ mod tests {
                 access_flags: ACC_PUBLIC,
                 inner_class_of: None,
                 generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util/stream")),
+                name: Arc::from("Stream"),
+                internal_name: Arc::from("java/util/stream/Stream"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("map"),
+                        params: MethodParams::from([("Ljava/util/function/Function;", "mapper")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from(
+                            "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)Ljava/util/stream/Stream<TR;>;",
+                        )),
+                        return_type: Some(Arc::from("Ljava/util/stream/Stream;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("filter"),
+                        params: MethodParams::from([("Ljava/util/function/Predicate;", "predicate")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from(
+                            "(Ljava/util/function/Predicate<-TT;>;)Ljava/util/stream/Stream<TT;>;",
+                        )),
+                        return_type: Some(Arc::from("Ljava/util/stream/Stream;")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util")),
+                name: Arc::from("ArrayList"),
+                internal_name: Arc::from("java/util/ArrayList"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("<init>"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: None,
+                    },
+                    MethodSummary {
+                        name: Arc::from("stream"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("()Ljava/util/stream/Stream<TE;>;")),
+                        return_type: Some(Arc::from("Ljava/util/stream/Stream;")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
                 origin: ClassOrigin::Unknown,
             },
         ]);
@@ -2414,6 +2547,138 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(labels.iter().any(|l| l == "n"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_stream_map_lambda_target_typing_from_receiver_generic() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.ArrayList;
+
+            class T {
+                void m() {
+                    ArrayList<String> list = new ArrayList<String>();
+                    list.stream().map(x -> x.toStr/*caret*/);
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let x = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "x")
+            .expect("expected inferred lambda param x");
+        assert_eq!(x.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels.iter().any(|l| l == "toString"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_stream_map_parenthesized_lambda_target_typing_from_receiver_generic() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.ArrayList;
+
+            class T {
+                void m() {
+                    ArrayList<String> list = new ArrayList<String>();
+                    list.stream().map((x) -> x.toStr/*caret*/);
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let x = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "x")
+            .expect("expected inferred lambda param x");
+        assert_eq!(x.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels.iter().any(|l| l == "toString"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_stream_filter_lambda_target_typing_from_receiver_generic() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.ArrayList;
+
+            class T {
+                void m() {
+                    ArrayList<String> list = new ArrayList<String>();
+                    list.stream().filter(x -> x.toStr/*caret*/ != null);
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let x = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "x")
+            .expect("expected inferred lambda param x");
+        assert_eq!(x.type_internal.erased_internal(), "java/lang/String");
+        assert!(labels.iter().any(|l| l == "toString"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_stream_map_lambda_forms_bind_same_param_type() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src_implicit = indoc::indoc! {r#"
+            import java.util.ArrayList;
+
+            class T {
+                void m() {
+                    ArrayList<String> list = new ArrayList<String>();
+                    list.stream().map(x -> x.toStr/*caret*/);
+                }
+            }
+        "#};
+        let src_parenthesized = indoc::indoc! {r#"
+            import java.util.ArrayList;
+
+            class T {
+                void m() {
+                    ArrayList<String> list = new ArrayList<String>();
+                    list.stream().map((x) -> x.toStr/*caret*/);
+                }
+            }
+        "#};
+
+        let (mut implicit_ctx, _) = ctx_and_labels_from_marked_source(src_implicit, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view)
+            .enrich(&mut implicit_ctx);
+        let implicit_ty = implicit_ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "x")
+            .expect("expected implicit lambda param x")
+            .type_internal
+            .erased_internal()
+            .to_string();
+
+        let (mut parenthesized_ctx, _) =
+            ctx_and_labels_from_marked_source(src_parenthesized, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view)
+            .enrich(&mut parenthesized_ctx);
+        let parenthesized_ty = parenthesized_ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "x")
+            .expect("expected parenthesized lambda param x")
+            .type_internal
+            .erased_internal()
+            .to_string();
+
+        assert_eq!(implicit_ty, "java/lang/String");
+        assert_eq!(parenthesized_ty, implicit_ty);
     }
 
     #[test]

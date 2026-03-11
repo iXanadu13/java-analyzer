@@ -540,16 +540,40 @@ fn bind_active_lambda_param_types(ctx: &mut SemanticContext) {
         .iter()
         .zip(sam.param_types.iter())
     {
-        if !is_concrete_type_name(ty) {
+        let Some(bindable_ty) = normalize_lambda_param_binding_type(ty) else {
             continue;
-        }
+        };
         if let Some(local) = ctx
             .local_variables
             .iter_mut()
             .find(|lv| lv.name == *name && lv.type_internal.erased_internal() == "unknown")
         {
-            local.type_internal = ty.clone();
+            local.type_internal = bindable_ty;
         }
+    }
+}
+
+fn normalize_lambda_param_binding_type(ty: &TypeName) -> Option<TypeName> {
+    let normalized = normalize_lambda_param_binding_jvm_type(&type_name_to_jvm_type(ty)?)?;
+    let bindable = jvm_type_to_type_name(&normalized)?;
+    is_concrete_type_name(&bindable).then_some(bindable)
+}
+
+fn normalize_lambda_param_binding_jvm_type(ty: &JvmType) -> Option<JvmType> {
+    match ty {
+        JvmType::Wildcard => None,
+        JvmType::TypeVar(_) => None,
+        JvmType::WildcardBound(_, inner) => normalize_lambda_param_binding_jvm_type(inner),
+        JvmType::Primitive(_) => Some(ty.clone()),
+        JvmType::Array(inner) => Some(JvmType::Array(Box::new(
+            normalize_lambda_param_binding_jvm_type(inner)?,
+        ))),
+        JvmType::Object(name, args) => Some(JvmType::Object(
+            name.clone(),
+            args.iter()
+                .map(normalize_lambda_param_binding_jvm_type)
+                .collect::<Option<Vec<_>>>()?,
+        )),
     }
 }
 
