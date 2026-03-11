@@ -625,6 +625,134 @@ mod tests {
         }
     }
 
+    fn make_array_completion_index() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("getClass"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Ljava/lang/Class;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("hashCode"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("I")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("equals"),
+                        params: MethodParams::from([("Ljava/lang/Object;", "obj")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Z")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("toString"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Ljava/lang/String;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("wait"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("V")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("notify"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("V")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("notifyAll"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("V")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            make_class("java/lang", "Class"),
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("substring"),
+                        params: MethodParams::from([("I", "beginIndex")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Ljava/lang/String;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("charAt"),
+                        params: MethodParams::from([("I", "index")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("C")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("isBlank"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Z")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        idx
+    }
+
     fn ctx_and_labels_from_marked_source(
         src_with_cursor: &str,
         view: &IndexView,
@@ -4342,6 +4470,113 @@ mod tests {
                 neg_ctx.location,
                 neg_labels.iter().any(|l| l == "substring"),
                 neg_labels.iter().take(10).collect::<Vec<_>>(),
+            )
+        );
+    }
+
+    #[test]
+    fn test_array_member_completion_does_not_leak_element_type_members() {
+        let idx = make_array_completion_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+              void f() {
+                String[] s = null;
+                s.|
+              }
+            }
+        "#};
+
+        let (_ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
+        assert!(labels.iter().any(|label| label == "getClass"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "substring"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "charAt"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "isBlank"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "stream"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_primitive_array_member_completion_behaves_like_array_receiver() {
+        let idx = make_array_completion_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+              void f() {
+                int[] xs = null;
+                xs.|
+              }
+            }
+        "#};
+
+        let (_ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
+        assert!(labels.iter().any(|label| label == "getClass"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "substring"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "size"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "isEmpty"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "stream"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_multidimensional_array_member_completion_still_uses_array_semantics() {
+        let idx = make_array_completion_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+              void f() {
+                String[][] ss = null;
+                ss.|
+              }
+            }
+        "#};
+
+        let (_ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
+        assert!(labels.iter().any(|label| label == "getClass"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "substring"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "stream"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_snapshot_array_receiver_completion_provenance() {
+        let idx = make_array_completion_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+              void f() {
+                String[] s = null;
+                s.|
+              }
+            }
+        "#};
+
+        let (mut ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let mut rows: Vec<String> = candidates
+            .into_iter()
+            .filter(|candidate| {
+                matches!(candidate.label.as_ref(), "length" | "getClass" | "substring")
+            })
+            .map(|candidate| {
+                format!(
+                    "{}|{:?}|{}",
+                    candidate.label,
+                    candidate.kind,
+                    candidate.detail.unwrap_or_default()
+                )
+            })
+            .collect();
+        rows.sort();
+
+        insta::assert_snapshot!(
+            "array_receiver_completion_provenance",
+            format!(
+                "location={:?}\nreceiver_semantic_type={:?}\njava_intrinsic_access={:?}\n{}\n",
+                ctx.location,
+                ctx.location.member_access_receiver_semantic_type(),
+                ctx.java_intrinsic_access,
+                rows.join("\n")
             )
         );
     }

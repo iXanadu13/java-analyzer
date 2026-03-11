@@ -14,6 +14,9 @@ use crate::{
 };
 use std::sync::Arc;
 
+const JAVA_LANG_OBJECT_INTERNAL: &str = "java/lang/Object";
+const ARRAY_INTRINSIC_OWNER: &str = "[array]";
+
 #[derive(Debug, Clone)]
 struct FlowReceiverCastPlan {
     receiver_expr: String,
@@ -174,6 +177,16 @@ impl CompletionProvider for MemberProvider {
         let class_internal_for_substitution =
             resolved_effective.to_internal_with_generics_for_substitution();
         let base_class_internal = resolved_effective.erased_internal();
+
+        if resolved_effective.is_array() {
+            return self.provide_array_members(
+                ctx,
+                index,
+                member_prefix,
+                &resolved_effective,
+                &class_internal_for_substitution,
+            );
+        }
 
         tracing::debug!(
             base_class_internal,
@@ -365,6 +378,72 @@ fn name_matches_member_prefix(name: &str, prefix_lower: Option<&str>) -> bool {
 }
 
 impl MemberProvider {
+    fn provide_array_members(
+        &self,
+        ctx: &SemanticContext,
+        index: &IndexView,
+        member_prefix: &str,
+        receiver: &TypeName,
+        class_internal_for_substitution: &str,
+    ) -> Vec<CompletionCandidate> {
+        let prefix_lower = if member_prefix.is_empty() {
+            None
+        } else {
+            Some(member_prefix.to_lowercase())
+        };
+        let resolver = ContextualResolver::new(index, ctx);
+        let has_paren_after_cursor = ctx.has_paren_after_cursor();
+        let mut results = Vec::new();
+        let mut seen_methods = std::collections::HashSet::new();
+
+        if name_matches_member_prefix("length", prefix_lower.as_deref()) {
+            results.push(
+                CompletionCandidate::new(
+                    Arc::from("length"),
+                    "length".to_string(),
+                    CandidateKind::Field {
+                        descriptor: Arc::from("I"),
+                        defining_class: Arc::from(ARRAY_INTRINSIC_OWNER),
+                    },
+                    self.name(),
+                )
+                .with_detail("array intrinsic field — int length")
+                .with_score(90.0),
+            );
+        }
+
+        for class_meta in index.mro(JAVA_LANG_OBJECT_INTERNAL) {
+            for method in &class_meta.methods {
+                self.push_member_method_candidate(
+                    &mut results,
+                    index,
+                    &class_meta,
+                    method,
+                    &resolver,
+                    &AccessFilter::member_completion(),
+                    prefix_lower.as_deref(),
+                    &mut seen_methods,
+                    JAVA_LANG_OBJECT_INTERNAL,
+                    class_internal_for_substitution,
+                    has_paren_after_cursor,
+                    None,
+                    false,
+                    "",
+                    member_prefix,
+                    JAVA_LANG_OBJECT_INTERNAL,
+                );
+            }
+        }
+
+        tracing::debug!(
+            receiver_type = %receiver.to_internal_with_generics(),
+            candidates = results.len(),
+            "MemberProvider.array_members"
+        );
+
+        results
+    }
+
     fn push_this_branch_method_candidate(
         &self,
         results: &mut Vec<CompletionCandidate>,
@@ -1050,6 +1129,53 @@ mod tests {
         idx
     }
 
+    fn make_array_member_index() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    make_method("getClass", "()Ljava/lang/Class;", ACC_PUBLIC, false),
+                    make_method("hashCode", "()I", ACC_PUBLIC, false),
+                    make_method("equals", "(Ljava/lang/Object;)Z", ACC_PUBLIC, false),
+                    make_method("toString", "()Ljava/lang/String;", ACC_PUBLIC, false),
+                    make_method("notify", "()V", ACC_PUBLIC, false),
+                    make_method("notifyAll", "()V", ACC_PUBLIC, false),
+                    make_method("wait", "()V", ACC_PUBLIC, false),
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    make_method("substring", "(I)Ljava/lang/String;", ACC_PUBLIC, false),
+                    make_method("charAt", "(I)C", ACC_PUBLIC, false),
+                    make_method("isBlank", "()Z", ACC_PUBLIC, false),
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        idx
+    }
+
     fn ctx_with_type(receiver_internal: &str, prefix: &str) -> SemanticContext {
         SemanticContext::new(
             CursorLocation::MemberAccess {
@@ -1635,6 +1761,30 @@ mod tests {
                 .map(|c| c.detail.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_member_provider_array_receiver_uses_array_members_only() {
+        let idx = make_array_member_index();
+        let ctx = ctx_with_semantic_and_erased(
+            TypeName::new("java/lang/String").with_array_dims(1),
+            "java/lang/String",
+            "",
+        );
+
+        let labels: Vec<String> = MemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()))
+            .into_iter()
+            .map(|candidate| candidate.label.to_string())
+            .collect();
+
+        assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
+        assert!(labels.iter().any(|label| label == "getClass"), "{labels:?}");
+        assert!(labels.iter().any(|label| label == "hashCode"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "substring"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "charAt"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "isBlank"), "{labels:?}");
+        assert!(!labels.iter().any(|label| label == "stream"), "{labels:?}");
     }
 
     #[test]

@@ -1016,19 +1016,23 @@ pub(crate) fn evaluate_chain(
                         Some(&resolve_qualifier),
                     );
                 } else {
-                    let (methods, fields) =
-                        view.collect_inherited_members(recv_full.erased_internal());
-
-                    if let Some(f) = fields.iter().find(|f| f.name.as_ref() == base_name) {
-                        if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
-                            current = Some(TypeName::new(ty));
-                        } else {
-                            current = parse_single_type_to_internal(&f.descriptor);
-                        }
-                    } else if methods.iter().any(|m| m.name.as_ref() == base_name) {
-                        current = None;
+                    if recv_full.is_array() && base_name == "length" {
+                        current = Some(TypeName::new("int"));
                     } else {
-                        current = None;
+                        let (methods, fields) =
+                            view.collect_inherited_members(recv_full.erased_internal());
+
+                        if let Some(f) = fields.iter().find(|f| f.name.as_ref() == base_name) {
+                            if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
+                                current = Some(TypeName::new(ty));
+                            } else {
+                                current = parse_single_type_to_internal(&f.descriptor);
+                            }
+                        } else if methods.iter().any(|m| m.name.as_ref() == base_name) {
+                            current = None;
+                        } else {
+                            current = None;
+                        }
                     }
                 }
             }
@@ -1483,6 +1487,31 @@ mod tests {
                 vec![TypeName::new("java/lang/String").with_array_dims(1)]
             )
         );
+    }
+
+    #[test]
+    fn test_array_length_field_expression_type_is_int() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("s"),
+            type_internal: TypeName::new("java/lang/String").with_array_dims(1),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "s.length",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("array length type");
+
+        assert_eq!(ty, TypeName::new("int"));
     }
 
     #[test]
