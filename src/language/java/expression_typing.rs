@@ -58,8 +58,7 @@ pub(crate) fn resolve_expression_type_with_target(
         view,
         expected_functional_interface,
         expected_sam,
-    )
-    {
+    ) {
         return Some(ty);
     }
 
@@ -865,8 +864,8 @@ pub(crate) fn evaluate_chain(
                     && let (Some(enclosing), Some(method)) =
                         (enclosing_internal, type_ctx.current_class_method(base_name))
                 {
-                    current =
-                        resolver.resolve_selected_method_return_with_callsite_and_qualifier_resolver(
+                    current = resolver
+                        .resolve_selected_method_return_with_callsite_and_qualifier_resolver(
                             enclosing.as_ref(),
                             method.as_ref(),
                             enclosing.as_ref(),
@@ -1037,7 +1036,10 @@ mod tests {
     fn function_type() -> TypeName {
         TypeName::with_args(
             "java/util/function/Function",
-            vec![TypeName::new("java/lang/String"), TypeName::new("java/lang/Integer")],
+            vec![
+                TypeName::new("java/lang/String"),
+                TypeName::new("java/lang/Integer"),
+            ],
         )
     }
 

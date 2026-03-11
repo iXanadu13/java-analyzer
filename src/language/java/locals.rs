@@ -71,8 +71,8 @@ pub fn extract_locals_with_type_ctx(
 
             let declarator = name_node.parent()?; // variable_declarator
             let decl = declarator.parent()?; // local_variable_declaration
-            let visibility_scope =
-                local_visibility_scope(decl).unwrap_or_else(|| fallback_visibility_scope(ctx.offset));
+            let visibility_scope = local_visibility_scope(decl)
+                .unwrap_or_else(|| fallback_visibility_scope(ctx.offset));
             if !is_visible_local_declaration_before_cursor(ctx.offset, name_node, declarator, decl)
                 || !scope_contains_offset(visibility_scope, ctx.offset)
             {

@@ -1,0 +1,1682 @@
+SCRIPT  /home/cubewhy/.local/share/nvim/lazy/rustaceanvim/ftplugin/rust.vim
+Sourced 1 time
+Total time:   0.000020
+ Self time:   0.000020
+
+count  total (s)   self (s)
+                            " Copied from built-in compiler/{rustc,cargo}.vim
+    1              0.000010 setlocal errorformat=
+                            			\%f:%l:%c:\ %t%*[^:]:\ %m,
+                            			\%f:%l:%c:\ %*\\d:%*\\d\ %t%*[^:]:\ %m,
+                            			\%-G%f:%l\ %s,
+                            			\%-G%*[\ ]^,
+                            			\%-G%*[\ ]^%*[~],
+                            			\%-G%*[\ ]...
+                            
+                            " New errorformat (after nightly 2016/08/10)
+    1              0.000003 setlocal errorformat+=
+                            			\%-G,
+                            			\%-Gerror:\ aborting\ %.%#,
+                            			\%-Gerror:\ Could\ not\ compile\ %.%#,
+                            			\%Eerror:\ %m,
+                            			\%Eerror[E%n]:\ %m,
+                            			\%Wwarning:\ %m,
+                            			\%Inote:\ %m,
+                            			\%C\ %#-->\ %f:%l:%c
+                            
+    1              0.000003 setlocal errorformat+=
+                            			\%-G%\\s%#Downloading%.%#,
+                            			\%-G%\\s%#Compiling%.%#,
+                            			\%-G%\\s%#Finished%.%#,
+                            			\%-G%\\s%#error:\ Could\ not\ compile\ %.%#,
+                            			\%-G%\\s%#To\ learn\ more\\,%.%#
+
+SCRIPT  /home/cubewhy/.local/share/nvim/lazy/rustaceanvim/ftplugin/rust.lua
+Sourced 1 time
+Total time:   0.000789
+ Self time:   0.000789
+
+count  total (s)   self (s)
+                            if vim.fn.has('nvim-0.11') ~= 1 then
+                              vim.notify_once('rustaceanvim requires Neovim 0.11 or above', vim.log.levels.ERROR)
+                              return
+                            end
+                            
+                            ---@type rustaceanvim.Config
+                            local config = require('rustaceanvim.config.internal')
+                            
+                            if not vim.g.loaded_rustaceanvim then
+                              require('rustaceanvim.config.check').check_for_lspconfig_conflict(vim.schedule_wrap(function(warn)
+                                vim.notify_once(warn, vim.log.levels.WARN)
+                              end))
+                              vim.lsp.commands['rust-analyzer.runSingle'] = function(command)
+                                local runnables = require('rustaceanvim.runnables')
+                                local cached_commands = require('rustaceanvim.cached_commands')
+                                ---@type rustaceanvim.RARunnable[]
+                                local ra_runnables = command.arguments
+                                local runnable = ra_runnables[1]
+                                local cargo_args = runnable.args.cargoArgs
+                                if #cargo_args > 0 and vim.startswith(cargo_args[1], 'test') then
+                                  cached_commands.set_last_testable(1, ra_runnables)
+                                end
+                                cached_commands.set_last_runnable(1, ra_runnables)
+                                runnables.run_command(1, ra_runnables)
+                              end
+                            
+                              vim.lsp.commands['rust-analyzer.gotoLocation'] = function(command, ctx)
+                                local client = vim.lsp.get_client_by_id(ctx.client_id)
+                                if client then
+                                  ---@diagnostic disable-next-line: param-type-mismatch
+                                  vim.lsp.util.show_document(command.arguments[1], client.offset_encoding or 'utf-8')
+                                end
+                              end
+                            
+                              vim.lsp.commands['rust-analyzer.showReferences'] = function(_)
+                                vim.lsp.buf.implementation()
+                              end
+                            
+                              vim.lsp.commands['rust-analyzer.debugSingle'] = function(command)
+                                local overrides = require('rustaceanvim.overrides')
+                                local args = command.arguments[1].args
+                                ---@diagnostic disable-next-line: undefined-field
+                                overrides.sanitize_command_for_debugging(args.cargoArgs)
+                                local cached_commands = require('rustaceanvim.cached_commands')
+                                cached_commands.set_last_debuggable(args)
+                                local rt_dap = require('rustaceanvim.dap')
+                                ---@diagnostic disable-next-line: invisible
+                                rt_dap.start(args)
+                              end
+                            
+                              local commands = require('rustaceanvim.commands')
+                              commands.create_rustc_command()
+                            end
+                            
+                            vim.g.loaded_rustaceanvim = true
+                            
+                            local bufnr = vim.api.nvim_get_current_buf()
+                            
+                            ---@enum RustAnalyzerCmd
+                            local RustAnalyzerCmd = {
+                              start = 'start',
+                              stop = 'stop',
+                              restart = 'restart',
+                              reload_settings = 'reloadSettings',
+                              target = 'target',
+                              config = 'config',
+                            }
+                            
+                            local function rust_analyzer_user_cmd(opts)
+                              local fargs = opts.fargs
+                              local cmd = table.remove(fargs, 1)
+                              local lsp = require('rustaceanvim.lsp')
+                              ---@cast cmd RustAnalyzerCmd
+                              if cmd == RustAnalyzerCmd.start then
+                                lsp.start(bufnr)
+                              elseif cmd == RustAnalyzerCmd.stop then
+                                lsp.stop(bufnr)
+                              elseif cmd == RustAnalyzerCmd.restart then
+                                lsp.restart(bufnr)
+                              elseif cmd == RustAnalyzerCmd.reload_settings then
+                                lsp.reload_settings(bufnr)
+                              elseif cmd == RustAnalyzerCmd.target then
+                                local target_arch = fargs[1]
+                                lsp.set_target_arch(bufnr, target_arch)
+                              elseif cmd == RustAnalyzerCmd.config then
+                                local ra_settings_str = vim.iter(fargs):join(' ')
+                                ---@diagnostic disable-next-line: param-type-mismatch
+                                local f = load('return ' .. ra_settings_str)
+                                ---@diagnostic disable-next-line: param-type-mismatch
+                                local ok, ra_settings = pcall(f)
+                                if not ok or type(ra_settings) ~= 'table' then
+                                  return vim.notify('RustAnalyzer config: invalid Lua table.\n' .. ra_settings_str, vim.log.levels.ERROR)
+                                end
+                                lsp.set_config(bufnr, ra_settings)
+                              end
+                            end
+                            
+                            vim.api.nvim_buf_create_user_command(bufnr, 'RustAnalyzer', rust_analyzer_user_cmd, {
+                              nargs = '+',
+                              desc = 'Starts, stops the rust-analyzer LSP client or changes the target',
+                              complete = function(arg_lead, cmdline, _)
+                                local rust_analyzer = require('rustaceanvim.rust_analyzer')
+                                local clients = rust_analyzer.get_active_rustaceanvim_clients()
+                                ---@type RustAnalyzerCmd[]
+                                local commands = #clients == 0 and { 'start' } or { 'stop', 'restart', 'reloadSettings', 'target', 'config' }
+                                if cmdline:match('^RustAnalyzer%s+%w*$') then
+                                  return vim.tbl_filter(function(command)
+                                    return command:find(arg_lead) ~= nil
+                                  end, commands)
+                                end
+                              end,
+                            })
+                            
+                            local auto_attach = config.server.auto_attach
+                            if type(auto_attach) == 'function' then
+                              auto_attach = auto_attach(bufnr)
+                            end
+                            
+                            if auto_attach then
+                              require('rustaceanvim.lsp').start(bufnr)
+                            end
+
+SCRIPT  /usr/share/nvim/runtime/ftplugin/rust.vim
+Sourced 1 time
+Total time:   0.004197
+ Self time:   0.003929
+
+count  total (s)   self (s)
+                            " Language:	Rust
+                            " Description:	Vim ftplugin for Rust
+                            " Maintainer:	Chris Morgan <me@chrismorgan.info>
+                            " Last Change:	2024 Mar 17
+                            "		2024 May 23 by Riley Bruins <ribru17@gmail.com ('commentstring')
+                            " For bugs, patches and license go to https://github.com/rust-lang/rust.vim
+                            
+    1              0.000003 if exists("b:did_ftplugin")
+                                finish
+    1              0.000000 endif
+    1              0.000001 let b:did_ftplugin = 1
+                            
+                            " vint: -ProhibitAbbreviationOption
+    1              0.000001 let s:save_cpo = &cpo
+    1              0.000004 set cpo&vim
+                            " vint: +ProhibitAbbreviationOption
+                            
+    1              0.000002 if get(b:, 'current_compiler', '') ==# ''
+    1              0.003403     if strlen(findfile('Cargo.toml', '.;')) > 0
+    1   0.000635   0.000368         compiler cargo
+                                else
+                                    compiler rustc
+    1              0.000000     endif
+    1              0.000000 endif
+                            
+                            " Variables {{{1
+                            
+                            " The rust source code at present seems to typically omit a leader on /*!
+                            " comments, so we'll use that as our default, but make it easy to switch.
+                            " This does not affect indentation at all (I tested it with and without
+                            " leader), merely whether a leader is inserted by default or not.
+    1              0.000001 if get(g:, 'rust_bang_comment_leader', 0)
+                                " Why is the `,s0:/*,mb:\ ,ex:*/` there, you ask? I don't understand why,
+                                " but without it, */ gets indented one space even if there were no
+                                " leaders. I'm fairly sure that's a Vim bug.
+                                setlocal comments=s1:/*,mb:*,ex:*/,s0:/*,mb:\ ,ex:*/,:///,://!,://
+    1              0.000000 else
+    1              0.000003     setlocal comments=s0:/*!,ex:*/,s1:/*,mb:*,ex:*/,:///,://!,://
+    1              0.000000 endif
+    1              0.000001 setlocal commentstring=//\ %s
+    1              0.000003 setlocal formatoptions-=t formatoptions+=croqnl
+                            " j was only added in 7.3.541, so stop complaints about its nonexistence
+    1              0.000001 silent! setlocal formatoptions+=j
+                            
+                            " smartindent will be overridden by indentexpr if filetype indent is on, but
+                            " otherwise it's better than nothing.
+    1              0.000002 setlocal smartindent nocindent
+                            
+    1              0.000001 if get(g:, 'rust_recommended_style', 1)
+    1              0.000001     let b:rust_set_style = 1
+    1              0.000005     setlocal shiftwidth=4 softtabstop=4 expandtab
+    1              0.000003     setlocal textwidth=99
+    1              0.000000 endif
+                            
+    1              0.000003 setlocal include=\\v^\\s*(pub\\s+)?use\\s+\\zs(\\f\|:)+
+    1              0.000003 setlocal includeexpr=rust#IncludeExpr(v:fname)
+                            
+    1              0.000002 setlocal suffixesadd=.rs
+                            
+    1              0.000001 if exists("g:ftplugin_rust_source_path")
+                                let &l:path=g:ftplugin_rust_source_path . ',' . &l:path
+    1              0.000000 endif
+                            
+    1              0.000001 if exists("g:loaded_delimitMate")
+                                if exists("b:delimitMate_excluded_regions")
+                                    let b:rust_original_delimitMate_excluded_regions = b:delimitMate_excluded_regions
+                                endif
+                            
+                                augroup rust.vim.DelimitMate
+                                    autocmd!
+                            
+                                    autocmd User delimitMate_map   :call rust#delimitmate#onMap()
+                                    autocmd User delimitMate_unmap :call rust#delimitmate#onUnmap()
+                                augroup END
+    1              0.000000 endif
+                            
+                            " Integration with auto-pairs (https://github.com/jiangmiao/auto-pairs)
+    1              0.000001 if exists("g:AutoPairsLoaded") && !get(g:, 'rust_keep_autopairs_default', 0)
+                                let b:AutoPairs = {'(':')', '[':']', '{':'}','"':'"', '`':'`'}
+    1              0.000000 endif
+                            
+    1              0.000001 if has("folding") && get(g:, 'rust_fold', 0)
+                                let b:rust_set_foldmethod=1
+                                setlocal foldmethod=syntax
+                                if g:rust_fold == 2
+                                    setlocal foldlevel<
+                                else
+                                    setlocal foldlevel=99
+                                endif
+    1              0.000000 endif
+                            
+    1              0.000001 if has('conceal') && get(g:, 'rust_conceal', 0)
+                                let b:rust_set_conceallevel=1
+                                setlocal conceallevel=2
+    1              0.000000 endif
+                            
+                            " Motion Commands {{{1
+    1              0.000001 if !exists("g:no_plugin_maps") && !exists("g:no_rust_maps")
+                                " Bind motion commands to support hanging indents
+                                nnoremap <silent> <buffer> [[ :call rust#Jump('n', 'Back')<CR>
+                                nnoremap <silent> <buffer> ]] :call rust#Jump('n', 'Forward')<CR>
+                                xnoremap <silent> <buffer> [[ :call rust#Jump('v', 'Back')<CR>
+                                xnoremap <silent> <buffer> ]] :call rust#Jump('v', 'Forward')<CR>
+                                onoremap <silent> <buffer> [[ :call rust#Jump('o', 'Back')<CR>
+                                onoremap <silent> <buffer> ]] :call rust#Jump('o', 'Forward')<CR>
+    1              0.000000 endif
+                            
+                            " Commands {{{1
+                            
+                            " See |:RustRun| for docs
+    1              0.000002 command! -nargs=* -complete=file -bang -buffer RustRun call rust#Run(<bang>0, <q-args>)
+                            
+                            " See |:RustExpand| for docs
+    1              0.000002 command! -nargs=* -complete=customlist,rust#CompleteExpand -bang -buffer RustExpand call rust#Expand(<bang>0, <q-args>)
+                            
+                            " See |:RustEmitIr| for docs
+    1              0.000001 command! -nargs=* -buffer RustEmitIr call rust#Emit("llvm-ir", <q-args>)
+                            
+                            " See |:RustEmitAsm| for docs
+    1              0.000002 command! -nargs=* -buffer RustEmitAsm call rust#Emit("asm", <q-args>)
+                            
+                            " See |:RustPlay| for docs
+    1              0.000003 command! -range=% -buffer RustPlay :call rust#Play(<count>, <line1>, <line2>, <f-args>)
+                            
+                            " See |:RustFmt| for docs
+    1              0.000001 command! -bar -buffer RustFmt call rustfmt#Format()
+                            
+                            " See |:RustFmtRange| for docs
+    1              0.000001 command! -range -buffer RustFmtRange call rustfmt#FormatRange(<line1>, <line2>)
+                            
+                            " See |:RustInfo| for docs
+    1              0.000003 command! -bar -buffer RustInfo call rust#debugging#Info()
+                            
+                            " See |:RustInfoToClipboard| for docs
+    1              0.000001 command! -bar -buffer RustInfoToClipboard call rust#debugging#InfoToClipboard()
+                            
+                            " See |:RustInfoToFile| for docs
+    1              0.000001 command! -bar -nargs=1 -buffer RustInfoToFile call rust#debugging#InfoToFile(<f-args>)
+                            
+                            " See |:RustTest| for docs
+    1              0.000001 command! -buffer -nargs=* -count -bang RustTest call rust#Test(<q-mods>, <count>, <bang>0, <q-args>)
+                            
+    1              0.000002 if !exists("b:rust_last_rustc_args") || !exists("b:rust_last_args")
+    1              0.000002     let b:rust_last_rustc_args = []
+    1              0.000001     let b:rust_last_args = []
+    1              0.000000 endif
+                            
+                            " Cleanup {{{1
+                            
+    1              0.000013 let b:undo_ftplugin = "
+                                        \ compiler make |
+                                        \ setlocal formatoptions< comments< commentstring< include< includeexpr< suffixesadd<
+                                        \|if exists('b:rust_set_style')
+                                            \|setlocal tabstop< shiftwidth< softtabstop< expandtab< textwidth<
+                                            \|endif
+                                            \|if exists('b:rust_original_delimitMate_excluded_regions')
+                                                \|let b:delimitMate_excluded_regions = b:rust_original_delimitMate_excluded_regions
+                                                \|unlet b:rust_original_delimitMate_excluded_regions
+                                                \|else
+                                                    \|unlet! b:delimitMate_excluded_regions
+                                                    \|endif
+                                                    \|if exists('b:rust_set_foldmethod')
+                                                        \|setlocal foldmethod< foldlevel<
+                                                        \|unlet b:rust_set_foldmethod
+                                                        \|endif
+                                                        \|if exists('b:rust_set_conceallevel')
+                                                            \|setlocal conceallevel<
+                                                            \|unlet b:rust_set_conceallevel
+                                                            \|endif
+                                                            \|unlet! b:rust_last_rustc_args b:rust_last_args
+                                                            \|delcommand -buffer RustRun
+                                                            \|delcommand -buffer RustExpand
+                                                            \|delcommand -buffer RustEmitIr
+                                                            \|delcommand -buffer RustEmitAsm
+                                                            \|delcommand -buffer RustPlay
+                                                            \|delcommand -buffer RustFmt
+                                                            \|delcommand -buffer RustFmtRange
+                                                            \|delcommand -buffer RustInfo
+                                                            \|delcommand -buffer RustInfoToClipboard
+                                                            \|delcommand -buffer RustInfoToFile
+                                                            \|delcommand -buffer RustTest
+                                                            \|silent! nunmap <buffer> [[
+                                                            \|silent! nunmap <buffer> ]]
+                                                            \|silent! xunmap <buffer> [[
+                                                            \|silent! xunmap <buffer> ]]
+                                                            \|silent! ounmap <buffer> [[
+                                                            \|silent! ounmap <buffer> ]]
+                                                            \|setlocal matchpairs-=<:>
+                                                            \|unlet b:match_skip
+                                                            \"
+                            
+                            " }}}1
+                            
+                            " Code formatting on save
+    1              0.000001 augroup rust.vim.PreWrite
+    1              0.000005     autocmd!
+    1              0.000004     autocmd BufWritePre *.rs silent! call rustfmt#PreWrite()
+    1              0.000000 augroup END
+                            
+    1              0.000002 setlocal matchpairs+=<:>
+                            " For matchit.vim (rustArrow stops `Fn() -> X` messing things up)
+    1              0.000001 let b:match_skip = 's:comment\|string\|rustCharacter\|rustArrow'
+                            
+    1              0.000001 command! -buffer -nargs=+ Cargo call cargo#cmd(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Cbuild call cargo#build(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Ccheck call cargo#check(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Cclean call cargo#clean(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Cdoc call cargo#doc(<q-args>)
+    1              0.000001 command! -buffer -nargs=+ Cnew call cargo#new(<q-args>)
+    1              0.000002 command! -buffer -nargs=* Cinit call cargo#init(<q-args>)
+    1              0.000002 command! -buffer -nargs=* Crun call cargo#run(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Ctest call cargo#test(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Cbench call cargo#bench(<q-args>)
+    1              0.000002 command! -buffer -nargs=* Cupdate call cargo#update(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Csearch  call cargo#search(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Cpublish call cargo#publish(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Cinstall call cargo#install(<q-args>)
+    1              0.000001 command! -buffer -nargs=* Cruntarget call cargo#runtarget(<q-args>)
+                            
+    1              0.000009 let b:undo_ftplugin .= '
+                                        \|delcommand -buffer Cargo
+                                        \|delcommand -buffer Cbuild
+                                        \|delcommand -buffer Ccheck
+                                        \|delcommand -buffer Cclean
+                                        \|delcommand -buffer Cdoc
+                                        \|delcommand -buffer Cnew
+                                        \|delcommand -buffer Cinit
+                                        \|delcommand -buffer Crun
+                                        \|delcommand -buffer Ctest
+                                        \|delcommand -buffer Cbench
+                                        \|delcommand -buffer Cupdate
+                                        \|delcommand -buffer Csearch
+                                        \|delcommand -buffer Cpublish
+                                        \|delcommand -buffer Cinstall
+                                        \|delcommand -buffer Cruntarget'
+                            
+                            " vint: -ProhibitAbbreviationOption
+    1              0.000001 let &cpo = s:save_cpo
+    1              0.000001 unlet s:save_cpo
+                            " vint: +ProhibitAbbreviationOption
+                            
+                            " vim: set et sw=4 sts=4 ts=8:
+
+SCRIPT  /usr/share/nvim/runtime/compiler/cargo.vim
+Sourced 1 time
+Total time:   0.000258
+ Self time:   0.000184
+
+count  total (s)   self (s)
+                            " Vim compiler file
+                            " Compiler:         Cargo Compiler
+                            " Maintainer:       Damien Radtke <damienradtke@gmail.com>
+                            " Latest Revision:  2023-09-11
+                            "                   2024 Apr 05 by The Vim Project (removed :CompilerSet definition)
+                            " For bugs, patches and license go to https://github.com/rust-lang/rust.vim
+                            
+    1              0.000004 if exists('current_compiler')
+                                finish
+    1              0.000000 endif
+    1   0.000202   0.000128 runtime compiler/rustc.vim
+    1              0.000003 let current_compiler = "cargo"
+                            
+                            " vint: -ProhibitAbbreviationOption
+    1              0.000002 let s:save_cpo = &cpo
+    1              0.000001 set cpo&vim
+                            " vint: +ProhibitAbbreviationOption
+                            
+    1              0.000001 if exists('g:cargo_makeprg_params')
+                                execute 'CompilerSet makeprg=cargo\ '.escape(g:cargo_makeprg_params, ' \|"').'\ $*'
+    1              0.000000 else
+    1              0.000002     CompilerSet makeprg=cargo\ $*
+    1              0.000000 endif
+                            
+    1              0.000002 augroup RustCargoQuickFixHooks
+    1              0.000014     autocmd!
+    1              0.000003     autocmd QuickFixCmdPre make call cargo#quickfix#CmdPre()
+    1              0.000002     autocmd QuickFixCmdPost make call cargo#quickfix#CmdPost()
+    1              0.000000 augroup END
+                            
+                            " Ignore general cargo progress messages
+    1              0.000009 CompilerSet errorformat+=
+                                        \%-G%\\s%#Downloading%.%#,
+                                        \%-G%\\s%#Checking%.%#,
+                                        \%-G%\\s%#Compiling%.%#,
+                                        \%-G%\\s%#Finished%.%#,
+                                        \%-G%\\s%#error:\ Could\ not\ compile\ %.%#,
+                                        \%-G%\\s%#To\ learn\ more\\,%.%#,
+                                        \%-G%\\s%#For\ more\ information\ about\ this\ error\\,%.%#,
+                                        \%-Gnote:\ Run\ with\ \`RUST_BACKTRACE=%.%#,
+                                        \%.%#panicked\ at\ \\'%m\\'\\,\ %f:%l:%c
+                            
+                            " vint: -ProhibitAbbreviationOption
+    1              0.000001 let &cpo = s:save_cpo
+    1              0.000000 unlet s:save_cpo
+                            " vint: +ProhibitAbbreviationOption
+                            
+                            " vim: set et sw=4 sts=4 ts=8:
+
+SCRIPT  /usr/share/nvim/runtime/compiler/rustc.vim
+Sourced 1 time
+Total time:   0.000072
+ Self time:   0.000072
+
+count  total (s)   self (s)
+                            " Vim compiler file
+                            " Compiler:         Rust Compiler
+                            " Maintainer:       Chris Morgan <me@chrismorgan.info>
+                            " Latest Revision:  2023-09-11
+                            " For bugs, patches and license go to https://github.com/rust-lang/rust.vim
+                            
+    1              0.000001 if exists("current_compiler")
+                                finish
+    1              0.000000 endif
+    1              0.000005 let current_compiler = "rustc"
+                            
+                            " vint: -ProhibitAbbreviationOption
+    1              0.000003 let s:save_cpo = &cpo
+    1              0.000005 set cpo&vim
+                            " vint: +ProhibitAbbreviationOption
+                            
+    1              0.000002 if get(g:, 'rustc_makeprg_no_percent', 0)
+                                CompilerSet makeprg=rustc
+    1              0.000001 else
+    1              0.000003     if has('patch-7.4.191')
+    1              0.000010       CompilerSet makeprg=rustc\ \%:S
+                                else
+                                  CompilerSet makeprg=rustc\ \"%\"
+    1              0.000000     endif
+    1              0.000000 endif
+                            
+                            " New errorformat (after nightly 2016/08/10)
+    1              0.000021 CompilerSet errorformat=
+                                        \%-G,
+                                        \%-Gerror:\ aborting\ %.%#,
+                                        \%-Gerror:\ Could\ not\ compile\ %.%#,
+                                        \%Eerror:\ %m,
+                                        \%Eerror[E%n]:\ %m,
+                                        \%Wwarning:\ %m,
+                                        \%Inote:\ %m,
+                                        \%C\ %#-->\ %f:%l:%c,
+                                        \%E\ \ left:%m,%C\ right:%m\ %f:%l:%c,%Z
+                            
+                            " Old errorformat (before nightly 2016/08/10)
+    1              0.000007 CompilerSet errorformat+=
+                                        \%f:%l:%c:\ %t%*[^:]:\ %m,
+                                        \%f:%l:%c:\ %*\\d:%*\\d\ %t%*[^:]:\ %m,
+                                        \%-G%f:%l\ %s,
+                                        \%-G%*[\ ]^,
+                                        \%-G%*[\ ]^%*[~],
+                                        \%-G%*[\ ]...
+                            
+                            " vint: -ProhibitAbbreviationOption
+    1              0.000003 let &cpo = s:save_cpo
+    1              0.000001 unlet s:save_cpo
+                            " vint: +ProhibitAbbreviationOption
+                            
+                            " vim: set et sw=4 sts=4 ts=8:
+
+SCRIPT  /usr/share/nvim/runtime/indent/rust.vim
+Sourced 1 time
+Total time:   0.000037
+ Self time:   0.000037
+
+count  total (s)   self (s)
+                            " Vim indent file
+                            " Language:         Rust
+                            " Author:           Chris Morgan <me@chrismorgan.info>
+                            " Last Change:      2023-09-11
+                            " 2024 Jul 04 by Vim Project: use shiftwidth() instead of hard-coding shifted values (#15138)
+                            
+                            " For bugs, patches and license go to https://github.com/rust-lang/rust.vim
+                            " Note: upstream seems umaintained: https://github.com/rust-lang/rust.vim/issues/502
+                            
+                            " Only load this indent file when no other was loaded.
+    1              0.000001 if exists("b:did_indent")
+                                finish
+    1              0.000000 endif
+    1              0.000001 let b:did_indent = 1
+                            
+    1              0.000001 setlocal cindent
+    1              0.000003 setlocal cinoptions=L0,(s,Ws,J1,j1,m1
+    1              0.000001 setlocal cinkeys=0{,0},!^F,o,O,0[,0],0(,0)
+                            " Don't think cinwords will actually do anything at all... never mind
+    1              0.000003 setlocal cinwords=for,if,else,while,loop,impl,mod,unsafe,trait,struct,enum,fn,extern,macro
+                            
+                            " Some preliminary settings
+    1              0.000004 setlocal nolisp		" Make sure lisp indenting doesn't supersede us
+    1              0.000002 setlocal autoindent	" indentexpr isn't much help otherwise
+                            " Also do indentkeys, otherwise # gets shoved to column 0 :-/
+    1              0.000002 setlocal indentkeys=0{,0},!^F,o,O,0[,0],0(,0)
+                            
+    1              0.000008 setlocal indentexpr=GetRustIndent(v:lnum)
+                            
+    1              0.000001 let b:undo_indent = "setlocal cindent< cinoptions< cinkeys< cinwords< lisp< autoindent< indentkeys< indentexpr<"
+                            
+                            " Only define the function once.
+    1              0.000002 if exists("*GetRustIndent")
+    1              0.000000     finish
+                            endif
+                            
+                            " vint: -ProhibitAbbreviationOption
+                            let s:save_cpo = &cpo
+                            set cpo&vim
+                            " vint: +ProhibitAbbreviationOption
+                            
+                            " Come here when loading the script the first time.
+                            
+                            function! s:get_line_trimmed(lnum)
+                                " Get the line and remove a trailing comment.
+                                " Use syntax highlighting attributes when possible.
+                                " NOTE: this is not accurate; /* */ or a line continuation could trick it
+                                let line = getline(a:lnum)
+                                let line_len = strlen(line)
+                                if has('syntax_items')
+                                    " If the last character in the line is a comment, do a binary search for
+                                    " the start of the comment.  synID() is slow, a linear search would take
+                                    " too long on a long line.
+                                    if synIDattr(synID(a:lnum, line_len, 1), "name") =~? 'Comment\|Todo'
+                                        let min = 1
+                                        let max = line_len
+                                        while min < max
+                                            let col = (min + max) / 2
+                                            if synIDattr(synID(a:lnum, col, 1), "name") =~? 'Comment\|Todo'
+                                                let max = col
+                                            else
+                                                let min = col + 1
+                                            endif
+                                        endwhile
+                                        let line = strpart(line, 0, min - 1)
+                                    endif
+                                    return substitute(line, "\s*$", "", "")
+                                else
+                                    " Sorry, this is not complete, nor fully correct (e.g. string "//").
+                                    " Such is life.
+                                    return substitute(line, "\s*//.*$", "", "")
+                                endif
+                            endfunction
+                            
+                            function! s:is_string_comment(lnum, col)
+                                if has('syntax_items')
+                                    for id in synstack(a:lnum, a:col)
+                                        let synname = synIDattr(id, "name")
+                                        if synname ==# "rustString" || synname =~# "^rustComment"
+                                            return 1
+                                        endif
+                                    endfor
+                                else
+                                    " without syntax, let's not even try
+                                    return 0
+                                endif
+                            endfunction
+                            
+                            if exists('*shiftwidth')
+                                function! s:shiftwidth()
+                                    return shiftwidth()
+                                endfunc
+                            else
+                                function! s:shiftwidth()
+                                    return &shiftwidth
+                                endfunc
+                            endif
+                            
+                            function GetRustIndent(lnum)
+                                " Starting assumption: cindent (called at the end) will do it right
+                                " normally. We just want to fix up a few cases.
+                            
+                                let line = getline(a:lnum)
+                            
+                                if has('syntax_items')
+                                    let synname = synIDattr(synID(a:lnum, 1, 1), "name")
+                                    if synname ==# "rustString"
+                                        " If the start of the line is in a string, don't change the indent
+                                        return -1
+                                    elseif synname =~? '\(Comment\|Todo\)'
+                                                \ && line !~# '^\s*/\*'  " not /* opening line
+                                        if synname =~? "CommentML" " multi-line
+                                            if line !~# '^\s*\*' && getline(a:lnum - 1) =~# '^\s*/\*'
+                                                " This is (hopefully) the line after a /*, and it has no
+                                                " leader, so the correct indentation is that of the
+                                                " previous line.
+                                                return GetRustIndent(a:lnum - 1)
+                                            endif
+                                        endif
+                                        " If it's in a comment, let cindent take care of it now. This is
+                                        " for cases like "/*" where the next line should start " * ", not
+                                        " "* " as the code below would otherwise cause for module scope
+                                        " Fun fact: "  /*\n*\n*/" takes two calls to get right!
+                                        return cindent(a:lnum)
+                                    endif
+                                endif
+                            
+                                " cindent gets second and subsequent match patterns/struct members wrong,
+                                " as it treats the comma as indicating an unfinished statement::
+                                "
+                                " match a {
+                                "     b => c,
+                                "         d => e,
+                                "         f => g,
+                                " };
+                            
+                                " Search backwards for the previous non-empty line.
+                                let prevlinenum = prevnonblank(a:lnum - 1)
+                                let prevline = s:get_line_trimmed(prevlinenum)
+                                while prevlinenum > 1 && prevline !~# '[^[:blank:]]'
+                                    let prevlinenum = prevnonblank(prevlinenum - 1)
+                                    let prevline = s:get_line_trimmed(prevlinenum)
+                                endwhile
+                            
+                                " A standalone '{', '}', or 'where'
+                                let l:standalone_open = line =~# '\V\^\s\*{\s\*\$'
+                                let l:standalone_close = line =~# '\V\^\s\*}\s\*\$'
+                                let l:standalone_where = line =~# '\V\^\s\*where\s\*\$'
+                                if l:standalone_open || l:standalone_close || l:standalone_where
+                                    " ToDo: we can search for more items than 'fn' and 'if'.
+                                    let [l:found_line, l:col, l:submatch] =
+                                                \ searchpos('\<\(fn\)\|\(if\)\>', 'bnWp')
+                                    if l:found_line !=# 0
+                                        " Now we count the number of '{' and '}' in between the match
+                                        " locations and the current line (there is probably a better
+                                        " way to compute this).
+                                        let l:i = l:found_line
+                                        let l:search_line = strpart(getline(l:i), l:col - 1)
+                                        let l:opens = 0
+                                        let l:closes = 0
+                                        while l:i < a:lnum
+                                            let l:search_line2 = substitute(l:search_line, '\V{', '', 'g')
+                                            let l:opens += strlen(l:search_line) - strlen(l:search_line2)
+                                            let l:search_line3 = substitute(l:search_line2, '\V}', '', 'g')
+                                            let l:closes += strlen(l:search_line2) - strlen(l:search_line3)
+                                            let l:i += 1
+                                            let l:search_line = getline(l:i)
+                                        endwhile
+                                        if l:standalone_open || l:standalone_where
+                                            if l:opens ==# l:closes
+                                                return indent(l:found_line)
+                                            endif
+                                        else
+                                            " Expect to find just one more close than an open
+                                            if l:opens ==# l:closes + 1
+                                                return indent(l:found_line)
+                                            endif
+                                        endif
+                                    endif
+                                endif
+                            
+                                " A standalone 'where' adds a shift.
+                                let l:standalone_prevline_where = prevline =~# '\V\^\s\*where\s\*\$'
+                                if l:standalone_prevline_where
+                                    return indent(prevlinenum) + shiftwidth()
+                                endif
+                            
+                                " Handle where clauses nicely: subsequent values should line up nicely.
+                                if prevline[len(prevline) - 1] ==# ","
+                                            \ && prevline =~# '^\s*where\s'
+                                    return indent(prevlinenum) + 6
+                                endif
+                            
+                                let l:last_prevline_character = prevline[len(prevline) - 1]
+                            
+                                " A line that ends with '.<expr>;' is probably an end of a long list
+                                " of method operations.
+                                if prevline =~# '\V\^\s\*.' && l:last_prevline_character ==# ';'
+                                    call cursor(a:lnum - 1, 1)
+                                    let l:scope_start = searchpair('{\|(', '', '}\|)', 'nbW',
+                                                \ 's:is_string_comment(line("."), col("."))')
+                                    if l:scope_start != 0 && l:scope_start < a:lnum
+                                        return indent(l:scope_start) + shiftwidth()
+                                    endif
+                                endif
+                            
+                                if l:last_prevline_character ==# ","
+                                            \ && s:get_line_trimmed(a:lnum) !~# '^\s*[\[\]{})]'
+                                            \ && prevline !~# '^\s*fn\s'
+                                            \ && prevline !~# '([^()]\+,$'
+                                            \ && s:get_line_trimmed(a:lnum) !~# '^\s*\S\+\s*=>'
+                                    " Oh ho! The previous line ended in a comma! I bet cindent will try to
+                                    " take this too far... For now, let's normally use the previous line's
+                                    " indent.
+                            
+                                    " One case where this doesn't work out is where *this* line contains
+                                    " square or curly brackets; then we normally *do* want to be indenting
+                                    " further.
+                                    "
+                                    " Another case where we don't want to is one like a function
+                                    " definition with arguments spread over multiple lines:
+                                    "
+                                    " fn foo(baz: Baz,
+                                    "        baz: Baz) // <-- cindent gets this right by itself
+                                    "
+                                    " Another case is similar to the previous, except calling a function
+                                    " instead of defining it, or any conditional expression that leaves
+                                    " an open paren:
+                                    "
+                                    " foo(baz,
+                                    "     baz);
+                                    "
+                                    " if baz && (foo ||
+                                    "            bar) {
+                                    "
+                                    " Another case is when the current line is a new match arm.
+                                    "
+                                    " There are probably other cases where we don't want to do this as
+                                    " well. Add them as needed.
+                                    return indent(prevlinenum)
+                                endif
+                            
+                                if !has("patch-7.4.355")
+                                    " cindent before 7.4.355 doesn't do the module scope well at all; e.g.::
+                                    "
+                                    " static FOO : &'static [bool] = [
+                                    " true,
+                                    "	 false,
+                                    "	 false,
+                                    "	 true,
+                                    "	 ];
+                                    "
+                                    "	 uh oh, next statement is indented further!
+                            
+                                    " Note that this does *not* apply the line continuation pattern properly;
+                                    " that's too hard to do correctly for my liking at present, so I'll just
+                                    " start with these two main cases (square brackets and not returning to
+                                    " column zero)
+                            
+                                    call cursor(a:lnum, 1)
+                                    if searchpair('{\|(', '', '}\|)', 'nbW',
+                                                \ 's:is_string_comment(line("."), col("."))') == 0
+                                        if searchpair('\[', '', '\]', 'nbW',
+                                                    \ 's:is_string_comment(line("."), col("."))') == 0
+                                            " Global scope, should be zero
+                                            return 0
+                                        else
+                                            " At the module scope, inside square brackets only
+                                            "if getline(a:lnum)[0] == ']' || search('\[', '', '\]', 'nW') == a:lnum
+                                            if line =~# "^\\s*]"
+                                                " It's the closing line, dedent it
+                                                return 0
+                                            else
+                                                return shiftwidth()
+                                            endif
+                                        endif
+                                    endif
+                                endif
+                            
+                                " Fall back on cindent, which does it mostly right
+                                return cindent(a:lnum)
+                            endfunction
+                            
+                            " vint: -ProhibitAbbreviationOption
+                            let &cpo = s:save_cpo
+                            unlet s:save_cpo
+                            " vint: +ProhibitAbbreviationOption
+                            
+                            " vim: set et sw=4 sts=4 ts=8:
+
+FUNCTION  <SNR>7_Guess()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:38
+Called 1 time
+Total time:   0.002956
+ Self time:   0.002956
+
+count  total (s)   self (s)
+    1              0.000005   let has_heredocs = a:detected.filetype =~# '^\%(perl\|php\|ruby\|[cz]\=sh\|bash\)$'
+    1              0.000001   let options = {}
+    1              0.000002   let heuristics = {'spaces': 0, 'hard': 0, 'soft': 0, 'checked': 0, 'indents': {}}
+    1              0.000002   let tabstop = get(a:detected.options, 'tabstop', get(a:detected.defaults, 'tabstop', [8]))[0]
+    1              0.000001   let softtab = repeat(' ', tabstop)
+    1              0.000000   let waiting_on = ''
+    1              0.000000   let prev_indent = -1
+    1              0.000000   let prev_line = ''
+                            
+  135              0.000033   for line in a:lines
+  135              0.000050     if len(waiting_on)
+                                  if line =~# waiting_on
+                                    let waiting_on = ''
+                                    let prev_indent = -1
+                                    let prev_line = ''
+                                  endif
+                                  continue
+  135              0.000134     elseif line =~# '^\s*$'
+   13              0.000003       continue
+  122              0.000070     elseif a:detected.filetype ==# 'python' && prev_line[-1:-1] =~# '[[\({]'
+                                  let prev_indent = -1
+                                  let prev_line = ''
+                                  continue
+  122              0.000077     elseif line =~# '^=\w' && line !~# '^=\%(end\|cut\)\>'
+                                  let waiting_on = '^=\%(end\|cut\)\>'
+  122              0.000095     elseif line =~# '^@@\+ -\d\+,\d\+ '
+                                  let waiting_on = '^$'
+  122              0.000148     elseif line !~# '[/<"`]'
+                                  " No need to do other checks
+    9              0.000011     elseif line =~# '^\s*/\*' && line !~# '\*/'
+                                  let waiting_on = '\*/'
+    9              0.000010     elseif line =~# '^\s*<\!--' && line !~# '-->'
+                                  let waiting_on = '-->'
+    9              0.000019     elseif line =~# '^[^"]*"""'
+                                  let waiting_on = '^[^"]*"""'
+    9              0.000004     elseif a:detected.filetype ==# 'go' && line =~# '^[^`]*`[^`]*$'
+                                  let waiting_on = '^[^`]*`[^`]*$'
+    9              0.000002     elseif has_heredocs
+                                  let waiting_on = matchstr(line, '<<\s*\([''"]\=\)\zs\w\+\ze\1[^''"`<>]*$')
+                                  if len(waiting_on)
+                                    let waiting_on = '^' . waiting_on . '$'
+                                  endif
+  122              0.000014     endif
+                            
+  122              0.000246     let indent = len(matchstr(substitute(line, '\t', softtab, 'g'), '^ *'))
+  122              0.000069     if line =~# '^\t'
+                                  let heuristics.hard += 1
+  122              0.000121     elseif line =~# '^' . softtab
+   74              0.000028       let heuristics.soft += 1
+  122              0.000017     endif
+  122              0.000084     if line =~# '^  '
+   98              0.000037       let heuristics.spaces += 1
+  122              0.000015     endif
+  122              0.000072     let increment = prev_indent < 0 ? 0 : indent - prev_indent
+  122              0.000039     let prev_indent = indent
+  122              0.000040     let prev_line = line
+  122              0.000059     if increment > 1 && (increment < 4 || increment % 4 == 0)
+   32              0.000019       if has_key(heuristics.indents, increment)
+   31              0.000017         let heuristics.indents[increment] += 1
+    1              0.000000       else
+    1              0.000001         let heuristics.indents[increment] = 1
+   32              0.000004       endif
+   32              0.000011       let heuristics.checked += 1
+  122              0.000014     endif
+  122              0.000108     if heuristics.checked >= 32 && (heuristics.hard > 3 || heuristics.soft > 3) && get(heuristics.indents, increment) * 2 > heuristics.checked
+    1              0.000000       if heuristics.spaces
+    1              0.000000         break
+                                  elseif !exists('no_space_indent')
+                                    let no_space_indent = stridx("\n" . join(a:lines, "\n"), "\n  ") < 0
+                                    if no_space_indent
+                                      break
+                                    endif
+                                  endif
+                                  break
+  121              0.000013     endif
+  122              0.000031   endfor
+                            
+    1              0.000001   let a:detected.heuristics[a:source] = heuristics
+                            
+    1              0.000001   let max_frequency = 0
+    2              0.000002   for [shiftwidth, frequency] in items(heuristics.indents)
+    1              0.000001     if frequency > max_frequency || frequency == max_frequency && +shiftwidth < get(options, 'shiftwidth')
+    1              0.000001       let options.shiftwidth = +shiftwidth
+    1              0.000001       let max_frequency = frequency
+    1              0.000000     endif
+    2              0.000000   endfor
+                            
+    1              0.000001   if heuristics.hard && !heuristics.spaces && !has_key(a:detected.options, 'tabstop')
+                                let options = {'expandtab': 0, 'shiftwidth': 0}
+    1              0.000001   elseif heuristics.hard > heuristics.soft
+                                let options.expandtab = 0
+                                let options.tabstop = tabstop
+    1              0.000000   else
+    1              0.000000     if heuristics.soft
+    1              0.000000       let options.expandtab = 1
+    1              0.000000     endif
+    1              0.000078     if heuristics.hard || has_key(a:detected.options, 'tabstop') || stridx(join(a:lines, "\n"), "\t") >= 0
+                                  let options.tabstop = tabstop
+    1              0.000001     elseif !&g:shiftwidth && has_key(options, 'shiftwidth') && !has_key(a:detected.options, 'shiftwidth')
+                                  let options.tabstop = options.shiftwidth
+                                  let options.shiftwidth = 0
+    1              0.000000     endif
+    1              0.000000   endif
+                            
+    1              0.000002   call map(options, '[v:val, a:source]')
+    1              0.000002   call extend(a:detected.options, options, 'keep')
+
+FUNCTION  <SNR>2_LoadIndent()
+    Defined: /usr/share/nvim/runtime/indent.vim:14
+Called 3 times
+Total time:   0.000992
+ Self time:   0.000953
+
+count  total (s)   self (s)
+    3              0.000004     if exists("b:undo_indent")
+                                  exe b:undo_indent
+                                  unlet! b:undo_indent b:did_indent
+    3              0.000001     endif
+    3              0.000003     let s = expand("<amatch>")
+    3              0.000002     if s != ""
+    3              0.000002       if exists("b:did_indent")
+                            	unlet b:did_indent
+    3              0.000001       endif
+                            
+                                  " When there is a dot it is used to separate filetype names.  Thus for
+                                  " "aaa.bbb" load "indent/aaa.vim" and then "indent/bbb.vim".
+    6              0.000006       for name in split(s, '\.')
+                                    " XXX: "[.]" in the pattern makes it a wildcard on Windows
+    3   0.000956   0.000916         exe $'runtime! indent/{name}[.]{{vim,lua}}'
+    6              0.000002       endfor
+    3              0.000001     endif
+
+FUNCTION  <SNR>7_Ready()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:384
+Called 2 times
+Total time:   0.000003
+ Self time:   0.000003
+
+count  total (s)   self (s)
+    2              0.000003   return has_key(a:detected.options, 'expandtab') && has_key(a:detected.options, 'shiftwidth')
+
+FUNCTION  <SNR>7_DetectEditorConfig()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:270
+Called 1 time
+Total time:   0.000166
+ Self time:   0.000166
+
+count  total (s)   self (s)
+    1              0.000001   if empty(a:absolute_path)
+                                return [{}, '']
+    1              0.000000   endif
+    1              0.000000   let root = ''
+    1              0.000001   let tail = a:0 ? a:1 : '.editorconfig'
+    1              0.000001   let dir = fnamemodify(a:absolute_path, ':h')
+    1              0.000000   let previous_dir = ''
+    1              0.000000   let sections = []
+    1              0.000001   let overrides = get(g:, 'sleuth_editorconfig_overrides', {})
+    9              0.000014   while dir !=# previous_dir && dir !~# '^//\%([^/]\+/\=\)\=$'
+    8              0.000017     let head = substitute(dir, '/\=$', '/', '')
+    8              0.000011     let read_from = get(overrides, head . tail, get(overrides, head, head . tail))
+    8              0.000003     if read_from is# ''
+                                  break
+    8              0.000008     elseif type(read_from) == type('') && read_from !=# head . tail && read_from !~# '^/\|^\a\+:'
+                                  let read_from = simplify(head . read_from)
+    8              0.000001     endif
+    8              0.000026     let ftime = type(read_from) == type('') ? getftime(read_from) : -1
+    8              0.000014     let [cachetime; econfig] = get(s:editorconfig_cache, read_from, [-1, {}, []])
+    8              0.000003     if ftime != cachetime
+                                  let econfig = s:ReadEditorConfig(read_from)
+                                  let s:editorconfig_cache[read_from] = [ftime] + econfig
+                                  lockvar! s:editorconfig_cache[read_from]
+                                  unlockvar s:editorconfig_cache[read_from]
+    8              0.000001     endif
+    8              0.000007     call extend(sections, econfig[1], 'keep')
+    8              0.000007     if get(econfig[0], 'root', [''])[0] ==? 'true'
+                                  let root = head
+                                  break
+    8              0.000001     endif
+    8              0.000003     let previous_dir = dir
+    8              0.000005     let dir = fnamemodify(dir, ':h')
+    9              0.000002   endwhile
+                            
+    1              0.000001   let config = {}
+    1              0.000001   for [pattern, pairs] in sections
+                                if a:absolute_path =~# pattern
+                                  call extend(config, pairs)
+                                endif
+    1              0.000000   endfor
+                            
+    1              0.000001   return [config, root]
+
+FUNCTION  <SNR>7_Slash()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:33
+Called 1 time
+Total time:   0.000001
+ Self time:   0.000001
+
+count  total (s)   self (s)
+    1              0.000001     return a:path
+
+FUNCTION  <SNR>7_DetectDeclared()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:488
+Called 1 time
+Total time:   0.000393
+ Self time:   0.000043
+
+count  total (s)   self (s)
+    1   0.000006   0.000005   let detected = {'bufname': s:Slash(@%), 'declared': {}}
+    1              0.000003   let absolute_or_empty = detected.bufname =~# '^$\|^\a\+:\|^/'
+    1              0.000002   if &l:buftype =~# '^\%(nowrite\)\=$' && !absolute_or_empty
+                                let detected.bufname = substitute(s:Slash(getcwd()), '/\=$', '/', '') . detected.bufname
+                                let absolute_or_empty = 1
+    1              0.000000   endif
+    1              0.000001   let detected.path = absolute_or_empty ? detected.bufname : ''
+    1              0.000004   let pre = substitute(matchstr(detected.path, '^\a\a\+\ze:'), '^\a', '\u&', 'g')
+    1              0.000001   if len(pre) && exists('*' . pre . 'Real')
+                                let detected.path = s:Slash(call(pre . 'Real', [detected.path]))
+    1              0.000000   endif
+                            
+    1              0.000000   try
+    1              0.000002     if len(detected.path) && exists('*ExcludeBufferFromDiscovery') && !empty(ExcludeBufferFromDiscovery(detected.path, 'sleuth'))
+                                  let detected.path = ''
+    1              0.000000     endif
+                              catch
+    1              0.000001   endtry
+    1   0.000171   0.000004   let [detected.editorconfig, detected.root] = s:DetectEditorConfig(detected.path)
+    1   0.000043   0.000007   call extend(detected.declared, s:EditorConfigToOptions(detected.editorconfig))
+    1   0.000151   0.000004   call extend(detected.declared, s:ModelineOptions())
+    1              0.000000   return detected
+
+FUNCTION  <SNR>20_Highlight_Matching_Pair()
+    Defined: /usr/share/nvim/runtime/plugin/matchparen.vim:45
+Called 219 times
+Total time:   0.131686
+ Self time:   0.119492
+
+count  total (s)   self (s)
+  219              0.004040   if !exists("w:matchparen_ids")
+                                let w:matchparen_ids = []
+  219              0.000736   endif
+                              " Remove any previous match.
+  219   0.021063   0.008870   call s:Remove_Matches()
+                            
+                              " Avoid that we remove the popup menu.
+                              " Return when there are no colors (looks like the cursor jumps).
+  219              0.003409   if pumvisible() || (&t_Co < 8 && !has("gui_running"))
+                                return
+  219              0.000574   endif
+                            
+                              " Get the character under the cursor and check if it's in 'matchpairs'.
+  219              0.002740   let c_lnum = line('.')
+  219              0.002396   let c_col = col('.')
+  219              0.001777   let before = 0
+                            
+  219              0.002478   let text = getline(c_lnum)
+  219              0.004814   let c_before = text->strpart(0, c_col - 1)->slice(-1)
+  219              0.003848   let c = text->strpart(c_col - 1)->slice(0, 1)
+  219              0.014837   let plist = split(&matchpairs, '.\zs[:,]')
+  219              0.002997   let i = index(plist, c)
+  219              0.001044   if i < 0
+                                " not found, in Insert mode try character before the cursor
+  193              0.003088     if c_col > 1 && (mode() == 'i' || mode() == 'R')
+                                  let before = strlen(c_before)
+                                  let c = c_before
+                                  let i = index(plist, c)
+  193              0.000664     endif
+  193              0.001258     if i < 0
+                                  " not found, nothing to do
+  193              0.000742       return
+                                endif
+   26              0.000054   endif
+                            
+                              " Figure out the arguments for searchpairpos().
+   26              0.000117   if i % 2 == 0
+                                let s_flags = 'nW'
+                                let c2 = plist[i + 1]
+   26              0.000059   else
+   26              0.000137     let s_flags = 'nbW'
+   26              0.000136     let c2 = c
+   26              0.000195     let c = plist[i - 1]
+   26              0.000055   endif
+   26              0.000127   if c == '['
+    8              0.000003     let c = '\['
+    8              0.000003     let c2 = '\]'
+   26              0.000053   endif
+                            
+                              " Find the match.  When it was just before the cursor move it there for a
+                              " moment.
+   26              0.000110   if before > 0
+                                let save_cursor = getcurpos()
+                                call cursor(c_lnum, c_col - before)
+                                defer setpos('.', save_cursor)
+   26              0.000053   endif
+                            
+   26              0.000513   if !has("syntax") || !exists("g:syntax_on")
+                                let s_skip = "0"
+   26              0.000382   elseif exists("b:ts_highlight") && &syntax != 'on'
+   26              0.000636     let s_skip = "match(v:lua.vim.treesitter.get_captures_at_cursor(), '" .. 'string\|character\|singlequote\|escape\|symbol\|comment' .. "') != -1"
+                              else
+                                " do not attempt to match when the syntax item where the cursor is
+                                " indicates there does not exist a matching parenthesis, e.g. for shells
+                                " case statement: "case $var in foobar)"
+                                "
+                                " add the check behind a filetype check, so it only needs to be
+                                " evaluated for certain filetypes
+                                if ['sh']->index(&filetype) >= 0 && synstack(".", col("."))->indexof({_, id -> synIDattr(id, "name") =~? "shSnglCase"}) >= 0
+                                  return
+                                endif
+                                " Build an expression that detects whether the current cursor position is
+                                " in certain syntax types (string, comment, etc.), for use as
+                                " searchpairpos()'s skip argument.
+                                " We match "escape" for special items, such as lispEscapeSpecial, and
+                                " match "symbol" for lispBarSymbol.
+                                let s_skip = 'synstack(".", col("."))' . '->indexof({_, id -> synIDattr(id, "name") =~? ' . '"string\\|character\\|singlequote\\|escape\\|symbol\\|comment"}) >= 0'
+                                " If executing the expression determines that the cursor is currently in
+                                " one of the syntax types, then we want searchpairpos() to find the pair
+                                " within those syntax types (i.e., not skip).  Otherwise, the cursor is
+                                " outside of the syntax types and s_skip should keep its value so we skip
+                                " any matching pair inside the syntax types.
+                                " Catch if this throws E363: pattern uses more memory than 'maxmempattern'.
+                                try
+                                  execute 'if ' . s_skip . ' | let s_skip = "0" | endif'
+                                catch /^Vim\%((\a\+)\)\=:E363/
+                                  " We won't find anything, so skip searching, should keep Vim responsive.
+                                  return
+                                endtry
+   26              0.000055   endif
+                            
+                              " Limit the search to lines visible in the window.
+   26              0.000243   let stoplinebottom = line('w$')
+   26              0.000210   let stoplinetop = line('w0')
+   26              0.000116   if i % 2 == 0
+                                let stopline = stoplinebottom
+   26              0.000055   else
+   26              0.000160     let stopline = stoplinetop
+   26              0.000053   endif
+                            
+                              " Limit the search time to 300 msec to avoid a hang on very long lines.
+                              " This fails when a timeout is not supported.
+   26              0.000256   if mode() == 'i' || mode() == 'R'
+                                let timeout = exists("b:matchparen_insert_timeout") ? b:matchparen_insert_timeout : g:matchparen_insert_timeout
+   26              0.000051   else
+   26              0.000438     let timeout = exists("b:matchparen_timeout") ? b:matchparen_timeout : g:matchparen_timeout
+   26              0.000051   endif
+   26              0.000058   try
+   26              0.029363     let [m_lnum, m_col] = searchpairpos(c, '', c2, s_flags, s_skip, stopline, timeout)
+                              catch /E118/
+                                " Can't use the timeout, restrict the stopline a bit more to avoid taking
+                                " a long time on closed folds and long lines.
+                                " The "viewable" variables give a range in which we can scroll while
+                                " keeping the cursor at the same position.
+                                " adjustedScrolloff accounts for very large numbers of scrolloff.
+                                let adjustedScrolloff = min([&scrolloff, (line('w$') - line('w0')) / 2])
+                                let bottom_viewable = min([line('$'), c_lnum + &lines - adjustedScrolloff - 2])
+                                let top_viewable = max([1, c_lnum-&lines+adjustedScrolloff + 2])
+                                " one of these stoplines will be adjusted below, but the current values are
+                                " minimal boundaries within the current window
+                                if i % 2 == 0
+                                  if has("byte_offset") && has("syntax_items") && &smc > 0
+                            	let stopbyte = min([line2byte("$"), line2byte(".") + col(".") + &smc * 2])
+                            	let stopline = min([bottom_viewable, byte2line(stopbyte)])
+                                  else
+                            	let stopline = min([bottom_viewable, c_lnum + 100])
+                                  endif
+                                  let stoplinebottom = stopline
+                                else
+                                  if has("byte_offset") && has("syntax_items") && &smc > 0
+                            	let stopbyte = max([1, line2byte(".") + col(".") - &smc * 2])
+                            	let stopline = max([top_viewable, byte2line(stopbyte)])
+                                  else
+                            	let stopline = max([top_viewable, c_lnum - 100])
+                                  endif
+                                  let stoplinetop = stopline
+                                endif
+                                let [m_lnum, m_col] = searchpairpos(c, '', c2, s_flags, s_skip, stopline)
+   26              0.000070   endtry
+                            
+                              " If a match is found setup match highlighting.
+   26              0.000268   if m_lnum > 0 && m_lnum >= stoplinetop && m_lnum <= stoplinebottom
+   20              0.000098     if !g:matchparen_disable_cursor_hl
+   20              0.001045       call add(w:matchparen_ids, matchaddpos('MatchParen', [[c_lnum, c_col - before], [m_lnum, m_col]], 10))
+                                else
+                                  call add(w:matchparen_ids, matchaddpos('MatchParen', [[m_lnum, m_col]], 10))
+   20              0.000037     endif
+   20              0.000100     let w:paren_hl_on = 1
+   26              0.000055   endif
+
+FUNCTION  <SNR>7_ParseOptions()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:166
+Called 10 times
+Total time:   0.000051
+ Self time:   0.000051
+
+count  total (s)   self (s)
+   10              0.000004   for option in a:declarations
+                                if has_key(s:modeline_booleans, matchstr(option, '^\%(no\)\=\zs\w\+$'))
+                                  let a:into[s:modeline_booleans[matchstr(option, '^\%(no\)\=\zs\w\+')]] = [option !~# '^no'] + a:000
+                                elseif has_key(s:modeline_numbers, matchstr(option, '^\w\+\ze=[1-9]\d*$'))
+                                  let a:into[s:modeline_numbers[matchstr(option, '^\w\+')]] = [str2nr(matchstr(option, '\d\+$'))] + a:000
+                                elseif option =~# '^\%(ft\|filetype\)=[[:alnum:]._-]*$'
+                                  let a:into.filetype = [matchstr(option, '=\zs.*')] + a:000
+                                endif
+                                if option ==# 'nomodeline' || option ==# 'noml'
+                                  return 1
+                                endif
+   10              0.000002   endfor
+   10              0.000002   return 0
+
+FUNCTION  <SNR>7_AutoInit()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:632
+Called 1 time
+Total time:   0.003572
+ Self time:   0.000004
+
+count  total (s)   self (s)
+    1   0.003572   0.000003   return s:Init(1, 1, 1, 1)
+
+FUNCTION  <SNR>1_LoadFTPlugin()
+    Defined: /usr/share/nvim/runtime/ftplugin.vim:15
+Called 3 times
+Total time:   0.007934
+ Self time:   0.002922
+
+count  total (s)   self (s)
+    3              0.000007     if exists("b:undo_ftplugin")
+                                  exe b:undo_ftplugin
+                                  unlet! b:undo_ftplugin b:did_ftplugin
+    3              0.000001     endif
+                            
+    3              0.000008     let s = expand("<amatch>")
+    3              0.000003     if s != ""
+    3              0.000008       if &cpo =~# "S" && exists("b:did_ftplugin")
+                            	" In compatible mode options are reset to the global values, need to
+                            	" set the local values also when a plugin was already used.
+                            	unlet b:did_ftplugin
+    3              0.000001       endif
+                            
+                                  " When there is a dot it is used to separate filetype names.  Thus for
+                                  " "aaa.bbb" load "aaa" and then "bbb".
+    6              0.000010       for name in split(s, '\.')
+                                    " Load Lua ftplugins after Vim ftplugins _per directory_
+                                    " TODO(clason): use nvim__get_runtime when supports globs and modeline
+                                    " XXX: "[.]" in the first pattern makes it a wildcard on Windows
+    3   0.007867   0.002854         exe $'runtime! ftplugin/{name}[.]{{vim,lua}} ftplugin/{name}_*.{{vim,lua}} ftplugin/{name}/*.{{vim,lua}}'
+    6              0.000006       endfor
+    3              0.000001     endif
+
+FUNCTION  <SNR>7_DetectHeuristics()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:513
+Called 1 time
+Total time:   0.003039
+ Self time:   0.000074
+
+count  total (s)   self (s)
+    1              0.000001   let detected = a:into
+    1              0.000002   let filetype = split(&l:filetype, '\.', 1)[0]
+    1              0.000001   if get(detected, 'filetype', '*') ==# filetype
+                                return detected
+    1              0.000000   endif
+    1              0.000001   let detected.filetype = filetype
+    1              0.000001   let options = copy(detected.declared)
+    1              0.000000   let detected.options = options
+    1              0.000000   let detected.heuristics = {}
+    1              0.000001   if has_key(detected, 'patterns')
+                                call remove(detected, 'patterns')
+    1              0.000000   endif
+    1   0.000010   0.000004   let detected.defaults = s:UserOptions(filetype, 'defaults')
+    1              0.000003   if empty(filetype) || !get(b:, 'sleuth_automatic', 1) || empty(get(b:, 'sleuth_heuristics', get(g:, 'sleuth_' . filetype . '_heuristics', get(g:, 'sleuth_heuristics', 1))))
+                                return detected
+    1              0.000000   endif
+    1   0.000004   0.000003   if s:Ready(detected)
+                                return detected
+    1              0.000000   endif
+                            
+    1              0.000046   let lines = getline(1, 1024)
+    1   0.002961   0.000005   call s:Guess(detected.bufname, detected, lines)
+    1   0.000004   0.000003   if s:Ready(detected)
+    1              0.000000     return detected
+                              elseif get(options, 'shiftwidth', [4])[0] < 4 && stridx(join(lines, "\n"), "\t") == -1
+                                let options.expandtab = [1, detected.bufname]
+                                return detected
+                              endif
+                              let dir = len(detected.path) ? fnamemodify(detected.path, ':h') : ''
+                              let root = len(detected.root) ? fnamemodify(detected.root, ':h') : dir ==# s:Slash(expand('~')) ? dir : fnamemodify(dir, ':h')
+                              if detected.bufname =~# '^\a\a\+:' || root ==# '.' || !isdirectory(root)
+                                let dir = ''
+                              endif
+                              let c = get(b:, 'sleuth_neighbor_limit', get(g:, 'sleuth_neighbor_limit', 8))
+                              if c <= 0 || empty(dir)
+                                let detected.patterns = []
+                              elseif type(get(b:, 'sleuth_globs')) == type([])
+                                let detected.patterns = b:sleuth_globs
+                              elseif type(get(g:, 'sleuth_' . detected.filetype . '_globs')) == type([])
+                                let detected.patterns = get(g:, 'sleuth_' . detected.filetype . '_globs')
+                              else
+                                let detected.patterns = ['*' . matchstr(detected.bufname, '/\@<!\.[^][{}*?$~\`./]\+$')]
+                                if detected.patterns ==# ['*']
+                                  let detected.patterns = [matchstr(detected.bufname, '/\zs[^][{}*?$~\`/]\+\ze/\=$')]
+                                  let dir = fnamemodify(dir, ':h')
+                                  if empty(detected.patterns[0])
+                                    let detected.patterns = []
+                                  endif
+                                endif
+                              endif
+                              while c > 0 && dir !~# '^$\|^//[^/]*$' && dir !=# fnamemodify(dir, ':h')
+                                for pattern in detected.patterns
+                                  for neighbor in split(glob(dir.'/'.pattern), "\n")[0:7]
+                                    if neighbor !=# detected.path && filereadable(neighbor)
+                                      call s:Guess(neighbor, detected, readfile(neighbor, '', 256))
+                                      let c -= 1
+                                    endif
+                                    if s:Ready(detected)
+                                      return detected
+                                    endif
+                                    if c <= 0
+                                      break
+                                    endif
+                                  endfor
+                                  if c <= 0
+                                    break
+                                  endif
+                                endfor
+                                if len(dir) <= len(root)
+                                  break
+                                endif
+                                let dir = fnamemodify(dir, ':h')
+                              endwhile
+                              if !has_key(options, 'shiftwidth')
+                                let detected.options = copy(detected.declared)
+                              endif
+                              return detected
+
+FUNCTION  <SNR>7_EditorConfigToOptions()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:329
+Called 1 time
+Total time:   0.000036
+ Self time:   0.000036
+
+count  total (s)   self (s)
+    1              0.000000   let options = {}
+    1              0.000003   let pairs = map(copy(a:pairs), 'v:val[0]')
+    1              0.000001   let sources = map(copy(a:pairs), 'v:val[1:-1]')
+    1              0.000001   call filter(pairs, 'v:val !=? "unset"')
+                            
+    1              0.000001   if get(pairs, 'indent_style', '') ==? 'tab'
+                                let options.expandtab = [0] + sources.indent_style
+    1              0.000001   elseif get(pairs, 'indent_style', '') ==? 'space'
+                                let options.expandtab = [1] + sources.indent_style
+    1              0.000000   endif
+                            
+    1              0.000003   if get(pairs, 'indent_size', '') =~? '^[1-9]\d*$\|^tab$'
+                                let options.shiftwidth = [str2nr(pairs.indent_size)] + sources.indent_size
+                                if &g:shiftwidth == 0 && !has_key(pairs, 'tab_width') && pairs.indent_size !=? 'tab'
+                                  let options.tabstop = options.shiftwidth
+                                  let options.shiftwidth = [0] + sources.indent_size
+                                endif
+    1              0.000000   endif
+                            
+    1              0.000002   if get(pairs, 'tab_width', '') =~? '^[1-9]\d*$'
+                                let options.tabstop = [str2nr(pairs.tab_width)] + sources.tab_width
+                                if !has_key(pairs, 'indent_size') && get(pairs, 'indent_style', '') ==? 'tab'
+                                  let options.shiftwidth = [0] + options.tabstop[1:-1]
+                                endif
+    1              0.000000   endif
+                            
+    1              0.000001   if get(pairs, 'max_line_length', '') =~? '^[1-9]\d*$\|^off$'
+                                let options.textwidth = [str2nr(pairs.max_line_length)] + sources.max_line_length
+    1              0.000000   endif
+                            
+    1              0.000002   if get(pairs, 'insert_final_newline', '') =~? '^true$\|^false$'
+                                let options.endofline = [pairs.insert_final_newline ==? 'true'] + sources.insert_final_newline
+                                let options.fixendofline = copy(options.endofline)
+    1              0.000000   endif
+                            
+    1              0.000001   let eol = tolower(get(pairs, 'end_of_line', ''))
+    1              0.000001   if has_key(s:editorconfig_fileformat, eol)
+                                let options.fileformat = [s:editorconfig_fileformat[eol]] + sources.end_of_line
+    1              0.000000   endif
+                            
+    1              0.000001   let charset = tolower(get(pairs, 'charset', ''))
+    1              0.000001   if has_key(s:editorconfig_bomb, charset)
+                                let options.bomb = [s:editorconfig_bomb[charset]] + sources.charset
+                                let options.fileencoding = [substitute(charset, '\C-bom$', '', '')] + sources.charset
+    1              0.000000   endif
+                            
+    1              0.000001   let filetype = tolower(get(pairs, 'vim_filetype', 'unset'))
+    1              0.000001   if filetype !=# 'unset' && filetype =~# '^[.a-z0-9_-]*$'
+                                let options.filetype = [substitute(filetype, '^\.\+\|\.\+$', '', 'g')] + sources.vim_filetype
+    1              0.000000   endif
+                            
+    1              0.000000   return options
+
+FUNCTION  <SNR>7_Init()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:593
+Called 1 time
+Total time:   0.003569
+ Self time:   0.000066
+
+count  total (s)   self (s)
+    1              0.000001   if !a:redetect && exists('b:sleuth.defaults')
+                                let detected = b:sleuth
+    1              0.000000   endif
+    1              0.000001   unlet! b:sleuth
+    1              0.000005   if &l:buftype !~# '^\%(nowrite\|nofile\|acwrite\)\=$'
+                                return s:Warn(':Sleuth disabled for buftype=' . &l:buftype, a:silent)
+    1              0.000000   endif
+    1              0.000000   if &l:filetype ==# 'netrw'
+                                return s:Warn(':Sleuth disabled for filetype=' . &l:filetype, a:silent)
+    1              0.000000   endif
+    1              0.000000   if &l:binary
+                                return s:Warn(':Sleuth disabled for binary files', a:silent)
+    1              0.000000   endif
+    1              0.000001   if !exists('detected')
+    1   0.000397   0.000005     let detected = s:DetectDeclared()
+    1              0.000000   endif
+    1              0.000000   let setfiletype = ''
+    1              0.000001   if a:do_filetype && has_key(detected.declared, 'filetype')
+                                let filetype = detected.declared.filetype[0]
+                                if filetype !=# &l:filetype || empty(filetype)
+                                  let setfiletype = 'setlocal filetype=' . filetype
+                                else
+                                  let setfiletype = 'setfiletype ' . filetype
+                                endif
+    1              0.000000   endif
+    1              0.000001   exe setfiletype
+    1   0.003059   0.000021   call s:DetectHeuristics(detected)
+    1   0.000089   0.000018   let cmd = s:Apply(detected, (a:do_filetype ? ['filetype'] : []) + (a:unsafe ? s:all_options : s:safe_options), a:silent)
+    1              0.000001   let b:sleuth = detected
+    1              0.000001   if exists('s:polyglot') && !a:silent
+                                call s:Warn('Charlatan :Sleuth implementation in vim-polyglot has been found and disabled.')
+                                call s:Warn('To get rid of this message, uninstall vim-polyglot, or disable the')
+                                call s:Warn('corresponding feature in your vimrc:')
+                                call s:Warn('        let g:polyglot_disabled = ["autoindent"]')
+    1              0.000000   endif
+    1              0.000000   return cmd
+
+FUNCTION  <SNR>7_Apply()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:396
+Called 1 time
+Total time:   0.000071
+ Self time:   0.000071
+
+count  total (s)   self (s)
+    1              0.000002   let options = extend(copy(a:detected.defaults), a:detected.options)
+    1              0.000002   if get(a:detected.defaults, 'shiftwidth', [1])[0] == 0 && get(options, 'shiftwidth', [0])[0] != 0 && !has_key(a:detected.declared, 'tabstop')
+                                let options.tabstop = options.shiftwidth
+                                let options.shiftwidth = a:detected.defaults.shiftwidth
+    1              0.000000   endif
+    1              0.000001   if has_key(options, 'shiftwidth') && !has_key(options, 'expandtab')
+                                let options.expandtab = [stridx(join(getline(1, 256), "\n"), "\t") == -1, a:detected.bufname]
+    1              0.000000   endif
+    1              0.000001   if !exists('*shiftwidth') && !get(options, 'shiftwidth', [1])[0]
+                                let options.shiftwidth = [get(options, 'tabstop', [&tabstop])[0]] + options.shiftwidth[1:-1]
+    1              0.000000   endif
+    1              0.000000   let msg = ''
+    1              0.000000   let cmd = 'setlocal'
+   11              0.000003   for option in a:permitted_options
+   10              0.000012     if !exists('&' . option) || !has_key(options, option) || !&l:modifiable && index(s:safe_options, option) == -1
+    8              0.000002       continue
+    2              0.000000     endif
+    2              0.000001     let value = options[option]
+    2              0.000001     if has_key(s:booleans, option)
+    1              0.000001       let setting = (value[0] ? '' : 'no') . option
+    1              0.000000     else
+    1              0.000001       let setting = option . '=' . value[0]
+    2              0.000000     endif
+    2              0.000004     if getbufvar('', '&' . option) !=# value[0] || index(s:safe_options, option) >= 0
+    2              0.000001       let cmd .= ' ' . setting
+    2              0.000000     endif
+    2              0.000001     if !&verbose || a:silent
+    2              0.000001       if has_key(s:booleans, option)
+    1              0.000003         let msg .= ' ' . (value[0] ? '' : 'no') . get(s:short_options, option, option)
+    1              0.000000       else
+    1              0.000001         let msg .= ' ' . get(s:short_options, option, option) . '=' . value[0]
+    2              0.000000       endif
+    2              0.000000       continue
+                                endif
+                                if len(value) > 1
+                                  if value[1] ==# a:detected.bufname
+                                    let file = '%'
+                                  else
+                                    let file = value[1] =~# '/' ? fnamemodify(value[1], ':~:.') : value[1]
+                                    if file !=# value[1] && file[0:0] !=# '~'
+                                      let file = './' . file
+                                    endif
+                                  endif
+                                  if len(value) > 2
+                                    let file .= ' line ' . value[2]
+                                  endif
+                                  echo printf(':setlocal %-21s " from %s', setting, file)
+                                else
+                                  echo ':setlocal ' . setting
+                                endif
+    1              0.000001   endfor
+    1              0.000001   if !&verbose && !empty(msg) && !a:silent
+                                echo ':setlocal' . msg
+    1              0.000000   endif
+    1              0.000001   if has_key(options, 'shiftwidth')
+    1              0.000002     let cmd .= ' softtabstop=' . (exists('*shiftwidth') ? -1 : options.shiftwidth[0])
+                              else
+                                call s:Warn(':Sleuth failed to detect indent settings', a:silent)
+    1              0.000000   endif
+    1              0.000001   return cmd ==# 'setlocal' ? '' : cmd
+
+FUNCTION  <SNR>7_UserOptions()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:460
+Called 1 time
+Total time:   0.000006
+ Self time:   0.000006
+
+count  total (s)   self (s)
+    1              0.000001   if exists('b:sleuth_' . a:name)
+                                let source = 'b:sleuth_' . a:name
+    1              0.000001   elseif exists('g:sleuth_' . a:ft . '_' . a:name)
+                                let source = 'g:sleuth_' . a:ft . '_' . a:name
+    1              0.000000   endif
+    1              0.000001   if !exists('l:source') || type(eval(source)) == type(function('tr'))
+    1              0.000000     return {}
+                              endif
+                              let val = eval(source)
+                              let options = {}
+                              if type(val) == type('')
+                                call s:ParseOptions(split(substitute(val, '\S\@<![=+]\S\@=', 'ft=', 'g'), '[[:space:]:,]\+'), options, source)
+                                if has_key(options, 'filetype')
+                                  call extend(options, s:UserOptions(remove(options, 'filetype')[0], a:name), 'keep')
+                                endif
+                                if has_key(options, 'tabstop')
+                                  call extend(options, {'shiftwidth': [0, source], 'expandtab': [0, source]}, 'keep')
+                                elseif has_key(options, 'shiftwidth')
+                                  call extend(options, {'expandtab': [1, source]}, 'keep')
+                                endif
+                              elseif type(val) == type([])
+                                call s:ParseOptions(val, options, source)
+                              endif
+                              call filter(options, 'index(s:safe_options, v:key) >= 0')
+                              return options
+
+FUNCTION  <SNR>20_Remove_Matches()
+    Defined: /usr/share/nvim/runtime/plugin/matchparen.vim:203
+Called 220 times
+Total time:   0.012206
+ Self time:   0.012206
+
+count  total (s)   self (s)
+  220              0.003333   if exists('w:paren_hl_on') && w:paren_hl_on
+   40              0.000265     while !empty(w:matchparen_ids)
+   20              0.000254       silent! call remove(w:matchparen_ids, 0)->matchdelete()
+   40              0.000099     endwhile
+   20              0.000112     let w:paren_hl_on = 0
+  220              0.000595   endif
+
+FUNCTION  <SNR>25_SynSet()
+    Defined: /usr/share/nvim/runtime/syntax/synload.vim:27
+Called 3 times
+Total time:   0.001341
+ Self time:   0.001341
+
+count  total (s)   self (s)
+                              " clear syntax for :set syntax=OFF  and any syntax name that doesn't exist
+    3              0.000010   syn clear
+    3              0.000003   if exists("b:current_syntax")
+                                unlet b:current_syntax
+    3              0.000001   endif
+                            
+    3              0.000006   0verbose let s = expand("<amatch>")
+    3              0.000002   if s == "ON"
+                                " :set syntax=ON
+                                if &filetype == ""
+                                  echohl ErrorMsg
+                                  echo "filetype unknown"
+                                  echohl None
+                                endif
+                                let s = &filetype
+    3              0.000001   elseif s == "OFF"
+                                let s = ""
+    3              0.000001   endif
+                            
+    3              0.000001   if s != ""
+                                " Load the syntax file(s).  When there are several, separated by dots,
+                                " load each in sequence.  Skip empty entries.
+    4              0.000004     for name in split(s, '\.')
+    2              0.000003       if !empty(name)
+                                    " XXX: "[.]" in the first pattern makes it a wildcard on Windows
+    2              0.001275         exe $'runtime! syntax/{name}[.]{{vim,lua}} syntax/{name}/*.{{vim,lua}}'
+    2              0.000001       endif
+    4              0.000001     endfor
+    3              0.000001   endif
+
+FUNCTION  <SNR>7_ModelineOptions()
+    Defined: ~/.local/share/nvim/lazy/vim-sleuth/plugin/sleuth.vim:182
+Called 1 time
+Total time:   0.000146
+ Self time:   0.000095
+
+count  total (s)   self (s)
+    1              0.000000   let options = {}
+    1              0.000002   if !&l:modeline && (&g:modeline || s:Capture('setlocal') =~# '\\\@<![[:space:]]nomodeline\>' && s:Capture('verbose setglobal modeline?') !=# s:Capture('verbose setlocal modeline?'))
+                                return options
+    1              0.000000   endif
+    1              0.000002   let modelines = get(b:, 'sleuth_modelines', get(g:, 'sleuth_modelines', 5))
+    1              0.000001   if line('$') > 2 * modelines
+    1              0.000002     let lnums = range(1, modelines) + range(line('$') - modelines + 1, line('$'))
+                              else
+                                let lnums = range(1, line('$'))
+    1              0.000000   endif
+   11              0.000003   for lnum in lnums
+   10   0.000126   0.000075     if s:ParseOptions(split(matchstr(getline(lnum), '\%(\S\@<!vim\=\|\s\@<=ex\):\s*\(set\= \zs[^:]\+\|\zs.*\S\)'), '[[:space:]:]\+'), options, 'modeline', lnum)
+                                  break
+   10              0.000001     endif
+   11              0.000002   endfor
+    1              0.000000   return options
+
+FUNCTIONS SORTED ON TOTAL TIME
+count  total (s)   self (s)  function
+  219   0.131686   0.119492  <SNR>20_Highlight_Matching_Pair()
+  220   0.012206             <SNR>20_Remove_Matches()
+    3   0.007934   0.002922  <SNR>1_LoadFTPlugin()
+    1   0.003572   0.000004  <SNR>7_AutoInit()
+    1   0.003569   0.000066  <SNR>7_Init()
+    1   0.003039   0.000074  <SNR>7_DetectHeuristics()
+    1   0.002956             <SNR>7_Guess()
+    3   0.001341             <SNR>25_SynSet()
+    3   0.000992   0.000953  <SNR>2_LoadIndent()
+    1   0.000393   0.000043  <SNR>7_DetectDeclared()
+    1   0.000166             <SNR>7_DetectEditorConfig()
+    1   0.000146   0.000095  <SNR>7_ModelineOptions()
+    1   0.000071             <SNR>7_Apply()
+   10   0.000051             <SNR>7_ParseOptions()
+    1   0.000036             <SNR>7_EditorConfigToOptions()
+    1   0.000006             <SNR>7_UserOptions()
+    2   0.000003             <SNR>7_Ready()
+    1   0.000001             <SNR>7_Slash()
+
+FUNCTIONS SORTED ON SELF TIME
+count  total (s)   self (s)  function
+  219   0.131686   0.119492  <SNR>20_Highlight_Matching_Pair()
+  220              0.012206  <SNR>20_Remove_Matches()
+    1              0.002956  <SNR>7_Guess()
+    3   0.007934   0.002922  <SNR>1_LoadFTPlugin()
+    3              0.001341  <SNR>25_SynSet()
+    3   0.000992   0.000953  <SNR>2_LoadIndent()
+    1              0.000166  <SNR>7_DetectEditorConfig()
+    1   0.000146   0.000095  <SNR>7_ModelineOptions()
+    1   0.003039   0.000074  <SNR>7_DetectHeuristics()
+    1              0.000071  <SNR>7_Apply()
+    1   0.003569   0.000066  <SNR>7_Init()
+   10              0.000051  <SNR>7_ParseOptions()
+    1   0.000393   0.000043  <SNR>7_DetectDeclared()
+    1              0.000036  <SNR>7_EditorConfigToOptions()
+    1              0.000006  <SNR>7_UserOptions()
+    1   0.003572   0.000004  <SNR>7_AutoInit()
+    2              0.000003  <SNR>7_Ready()
+    1              0.000001  <SNR>7_Slash()
+

@@ -364,10 +364,7 @@ impl<'idx> TypeResolver<'idx> {
         if let JvmType::Primitive('V') = resolved_ret {
             return None;
         }
-        Some(self.canonicalize_type_in_owner_scope(
-            resolved_ret.to_type_name(),
-            owner_internal,
-        ))
+        Some(self.canonicalize_type_in_owner_scope(resolved_ret.to_type_name(), owner_internal))
     }
 
     fn canonicalize_type_in_owner_scope(&self, ty: TypeName, owner_internal: &str) -> TypeName {
@@ -656,7 +653,8 @@ impl<'idx> TypeResolver<'idx> {
     ) -> Option<Vec<LocalVar>> {
         let target_param_ty = target_param_ty?;
         let (param_names, _) = parse_lambda_text_parts(lambda_text)?;
-        let (sam_params, _) = self.extract_sam_signature_from_functional_jvm_type(target_param_ty)?;
+        let (sam_params, _) =
+            self.extract_sam_signature_from_functional_jvm_type(target_param_ty)?;
         if param_names.len() != sam_params.len() {
             return None;
         }
@@ -3073,8 +3071,13 @@ mod tests {
             ],
         );
 
-        let inferred =
-            resolver.infer_functional_arg_return_shallow("s -> s.length()", &[], None, None, Some(&target));
+        let inferred = resolver.infer_functional_arg_return_shallow(
+            "s -> s.length()",
+            &[],
+            None,
+            None,
+            Some(&target),
+        );
         assert_eq!(
             inferred.map(|t| t.to_signature_string()),
             Some("Ljava/lang/Integer;".to_string())

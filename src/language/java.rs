@@ -1077,6 +1077,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_completion_after_finished_break_statement_restores_normal_routing() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (ctx, candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    int localValue = 1;
+                    outer: {
+                        break outer;
+                        loc/*caret*/
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        assert!(
+            !matches!(ctx.location, CursorLocation::StatementLabel { .. }),
+            "caret after a completed break statement must not remain in StatementLabel: {:?}",
+            ctx.location
+        );
+        assert!(
+            candidates.iter().any(|c| c.label.as_ref() == "localValue"),
+            "{:?}",
+            candidates
+                .iter()
+                .map(|c| c.label.as_ref())
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn make_instanceof_narrowing_index() -> WorkspaceIndex {
         let idx = WorkspaceIndex::new();
         idx.add_classes(vec![

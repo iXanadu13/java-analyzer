@@ -243,6 +243,9 @@ fn jump_statement_location(
         "continue_statement" => StatementLabelCompletionKind::Continue,
         _ => return None,
     };
+    if !is_active_jump_label_slot(ctx, stmt) {
+        return None;
+    }
 
     let prefix = stmt
         .named_children(&mut stmt.walk())
@@ -258,6 +261,24 @@ fn jump_statement_location(
         },
         prefix,
     ))
+}
+
+fn is_active_jump_label_slot(ctx: &JavaContextExtractor, stmt: Node) -> bool {
+    let identifier = stmt
+        .named_children(&mut stmt.walk())
+        .find(|child| child.kind() == "identifier");
+    if let Some(ident) = identifier {
+        return ctx.offset >= ident.start_byte() && ctx.offset <= ident.end_byte();
+    }
+
+    let keyword_end = stmt.start_byte()
+        + match stmt.kind() {
+            "break_statement" => "break".len(),
+            "continue_statement" => "continue".len(),
+            _ => return false,
+        };
+
+    ctx.offset >= keyword_end && ctx.offset < stmt.end_byte()
 }
 
 fn detect_partial_jump_label_location(
@@ -1475,6 +1496,54 @@ class A {
             loc
         );
         assert_eq!(query, "out");
+    }
+
+    #[test]
+    fn test_break_after_semicolon_is_not_statement_label_location() {
+        let src = indoc::indoc! {r#"
+class T {
+    void m() {
+        outer: {
+            break outer;
+        }
+    }
+}
+"#};
+        let marker = "break outer;";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, _query) = determine_location(&ctx, cursor_node, None);
+        assert!(
+            !matches!(loc, CursorLocation::StatementLabel { .. }),
+            "completed break statement must not stay in StatementLabel, got {:?}",
+            loc
+        );
+    }
+
+    #[test]
+    fn test_continue_after_semicolon_is_not_statement_label_location() {
+        let src = indoc::indoc! {r#"
+class T {
+    void m() {
+        loop: while (true) {
+            continue loop;
+        }
+    }
+}
+"#};
+        let marker = "continue loop;";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, _query) = determine_location(&ctx, cursor_node, None);
+        assert!(
+            !matches!(loc, CursorLocation::StatementLabel { .. }),
+            "completed continue statement must not stay in StatementLabel, got {:?}",
+            loc
+        );
     }
 
     #[test]
