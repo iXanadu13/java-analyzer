@@ -218,9 +218,7 @@ impl IndexView {
         owner_internal: &str,
         simple_name: &str,
     ) -> Option<Arc<ClassMetadata>> {
-        let Some(owner) = self.get_class(owner_internal) else {
-            return None;
-        };
+        let owner = self.get_class(owner_internal)?;
         let owner_pkg = owner.package.as_deref();
         let owner_name = owner.name.as_ref();
         let mut best: Option<Arc<ClassMetadata>> = None;

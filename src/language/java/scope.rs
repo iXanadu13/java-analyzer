@@ -187,10 +187,10 @@ pub(crate) fn is_cursor_in_class_member_position(cursor_node: Option<Node>) -> b
         if node.id() == type_body.id() {
             break;
         }
-        if is_executable_or_nested_body_context(node.kind()) {
-            if !is_member_declaration_name_context(cursor, node, type_body) {
-                return false;
-            }
+        if is_executable_or_nested_body_context(node.kind())
+            && !is_member_declaration_name_context(cursor, node, type_body)
+        {
+            return false;
         }
         current = node.parent();
     }

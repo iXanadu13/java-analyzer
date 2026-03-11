@@ -72,15 +72,17 @@ pub fn is_class_literal_prefix(prefix: &str) -> bool {
     CLASS_LITERAL_KEYWORD.starts_with(prefix)
 }
 
-pub fn class_literal_result_type(view: &IndexView, operand: TypeName) -> TypeName {
-    // Source-level typing keeps the class-literal operand precise, including arrays,
-    // primitives, and `void`. If `java.lang.Class` is unavailable in the index, keep
-    // the stable JDK internal name instead of degrading to raw `Class`.
-    let class_internal = if view.get_class(JAVA_LANG_CLASS_INTERNAL).is_some() {
-        JAVA_LANG_CLASS_INTERNAL
-    } else {
-        JAVA_LANG_CLASS_INTERNAL
-    };
+pub fn class_literal_result_type(_view: &IndexView, operand: TypeName) -> TypeName {
+    // // Source-level typing keeps the class-literal operand precise, including arrays,
+    // // primitives, and `void`. If `java.lang.Class` is unavailable in the index, keep
+    // // the stable JDK internal name instead of degrading to raw `Class`.
+    // let class_internal = if view.get_class(JAVA_LANG_CLASS_INTERNAL).is_some() {
+    //     JAVA_LANG_CLASS_INTERNAL
+    // } else {
+    //     JAVA_LANG_CLASS_INTERNAL
+    // };
+
+    let class_internal = JAVA_LANG_CLASS_INTERNAL;
     TypeName::with_args(class_internal, vec![operand])
 }
 
