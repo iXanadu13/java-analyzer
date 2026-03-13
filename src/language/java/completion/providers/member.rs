@@ -923,9 +923,9 @@ fn resolve_method_call_receiver(
     }
     let args_text = &expr[paren + 1..expr.len() - 1];
     let arg_count = if args_text.trim().is_empty() {
-        0i32
+        0
     } else {
-        args_text.split(',').count() as i32
+        args_text.split(',').count()
     };
     let enclosing = ctx.enclosing_internal_name.as_deref()?;
     TypeResolver::new(index).resolve_method_return(enclosing, method_name, arg_count, &[])

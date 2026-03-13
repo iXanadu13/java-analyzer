@@ -234,7 +234,7 @@ mod tests {
         ctx.with_extension(type_ctx)
     }
 
-    fn seg_names(expr: &str) -> Vec<(String, Option<i32>)> {
+    fn seg_names(expr: &str) -> Vec<(String, Option<usize>)> {
         parse_chain_from_expr(expr)
             .into_iter()
             .map(|s| (s.name, s.arg_count))

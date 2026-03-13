@@ -626,8 +626,7 @@ impl JavaContextExtractor {
 mod tests {
     use super::*;
     use crate::{
-        completion::engine::CompletionEngine,
-        completion::{CandidateKind, CompletionCandidate},
+        completion::{CandidateKind, CompletionCandidate, engine::CompletionEngine},
         index::{
             ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
             WorkspaceIndex,
@@ -636,12 +635,14 @@ mod tests {
             java::{class_parser::parse_java_source, injection::build_injected_source},
             rope_utils::line_col_to_offset,
         },
-        semantic::LocalVar,
-        semantic::context::{
-            CurrentClassMember, CursorLocation, StatementLabelCompletionKind,
-            StatementLabelTargetKind,
+        semantic::{
+            LocalVar,
+            context::{
+                CurrentClassMember, CursorLocation, StatementLabelCompletionKind,
+                StatementLabelTargetKind,
+            },
+            types::{CallArgs, EvalContext, type_name::TypeName},
         },
-        semantic::types::type_name::TypeName,
     };
     use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC};
     use std::sync::Arc;
@@ -4795,23 +4796,17 @@ mod tests {
         let direct_map = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
             &s_ty,
             "map",
-            1,
-            &[],
-            &["ArrayList::new".to_string()],
-            &ctx.local_variables,
-            ctx.enclosing_internal_name.as_ref(),
-            Some(&|q| type_ctx.resolve_type_name_strict(q)),
+            CallArgs::new(1, &[], &["ArrayList::new".to_string()]),
+            EvalContext::new(&ctx.local_variables, ctx.enclosing_internal_name.as_ref())
+                .with_qualifier(Some(&|q| type_ctx.resolve_type_name_strict(q))),
         );
         let direct_get = direct_map.as_ref().and_then(|m| {
             resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                 &m.to_internal_with_generics(),
                 "get",
-                0,
-                &[],
-                &[],
-                &ctx.local_variables,
-                ctx.enclosing_internal_name.as_ref(),
-                Some(&|q| type_ctx.resolve_type_name_strict(q)),
+                CallArgs::new(0, &[], &[]),
+                EvalContext::new(&ctx.local_variables, ctx.enclosing_internal_name.as_ref())
+                    .with_qualifier(Some(&|q| type_ctx.resolve_type_name_strict(q))),
             )
         });
         let b = ctx

@@ -295,8 +295,7 @@ impl Workspace {
                     context.classpath,
                     context.source_root,
                 );
-            let classes =
-                index_source_text(&uri.to_string(), &content, &language_id, Some(name_table));
+            let classes = index_source_text(uri.as_ref(), &content, &language_id, Some(name_table));
             let origin = ClassOrigin::SourceFile(Arc::from(uri.to_string().as_str()));
             tracing::debug!(
                 uri = %uri,

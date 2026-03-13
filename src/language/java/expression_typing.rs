@@ -8,10 +8,10 @@ use crate::semantic::LocalVar;
 use crate::semantic::context::SamSignature;
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::types::{
-    ChainSegment, TypeResolver, parse_single_type_to_internal, promoted_integral_result_type_name,
-    promoted_numeric_result_type_name, promoted_shift_result_type_name,
-    promoted_unary_integral_result_type_name, singleton_descriptor_to_type,
-    unboxed_primitive_type_name,
+    CallArgs, ChainSegment, EvalContext, TypeResolver, parse_single_type_to_internal,
+    promoted_integral_result_type_name, promoted_numeric_result_type_name,
+    promoted_shift_result_type_name, promoted_unary_integral_result_type_name,
+    singleton_descriptor_to_type, unboxed_primitive_type_name,
 };
 use tree_sitter::Node;
 
@@ -383,7 +383,7 @@ fn resolve_expression_via_existing_resolver(
 fn intrinsic_method_return_type(
     receiver: &TypeName,
     method_name: &str,
-    arg_count: i32,
+    arg_count: usize,
 ) -> Option<TypeName> {
     if receiver.is_array() && method_name == "getClass" && arg_count == 0 {
         return Some(TypeName::with_args(
@@ -939,12 +939,9 @@ pub(crate) fn evaluate_chain(
                 current = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                     recv_internal.as_ref(),
                     base_name,
-                    seg.arg_count.unwrap_or(-1),
-                    &arg_types,
-                    &seg.arg_texts,
-                    locals,
-                    enclosing_internal,
-                    Some(&resolve_qualifier),
+                    CallArgs::new(seg.arg_count.unwrap_or(0), &arg_types, &seg.arg_texts),
+                    EvalContext::new(locals, enclosing_internal)
+                        .with_qualifier(Some(&resolve_qualifier)),
                 );
                 if current.is_none()
                     && let (Some(enclosing), Some(method)) =
@@ -956,11 +953,9 @@ pub(crate) fn evaluate_chain(
                             method.as_ref(),
                             enclosing.as_ref(),
                             None,
-                            &arg_types,
-                            &seg.arg_texts,
-                            locals,
-                            enclosing_internal,
-                            Some(&resolve_qualifier),
+                            CallArgs::new(seg.arg_count.unwrap_or(0), &arg_types, &seg.arg_texts),
+                            EvalContext::new(locals, enclosing_internal)
+                                .with_qualifier(Some(&resolve_qualifier)),
                         );
                 }
             } else {
@@ -1006,7 +1001,7 @@ pub(crate) fn evaluate_chain(
                     if let Some(intrinsic) = intrinsic_method_return_type(
                         &recv_full,
                         base_name,
-                        seg.arg_count.unwrap_or(-1),
+                        seg.arg_count.unwrap_or(0),
                     ) {
                         current = Some(intrinsic);
                         continue;
@@ -1030,12 +1025,9 @@ pub(crate) fn evaluate_chain(
                     current = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                         &receiver_internal,
                         base_name,
-                        seg.arg_count.unwrap_or(-1),
-                        &arg_types,
-                        &seg.arg_texts,
-                        locals,
-                        enclosing_internal,
-                        Some(&resolve_qualifier),
+                        CallArgs::new(seg.arg_count.unwrap_or(0), &arg_types, &seg.arg_texts),
+                        EvalContext::new(locals, enclosing_internal)
+                            .with_qualifier(Some(&resolve_qualifier)),
                     );
                 } else {
                     if recv_full.is_array() && base_name == "length" {

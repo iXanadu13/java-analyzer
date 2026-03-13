@@ -1201,10 +1201,10 @@ mod tests {
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, WorkspaceIndex,
     };
     use crate::semantic::LocalVar;
-    use crate::semantic::types::OverloadInvocationMode;
+    use crate::semantic::types::{CallArgs, EvalContext, OverloadInvocationMode};
     use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC, ACC_VARARGS};
 
-    fn seg_names(expr: &str) -> Vec<(String, Option<i32>)> {
+    fn seg_names(expr: &str) -> Vec<(String, Option<usize>)> {
         parse_chain_from_expr(expr)
             .into_iter()
             .map(|s| (s.name, s.arg_count))
@@ -4761,23 +4761,23 @@ mod tests {
         let trim_direct_map = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
             "Box<Ljava/lang/String;>",
             "map",
-            1,
-            &[],
-            &["String::trim".to_string()],
-            &ctx_trim.local_variables,
-            ctx_trim.enclosing_internal_name.as_ref(),
-            Some(&resolve_qualifier),
+            CallArgs::new(1, &[], &["String::trim".to_string()]),
+            EvalContext::new(
+                &ctx_trim.local_variables,
+                ctx_trim.enclosing_internal_name.as_ref(),
+            )
+            .with_qualifier(Some(&resolve_qualifier)),
         );
         let trim_direct_get = trim_direct_map.as_ref().and_then(|m| {
             resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                 &m.to_internal_with_generics(),
                 "get",
-                0,
-                &[],
-                &[],
-                &ctx_trim.local_variables,
-                ctx_trim.enclosing_internal_name.as_ref(),
-                Some(&resolve_qualifier),
+                CallArgs::new(0, &[], &[]),
+                EvalContext::new(
+                    &ctx_trim.local_variables,
+                    ctx_trim.enclosing_internal_name.as_ref(),
+                )
+                .with_qualifier(Some(&resolve_qualifier)),
             )
         });
         ContextEnricher::new(&view).enrich(&mut ctx_trim);
@@ -4832,23 +4832,23 @@ mod tests {
         let ctor_direct_map = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
             "Box<Ljava/lang/String;>",
             "map",
-            1,
-            &[],
-            &["ArrayList::new".to_string()],
-            &ctx_ctor.local_variables,
-            ctx_ctor.enclosing_internal_name.as_ref(),
-            Some(&resolve_qualifier),
+            CallArgs::new(1, &[], &["ArrayList::new".to_string()]),
+            EvalContext::new(
+                &ctx_ctor.local_variables,
+                ctx_ctor.enclosing_internal_name.as_ref(),
+            )
+            .with_qualifier(Some(&resolve_qualifier)),
         );
         let ctor_direct_get = ctor_direct_map.as_ref().and_then(|m| {
             resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                 &m.to_internal_with_generics(),
                 "get",
-                0,
-                &[],
-                &[],
-                &ctx_ctor.local_variables,
-                ctx_ctor.enclosing_internal_name.as_ref(),
-                Some(&resolve_qualifier),
+                CallArgs::default(),
+                EvalContext::new(
+                    &ctx_ctor.local_variables,
+                    ctx_ctor.enclosing_internal_name.as_ref(),
+                )
+                .with_qualifier(Some(&resolve_qualifier)),
             )
         });
         ContextEnricher::new(&view).enrich(&mut ctx_ctor);

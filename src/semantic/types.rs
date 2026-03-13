@@ -61,6 +61,55 @@ pub struct OverloadMatch<'a> {
     pub score: i32,
 }
 
+type QualifierResolver<'a> = &'a dyn Fn(&str) -> Option<TypeName>;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CallArgs<'a> {
+    pub count: usize,
+    pub types: &'a [TypeName],
+    pub texts: &'a [String],
+}
+
+impl<'a> CallArgs<'a> {
+    pub fn new(count: usize, types: &'a [TypeName], texts: &'a [String]) -> Self {
+        Self {
+            count,
+            types,
+            texts,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct EvalContext<'a> {
+    pub locals: &'a [LocalVar],
+    pub enclosing: Option<&'a Arc<str>>,
+    pub qualifier_resolver: Option<QualifierResolver<'a>>,
+}
+
+impl<'a> EvalContext<'a> {
+    pub fn new(locals: &'a [LocalVar], enclosing: Option<&'a Arc<str>>) -> Self {
+        Self {
+            locals,
+            enclosing,
+            qualifier_resolver: None,
+        }
+    }
+
+    pub fn with_qualifier(mut self, qr: Option<QualifierResolver<'a>>) -> Self {
+        self.qualifier_resolver = qr;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedMethodTarget<'a> {
+    pub receiver_internal: &'a str,
+    pub owner_internal: &'a str,
+    pub summary: &'a MethodSummary,
+    pub class_generic_signature: Option<&'a str>,
+}
+
 impl<'idx> TypeResolver<'idx> {
     pub fn new(view: &'idx IndexView) -> Self {
         Self { view }
@@ -227,54 +276,31 @@ impl<'idx> TypeResolver<'idx> {
         &self,
         receiver_internal: &str,
         method_name: &str,
-        arg_count: i32,
+        arg_count: usize,
         arg_types: &[TypeName],
     ) -> Option<TypeName> {
-        self.resolve_method_return_with_callsite(
-            receiver_internal,
-            method_name,
-            arg_count,
-            arg_types,
-            &[],
-            &[],
-            None,
-        )
-    }
-
-    pub fn resolve_method_return_with_callsite(
-        &self,
-        receiver_internal: &str,
-        method_name: &str,
-        arg_count: i32,
-        arg_types: &[TypeName],
-        arg_texts: &[String],
-        locals: &[LocalVar],
-        enclosing: Option<&Arc<str>>,
-    ) -> Option<TypeName> {
+        let args = CallArgs::new(arg_count, arg_types, &[]);
         self.resolve_method_return_with_callsite_and_qualifier_resolver(
             receiver_internal,
             method_name,
-            arg_count,
-            arg_types,
-            arg_texts,
-            locals,
-            enclosing,
-            None,
+            args,
+            EvalContext::default(),
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn resolve_method_return_with_callsite_and_qualifier_resolver(
         &self,
         receiver_internal: &str,
         method_name: &str,
-        arg_count: i32,
-        arg_types: &[TypeName],
-        arg_texts: &[String],
-        locals: &[LocalVar],
-        enclosing: Option<&Arc<str>>,
-        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        args: CallArgs,
+        ctx: EvalContext,
     ) -> Option<TypeName> {
+        let CallArgs {
+            types: arg_types,
+            count: arg_count,
+            texts: arg_texts,
+        } = args;
+
         tracing::debug!(
             receiver_internal,
             method_name,
@@ -301,28 +327,21 @@ impl<'idx> TypeResolver<'idx> {
                 selected.method,
                 class.internal_name.as_ref(),
                 class.generic_signature.as_deref(),
-                arg_types,
-                arg_texts,
-                locals,
-                enclosing,
-                qualifier_resolver,
+                args,
+                ctx,
             );
         }
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn resolve_selected_method_return_with_callsite_and_qualifier_resolver(
         &self,
         receiver_internal: &str,
         method: &MethodSummary,
         owner_internal: &str,
         class_generic_signature: Option<&str>,
-        arg_types: &[TypeName],
-        arg_texts: &[String],
-        locals: &[LocalVar],
-        enclosing: Option<&Arc<str>>,
-        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        args: CallArgs,
+        ctx: EvalContext,
     ) -> Option<TypeName> {
         let sig = method
             .generic_signature
@@ -339,11 +358,8 @@ impl<'idx> TypeResolver<'idx> {
             &ret_jvm_type,
             receiver_internal,
             class_generic_signature,
-            arg_types,
-            arg_texts,
-            locals,
-            enclosing,
-            qualifier_resolver,
+            args,
+            ctx,
         );
         if !method_bindings.is_empty() {
             resolved_ret = substitute_type_vars(&resolved_ret, &method_bindings);
@@ -448,12 +464,20 @@ impl<'idx> TypeResolver<'idx> {
         ret_jvm_type: &JvmType,
         receiver_internal: &str,
         class_generic_signature: Option<&str>,
-        arg_types: &[TypeName],
-        arg_texts: &[String],
-        locals: &[LocalVar],
-        enclosing: Option<&Arc<str>>,
-        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        args: CallArgs,
+        ctx: EvalContext,
     ) -> HashMap<String, JvmType> {
+        let CallArgs {
+            types: arg_types,
+            texts: arg_texts,
+            ..
+        } = args;
+        let EvalContext {
+            enclosing,
+            locals,
+            qualifier_resolver,
+        } = ctx;
+
         let method_type_params = parse_method_type_parameters(method_signature);
         if method_type_params.is_empty() {
             return HashMap::new();
@@ -476,12 +500,9 @@ impl<'idx> TypeResolver<'idx> {
             selected,
             usize::MAX,
             OverloadInvocationMode::Fixed,
-            arg_types,
-            arg_texts,
-            locals,
-            enclosing,
-            qualifier_resolver,
+            args,
         );
+
         let mut conflicted = HashSet::new();
 
         for (idx, param_ty) in param_jvm_types.iter().enumerate() {
@@ -529,7 +550,6 @@ impl<'idx> TypeResolver<'idx> {
         bindings
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn bind_return_type_var_from_functional_param(
         &self,
         _method_name: &str,
@@ -539,7 +559,7 @@ impl<'idx> TypeResolver<'idx> {
         arg_ty: Option<&TypeName>,
         locals: &[LocalVar],
         enclosing: Option<&Arc<str>>,
-        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        qualifier_resolver: Option<QualifierResolver>,
         return_type_vars: &HashSet<String>,
         bindings: &mut HashMap<String, JvmType>,
         conflicted: &mut HashSet<String>,
@@ -568,9 +588,7 @@ impl<'idx> TypeResolver<'idx> {
                 arg_text.and_then(|txt| {
                     self.infer_functional_arg_return_shallow(
                         txt,
-                        locals,
-                        enclosing,
-                        qualifier_resolver,
+                        EvalContext::new(locals, enclosing).with_qualifier(qualifier_resolver),
                         Some(param_ty),
                     )
                 })
@@ -583,11 +601,15 @@ impl<'idx> TypeResolver<'idx> {
     fn infer_functional_arg_return_shallow(
         &self,
         arg_text: &str,
-        locals: &[LocalVar],
-        enclosing: Option<&Arc<str>>,
-        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        ctx: EvalContext,
         target_param_ty: Option<&JvmType>,
     ) -> Option<JvmType> {
+        let EvalContext {
+            enclosing,
+            locals,
+            qualifier_resolver,
+        } = ctx;
+
         let text = arg_text.trim();
         if text.is_empty() {
             return None;
@@ -799,7 +821,7 @@ impl<'idx> TypeResolver<'idx> {
     fn resolve_owner_from_text_with_context(
         &self,
         raw: &str,
-        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        qualifier_resolver: Option<QualifierResolver>,
     ) -> Option<String> {
         if let Some(resolve_qualifier) = qualifier_resolver
             && let Some(ty) = resolve_qualifier(raw)
@@ -817,7 +839,7 @@ impl<'idx> TypeResolver<'idx> {
     pub fn select_overload<'a>(
         &self,
         candidates: &[&'a MethodSummary],
-        arg_count: i32,
+        arg_count: usize,
         arg_types: &[TypeName],
     ) -> Option<&'a MethodSummary> {
         self.select_overload_match(candidates, arg_count, arg_types)
@@ -827,7 +849,7 @@ impl<'idx> TypeResolver<'idx> {
     pub fn select_overload_match<'a>(
         &self,
         candidates: &[&'a MethodSummary],
-        arg_count: i32,
+        arg_count: usize,
         arg_types: &[TypeName],
     ) -> Option<OverloadMatch<'a>> {
         tracing::debug!(?candidates, ?arg_types, arg_count, "select_overload_match");
@@ -836,8 +858,7 @@ impl<'idx> TypeResolver<'idx> {
             return None;
         }
 
-        let call_arg_count = normalize_call_arg_count(arg_count, arg_types);
-        let normalized_args = normalize_arg_types(call_arg_count, arg_types);
+        let normalized_args = normalize_arg_types(arg_count, arg_types);
 
         let mut best: Option<OverloadMatch<'a>> = None;
         for method in candidates.iter().copied() {
@@ -877,14 +898,11 @@ impl<'idx> TypeResolver<'idx> {
                 if seg.arg_count.is_some() {
                     // Bare method call: receiver is the enclosing class
                     let recv = enclosing_internal_name?;
-                    current_type = self.resolve_method_return_with_callsite(
+                    current_type = self.resolve_method_return_with_callsite_and_qualifier_resolver(
                         recv.as_ref(),
                         &seg.name,
-                        seg.arg_count.unwrap_or(-1),
-                        &seg.arg_types,
-                        &seg.arg_texts,
-                        locals,
-                        enclosing_internal_name,
+                        CallArgs::new(seg.arg_count.unwrap_or(0), &seg.arg_types, &seg.arg_texts),
+                        EvalContext::new(locals, enclosing_internal_name),
                     );
                 } else {
                     current_type = self.resolve(&seg.name, locals, enclosing_internal_name);
@@ -910,14 +928,14 @@ impl<'idx> TypeResolver<'idx> {
 
                 if seg.arg_count.is_some() {
                     let receiver_internal = receiver.to_internal_with_generics();
-                    current_type = self.resolve_method_return_with_callsite(
+                    let args =
+                        CallArgs::new(seg.arg_count.unwrap_or(0), &seg.arg_types, &seg.arg_texts);
+                    let ctx = EvalContext::new(locals, enclosing_internal_name);
+                    current_type = self.resolve_method_return_with_callsite_and_qualifier_resolver(
                         &receiver_internal,
                         actual_name,
-                        seg.arg_count.unwrap_or(-1),
-                        &seg.arg_types,
-                        &seg.arg_texts,
-                        locals,
-                        enclosing_internal_name,
+                        args,
+                        ctx,
                     );
                 } else {
                     let mut found_field: Option<TypeName> = None;
@@ -991,18 +1009,14 @@ impl<'idx> TypeResolver<'idx> {
         Some((param.to_type_name(), exact))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn resolve_selected_param_type_with_callsite_inference(
         &self,
         receiver_internal: &str,
         selected: &MethodSummary,
         arg_index: usize,
         mode: OverloadInvocationMode,
-        arg_types: &[TypeName],
-        arg_texts: &[String],
-        locals: &[LocalVar],
-        enclosing: Option<&Arc<str>>,
-        qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        args: CallArgs,
+        _ctx: EvalContext,
     ) -> Option<(TypeName, bool)> {
         let sig = selected.generic_signature.as_deref()?;
         let (params, _) = parse_method_signature_types(sig)?;
@@ -1015,11 +1029,7 @@ impl<'idx> TypeResolver<'idx> {
             selected,
             arg_index,
             mode,
-            arg_types,
-            arg_texts,
-            locals,
-            enclosing,
-            qualifier_resolver,
+            args,
         );
 
         let mut param = params.get(mapped_index)?.clone();
@@ -1089,7 +1099,6 @@ impl<'idx> TypeResolver<'idx> {
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn infer_method_type_bindings_from_non_lambda_args(
         &self,
         method_signature: &str,
@@ -1098,12 +1107,15 @@ impl<'idx> TypeResolver<'idx> {
         selected: &MethodSummary,
         skip_arg_index: usize,
         mode: OverloadInvocationMode,
-        arg_types: &[TypeName],
-        arg_texts: &[String],
-        _locals: &[LocalVar],
-        _enclosing: Option<&Arc<str>>,
-        _qualifier_resolver: Option<&dyn Fn(&str) -> Option<TypeName>>,
+        args: CallArgs,
     ) -> HashMap<String, JvmType> {
+        let CallArgs {
+            count: arg_count,
+            types: arg_types,
+            texts: arg_texts,
+        } = args;
+        let arg_texts = arg_texts.to_vec();
+
         let method_type_params = parse_method_type_parameters(method_signature);
         if method_type_params.is_empty() {
             return HashMap::new();
@@ -1120,7 +1132,7 @@ impl<'idx> TypeResolver<'idx> {
         let mut bindings: HashMap<String, JvmType> = HashMap::new();
         let mut conflicted = HashSet::new();
 
-        for arg_idx in 0..arg_texts.len() {
+        for arg_idx in 0..arg_count {
             if arg_idx == skip_arg_index {
                 continue;
             }
@@ -1483,14 +1495,6 @@ fn is_widening_primitive(source: &str, target: &str) -> bool {
     )
 }
 
-fn normalize_call_arg_count(arg_count: i32, arg_types: &[TypeName]) -> usize {
-    if arg_count >= 0 {
-        arg_count as usize
-    } else {
-        arg_types.len()
-    }
-}
-
 pub(crate) fn primitive_wrapper_type_name(primitive: &str) -> Option<&'static str> {
     match primitive {
         "boolean" => Some("java/lang/Boolean"),
@@ -1832,7 +1836,7 @@ pub struct ChainSegment {
     /// Variable name or method name
     pub name: String,
     /// If it's a method call, specify the number of arguments; if it's a field/variable, specify None.
-    pub arg_count: Option<i32>,
+    pub arg_count: Option<usize>,
     /// Inferred types of arguments (internal names), used for overload resolution.
     pub arg_types: Vec<TypeName>,
     pub arg_texts: Vec<String>, // raw text of each argument
@@ -1847,7 +1851,8 @@ impl ChainSegment {
             arg_texts: vec![],
         }
     }
-    pub fn method(name: impl Into<String>, arg_count: i32) -> Self {
+
+    pub fn method(name: impl Into<String>, arg_count: usize) -> Self {
         Self {
             name: name.into(),
             arg_count: Some(arg_count),
@@ -1855,9 +1860,10 @@ impl ChainSegment {
             arg_texts: vec![],
         }
     }
+
     pub fn method_with_types(
         name: impl Into<String>,
-        arg_count: i32,
+        arg_count: usize,
         arg_types: Vec<TypeName>,
         arg_texts: Vec<String>,
     ) -> Self {
@@ -3073,9 +3079,7 @@ mod tests {
 
         let inferred = resolver.infer_functional_arg_return_shallow(
             "s -> s.length()",
-            &[],
-            None,
-            None,
+            EvalContext::default(),
             Some(&target),
         );
         assert_eq!(
@@ -3086,9 +3090,7 @@ mod tests {
             resolver
                 .infer_functional_arg_return_shallow(
                     "s -> new StringBuilder(s)",
-                    &[],
-                    None,
-                    None,
+                    EvalContext::default(),
                     Some(&target)
                 )
                 .map(|t| t.to_signature_string()),
@@ -3178,7 +3180,7 @@ mod tests {
             .map(|m| m.as_ref())
             .collect();
         let selected = resolver
-            .select_overload(&map_candidates, map_seg.arg_count.unwrap_or(-1), &[])
+            .select_overload(&map_candidates, map_seg.arg_count.unwrap_or(0), &[])
             .expect("selected map overload");
         let selected_sig = selected
             .generic_signature
@@ -3191,8 +3193,11 @@ mod tests {
         let mut return_type_vars_sorted: Vec<_> = return_type_vars.iter().cloned().collect();
         return_type_vars_sorted.sort();
 
-        let inferred_direct =
-            resolver.infer_functional_arg_return_shallow("List::size", &locals, None, None, None);
+        let inferred_direct = resolver.infer_functional_arg_return_shallow(
+            "List::size",
+            EvalContext::new(&locals, None),
+            None,
+        );
         let inferred_bindings = resolver.infer_method_type_bindings_shallow(
             selected,
             &selected_sig,
@@ -3202,11 +3207,8 @@ mod tests {
             view.get_class(receiver.erased_internal())
                 .and_then(|c| c.generic_signature.clone())
                 .as_deref(),
-            &[],
-            &map_seg.arg_texts,
-            &locals,
-            None,
-            None,
+            CallArgs::new(map_seg.arg_count.unwrap_or(0), &[], &map_seg.arg_texts),
+            EvalContext::new(&locals, None),
         );
         let mut inferred_bindings_sorted: Vec<_> = inferred_bindings
             .iter()
@@ -3214,14 +3216,11 @@ mod tests {
             .collect();
         inferred_bindings_sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let map_result = resolver.resolve_method_return_with_callsite(
+        let map_result = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
             &receiver_internal,
             "map",
-            map_seg.arg_count.unwrap_or(-1),
-            &[],
-            &map_seg.arg_texts,
-            &locals,
-            None,
+            CallArgs::new(map_seg.arg_count.unwrap_or(0), &[], &map_seg.arg_texts),
+            EvalContext::new(&locals, None),
         );
         let get_receiver = map_result
             .as_ref()
@@ -3229,14 +3228,11 @@ mod tests {
             .unwrap_or_else(|| "<none>".to_string());
         let get_result = map_result.as_ref().and_then(|r| {
             let get_receiver_internal = r.to_internal_with_generics();
-            resolver.resolve_method_return_with_callsite(
+            resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                 &get_receiver_internal,
                 "get",
-                0,
-                &[],
-                &[],
-                &locals,
-                None,
+                CallArgs::new(0, &[], &[]),
+                EvalContext::new(&locals, None),
             )
         });
         let chain_result = resolver.resolve_chain(&chain, &locals, None);
@@ -3307,7 +3303,7 @@ mod tests {
                 .map(|m| m.as_ref())
                 .collect();
             let selected_map = resolver
-                .select_overload(&map_candidates, map_seg.arg_count.unwrap_or(-1), &[])
+                .select_overload(&map_candidates, map_seg.arg_count.unwrap_or(0), &[])
                 .expect("selected map");
             let map_sig = selected_map
                 .generic_signature
@@ -3323,9 +3319,7 @@ mod tests {
 
             let inferred_functional_ret = resolver.infer_functional_arg_return_shallow(
                 functional_arg,
-                &locals,
-                None,
-                None,
+                EvalContext::new(&locals, None),
                 None,
             );
             let bindings = resolver.infer_method_type_bindings_shallow(
@@ -3337,11 +3331,8 @@ mod tests {
                 view.get_class(receiver.erased_internal())
                     .and_then(|c| c.generic_signature.clone())
                     .as_deref(),
-                &[],
-                &map_seg.arg_texts,
-                &locals,
-                None,
-                None,
+                CallArgs::new(0, &[], &map_seg.arg_texts),
+                EvalContext::new(&locals, None),
             );
             let mut bindings_sorted: Vec<_> = bindings
                 .iter()
@@ -3349,28 +3340,22 @@ mod tests {
                 .collect();
             bindings_sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
-            let map_result = resolver.resolve_method_return_with_callsite(
+            let map_result = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                 &receiver_internal,
                 "map",
-                map_seg.arg_count.unwrap_or(-1),
-                &[],
-                &map_seg.arg_texts,
-                &locals,
-                None,
+                CallArgs::new(map_seg.arg_count.unwrap_or(0), &[], &map_seg.arg_texts),
+                EvalContext::new(&locals, None),
             );
             let get_receiver = map_result
                 .as_ref()
                 .map(TypeName::to_internal_with_generics)
                 .unwrap_or_else(|| "<none>".to_string());
             let get_result = map_result.as_ref().and_then(|r| {
-                resolver.resolve_method_return_with_callsite(
+                resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
                     &r.to_internal_with_generics(),
                     "get",
-                    0,
-                    &[],
-                    &[],
-                    &locals,
-                    None,
+                    CallArgs::default(),
+                    EvalContext::new(&locals, None),
                 )
             });
             let chain_result = resolver.resolve_chain(&chain, &locals, None);

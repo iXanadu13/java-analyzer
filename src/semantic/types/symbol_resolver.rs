@@ -112,7 +112,7 @@ impl<'a> SymbolResolver<'a> {
             let arg_count = if arg_text.trim().is_empty() {
                 0
             } else {
-                arg_texts.len() as i32
+                arg_texts.len()
             };
 
             let resolver = TypeResolver::new(self.view);

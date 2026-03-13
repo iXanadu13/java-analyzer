@@ -47,7 +47,7 @@ pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<ChainSegment> {
                     let arg_count = if arg_texts.is_empty() {
                         0
                     } else {
-                        arg_texts.len() as i32
+                        arg_texts.len()
                     };
                     segments.push(ChainSegment::method_with_types(
                         method_name,
@@ -131,7 +131,7 @@ fn extract_method_name(head: &str) -> &str {
 mod tests {
     use crate::completion::parser::parse_chain_from_expr;
 
-    fn seg_names(expr: &str) -> Vec<(String, Option<i32>)> {
+    fn seg_names(expr: &str) -> Vec<(String, Option<usize>)> {
         parse_chain_from_expr(expr)
             .into_iter()
             .map(|s| (s.name, s.arg_count))
@@ -140,7 +140,6 @@ mod tests {
 
     #[test]
     fn test_chain_multi_dimensional_array() {
-        // 测试解析 m.arr[0][0] 是否被正确切割
         let segments = parse_chain_from_expr("m.arr[0][1]");
         let names: Vec<String> = segments.into_iter().map(|s| s.name).collect();
         assert_eq!(

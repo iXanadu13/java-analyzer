@@ -25,7 +25,7 @@ pub enum ReloadReason {
     Manual,
 }
 
-enum ReloadCommand {
+pub enum ReloadCommand {
     Trigger(ReloadReason),
 }
 
@@ -50,16 +50,16 @@ impl BuildIntegrationService {
         let status = Arc::new(RwLock::new(BuildIntegrationStatus::default()));
         let watch_interest = Arc::new(RwLock::new(None));
 
-        tokio::spawn(run_reload_loop(
-            root.clone(),
+        tokio::spawn(run_reload_loop(RunReloadLoopRequest {
+            root: root.clone(),
             workspace,
             client,
-            registry.clone(),
+            registry: registry.clone(),
             java_home,
             rx,
-            Arc::clone(&status),
-            Arc::clone(&watch_interest),
-        ));
+            status: status.clone(),
+            watch_interest: watch_interest.clone(),
+        }));
 
         Self {
             root,
@@ -99,16 +99,29 @@ impl BuildIntegrationService {
     }
 }
 
-async fn run_reload_loop(
-    root: PathBuf,
-    workspace: Arc<Workspace>,
-    client: Client,
-    registry: BuildToolRegistry,
-    java_home: Option<PathBuf>,
-    mut rx: mpsc::UnboundedReceiver<ReloadCommand>,
-    status: Arc<RwLock<BuildIntegrationStatus>>,
-    watch_interest: Arc<RwLock<Option<BuildWatchInterest>>>,
-) {
+pub struct RunReloadLoopRequest {
+    pub root: PathBuf,
+    pub workspace: Arc<Workspace>,
+    pub client: Client,
+    pub registry: BuildToolRegistry,
+    pub java_home: Option<PathBuf>,
+    pub rx: mpsc::UnboundedReceiver<ReloadCommand>,
+    pub status: Arc<RwLock<BuildIntegrationStatus>>,
+    pub watch_interest: Arc<RwLock<Option<BuildWatchInterest>>>,
+}
+
+async fn run_reload_loop(req: RunReloadLoopRequest) {
+    let RunReloadLoopRequest {
+        root,
+        workspace,
+        client,
+        registry,
+        java_home,
+        mut rx,
+        status,
+        watch_interest,
+    } = req;
+
     let mut generation = 0_u64;
     let mut dirty = false;
     let mut debounce: Option<tokio::time::Instant> = None;

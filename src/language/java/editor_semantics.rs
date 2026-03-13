@@ -15,8 +15,8 @@ use crate::semantic::context::{
 };
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::types::{
-    ContextualResolver, OverloadInvocationMode, TypeResolver, parse_single_type_to_internal,
-    singleton_descriptor_to_type,
+    CallArgs, ContextualResolver, EvalContext, OverloadInvocationMode, TypeResolver,
+    parse_single_type_to_internal, singleton_descriptor_to_type,
 };
 use crate::semantic::{LocalVar, SemanticContext};
 use crate::{
@@ -74,11 +74,8 @@ impl ResolvedJavaCall {
                 &self.method,
                 arg_index,
                 self.invocation_mode,
-                &self.arg_types,
-                &self.arg_texts,
-                locals,
-                enclosing,
-                None,
+                CallArgs::new(self.arg_types.len(), &self.arg_types, &self.arg_texts),
+                EvalContext::new(locals, enclosing),
             )
             .map(|(ty, exact)| {
                 (
@@ -369,7 +366,7 @@ fn resolve_selected_call(
     let (selected_name, selected_desc, selected_mode) = {
         let selected = resolver.select_overload_match(
             &candidate_refs,
-            arg_texts.len() as i32,
+            arg_texts.len(),
             &selection_arg_types,
         )?;
         (
