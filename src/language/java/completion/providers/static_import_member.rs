@@ -2,7 +2,10 @@ use rust_asm::constants::ACC_STATIC;
 use std::sync::Arc;
 
 use crate::{
-    completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
+    completion::{
+        CandidateKind, CompletionCandidate,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{ClassMetadata, IndexScope, IndexView},
     language::java::render,
     semantic::{
@@ -23,15 +26,16 @@ impl CompletionProvider for StaticImportMemberProvider {
         scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         if ctx.static_imports.is_empty() {
-            return vec![];
+            return ProviderCompletionResult::default();
         }
         let query_lower = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.to_lowercase(),
             CursorLocation::MethodArgument { prefix } => prefix.to_lowercase(),
             CursorLocation::Unknown => ctx.query.to_lowercase(),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
 
         let mut results = Vec::new();
@@ -78,7 +82,7 @@ impl CompletionProvider for StaticImportMemberProvider {
             }
         }
 
-        results
+        results.into()
     }
 }
 
@@ -295,8 +299,9 @@ mod tests {
     fn test_wildcard_static_import_provides_all_static_members() {
         let idx = math_index();
         let ctx = expr_ctx("", vec![Arc::from("java.lang.Math.*")]);
-        let results =
-            StaticImportMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticImportMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"abs"), "abs should appear: {:?}", labels);
         assert!(labels.contains(&"pow"), "pow should appear: {:?}", labels);
@@ -307,8 +312,9 @@ mod tests {
     fn test_wildcard_static_import_filters_by_prefix() {
         let idx = math_index();
         let ctx = expr_ctx("ab", vec![Arc::from("java.lang.Math.*")]);
-        let results =
-            StaticImportMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticImportMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"abs"), "abs should match prefix 'ab'");
         assert!(!labels.contains(&"pow"), "pow should not match 'ab'");
@@ -318,8 +324,9 @@ mod tests {
     fn test_specific_static_import_provides_named_member() {
         let idx = math_index();
         let ctx = expr_ctx("", vec![Arc::from("java.lang.Math.abs")]);
-        let results =
-            StaticImportMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticImportMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             labels.contains(&"abs"),
@@ -337,7 +344,8 @@ mod tests {
         let ctx = expr_ctx("ab", vec![]);
         assert!(
             StaticImportMemberProvider
-                .provide(root_scope(), &ctx, &idx.view(root_scope()))
+                .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+                .candidates
                 .is_empty()
         );
     }
@@ -359,7 +367,8 @@ mod tests {
         .with_static_imports(vec![Arc::from("java.lang.Math.*")]);
         assert!(
             StaticImportMemberProvider
-                .provide(root_scope(), &ctx, &idx.view(root_scope()))
+                .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+                .candidates
                 .is_empty()
         );
     }

@@ -1,5 +1,8 @@
 use crate::{
-    completion::{CompletionCandidate, candidate::ReplacementMode, provider::CompletionProvider},
+    completion::{
+        candidate::ReplacementMode,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
@@ -16,10 +19,12 @@ impl CompletionProvider for ImportProvider {
         scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
+        // TODO: limit results
         let prefix = match &ctx.location {
             CursorLocation::Import { prefix } => prefix.as_str(),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
         crate::completion::import_completion::candidates_for_import(prefix, scope, index)
             .into_iter()
@@ -28,7 +33,8 @@ impl CompletionProvider for ImportProvider {
                 c.with_replacement_mode(ReplacementMode::ImportPath)
                     .with_filter_text(filter_text)
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 
@@ -108,7 +114,12 @@ mod tests {
             None,
             vec![],
         );
-        assert!(ImportProvider.provide(scope, &ctx, &view).is_empty());
+        assert!(
+            ImportProvider
+                .provide(scope, &ctx, &view, None)
+                .candidates
+                .is_empty()
+        );
     }
 
     #[test]
@@ -117,7 +128,9 @@ mod tests {
         let scope = IndexScope {
             module: ModuleId::ROOT,
         };
-        let results = ImportProvider.provide(scope, &import_ctx("org.cubewhy.Ma"), &view);
+        let results = ImportProvider
+            .provide(scope, &import_ctx("org.cubewhy.Ma"), &view, None)
+            .candidates;
         assert!(
             results
                 .iter()

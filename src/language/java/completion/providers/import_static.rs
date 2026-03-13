@@ -3,7 +3,10 @@ use std::sync::Arc;
 use rust_asm::constants::ACC_STATIC;
 
 use crate::{
-    completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
+    completion::{
+        CandidateKind, CompletionCandidate, import_completion,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{ClassMetadata, IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
@@ -20,10 +23,11 @@ impl CompletionProvider for ImportStaticProvider {
         scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         let prefix = match &ctx.location {
             CursorLocation::ImportStatic { prefix } => prefix.as_str(),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
 
         if let Some(dot_pos) = prefix.rfind('.') {
@@ -37,11 +41,12 @@ impl CompletionProvider for ImportStaticProvider {
                     &class_internal,
                     member_prefix,
                     self.name(),
-                );
+                )
+                .into();
             }
         }
 
-        crate::completion::import_completion::candidates_for_import(prefix, scope, index)
+        import_completion::candidates_for_import(prefix, scope, index).into()
     }
 }
 
@@ -229,7 +234,8 @@ mod tests {
         );
         assert!(
             ImportStaticProvider
-                .provide(root_scope(), &ctx, &idx.view(root_scope()))
+                .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+                .candidates
                 .is_empty()
         );
     }
@@ -239,7 +245,9 @@ mod tests {
         let idx = math_index();
         // "java.lang.Ma" - Not yet at the Math layer, should go through candidates_for_import
         let ctx = import_static_ctx("java.lang.Ma");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ImportStaticProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref().contains("Math")),
             "should suggest Math at class path stage: {:?}",
@@ -252,7 +260,9 @@ mod tests {
         let idx = math_index();
         // "java.lang.Math." - Empty member prefix, returns all static members
         let ctx = import_static_ctx("java.lang.Math.");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ImportStaticProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"abs"), "abs should appear: {:?}", labels);
         assert!(labels.contains(&"pow"), "pow should appear: {:?}", labels);
@@ -263,7 +273,9 @@ mod tests {
     fn test_member_stage_filters_by_prefix() {
         let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.a");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ImportStaticProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"abs"), "abs should match prefix 'a'");
         assert!(!labels.contains(&"pow"), "pow should not match 'a'");
@@ -277,7 +289,9 @@ mod tests {
     fn test_member_stage_prefix_case_insensitive() {
         let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.p");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ImportStaticProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"pow"), "pow should match prefix 'p'");
         assert!(
@@ -290,7 +304,9 @@ mod tests {
     fn test_member_stage_excludes_non_static() {
         let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ImportStaticProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             !labels.contains(&"instanceMethod"),
@@ -308,7 +324,9 @@ mod tests {
     fn test_member_stage_no_init_methods() {
         let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ImportStaticProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results
                 .iter()
@@ -322,7 +340,9 @@ mod tests {
         // Parentheses should not be added when completing import static.
         let idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ImportStaticProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let method = results.iter().find(|c| c.label.as_ref() == "abs").unwrap();
         assert_eq!(
             method.insert_text, "abs",
@@ -337,6 +357,8 @@ mod tests {
         // you should call candidates_for_import (which returns an empty string or the package path).
         let ctx = import_static_ctx("com.example.Unknown.");
         // No panic, no crash.
-        let _results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let _results = ImportStaticProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
     }
 }

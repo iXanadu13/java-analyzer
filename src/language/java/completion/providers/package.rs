@@ -1,5 +1,8 @@
 use crate::{
-    completion::{CompletionCandidate, candidate::ReplacementMode, provider::CompletionProvider},
+    completion::{
+        candidate::ReplacementMode,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
@@ -44,7 +47,8 @@ impl CompletionProvider for PackageProvider {
         scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         match &ctx.location {
             CursorLocation::Import { prefix } => {
                 crate::completion::import_completion::candidates_for_import(prefix, scope, index)
@@ -54,11 +58,12 @@ impl CompletionProvider for PackageProvider {
                         c.with_replacement_mode(ReplacementMode::ImportPath)
                             .with_filter_text(filter_text)
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
+                    .into()
             }
             CursorLocation::Expression { prefix } | CursorLocation::TypeAnnotation { prefix } => {
                 if !prefix.contains('.') {
-                    return vec![];
+                    return ProviderCompletionResult::default();
                 }
                 crate::completion::import_completion::candidates_for_import(prefix, scope, index)
                     .into_iter()
@@ -67,7 +72,8 @@ impl CompletionProvider for PackageProvider {
                         c.with_replacement_mode(ReplacementMode::PackagePath)
                             .with_filter_text(filter_text)
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
+                    .into()
             }
             CursorLocation::MemberAccess {
                 receiver_expr,
@@ -75,7 +81,7 @@ impl CompletionProvider for PackageProvider {
                 ..
             } => {
                 if receiver_expr.trim().is_empty() {
-                    return vec![];
+                    return ProviderCompletionResult::default();
                 }
                 if !receiver_expr.contains('.')
                     && receiver_expr
@@ -83,7 +89,7 @@ impl CompletionProvider for PackageProvider {
                         .next()
                         .is_some_and(|c| c.is_uppercase())
                 {
-                    return vec![];
+                    return ProviderCompletionResult::default();
                 }
                 let full_prefix = if member_prefix.is_empty() {
                     format!("{}.", receiver_expr)
@@ -101,9 +107,10 @@ impl CompletionProvider for PackageProvider {
                     c.with_replacement_mode(ReplacementMode::MemberSegment)
                         .with_filter_text(filter_text)
                 })
-                .collect()
+                .collect::<Vec<_>>()
+                .into()
             }
-            _ => vec![],
+            _ => ProviderCompletionResult::default(),
         }
     }
 }
@@ -192,7 +199,9 @@ mod tests {
         let scope = IndexScope {
             module: ModuleId::ROOT,
         };
-        let results = PackageProvider.provide(scope, &import_ctx("org"), &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(scope, &import_ctx("org"), &idx.view(root_scope()), None)
+            .candidates;
         let org = results.iter().find(|c| c.label.as_ref() == "org.");
         assert!(
             org.is_some(),
@@ -205,16 +214,23 @@ mod tests {
     #[test]
     fn test_expression_no_dot_no_package_completion() {
         let idx = make_index();
-        let results =
-            PackageProvider.provide(root_scope(), &expr_ctx("Main"), &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &expr_ctx("Main"),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         assert!(results.is_empty(), "no dot = no package completion");
     }
 
     #[test]
     fn test_empty_prefix_no_crash() {
         let idx = make_index();
-        let results =
-            PackageProvider.provide(root_scope(), &import_ctx(""), &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(root_scope(), &import_ctx(""), &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.is_empty());
     }
 
@@ -237,7 +253,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.is_empty(),
             "String.| should not trigger package completion"
@@ -292,8 +310,14 @@ mod tests {
     #[test]
     fn test_top_level_package_label_has_dot() {
         let idx = make_index();
-        let results =
-            PackageProvider.provide(root_scope(), &import_ctx("org"), &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("org"),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let org = results.iter().find(|c| c.label.as_ref() == "org.").unwrap();
         assert_eq!(org.insert_text, "org.");
     }
@@ -301,11 +325,14 @@ mod tests {
     #[test]
     fn test_import_pkg_dot_lists_classes() {
         let idx = make_index();
-        let results = PackageProvider.provide(
-            root_scope(),
-            &import_ctx("org.cubewhy."),
-            &idx.view(root_scope()),
-        );
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("org.cubewhy."),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.Main"), "{:?}", labels);
         assert!(labels.contains(&"org.cubewhy.Main2"), "{:?}", labels);
@@ -314,11 +341,14 @@ mod tests {
     #[test]
     fn test_import_pkg_dot_lists_sub_packages() {
         let idx = make_index();
-        let results = PackageProvider.provide(
-            root_scope(),
-            &import_ctx("org.cubewhy."),
-            &idx.view(root_scope()),
-        );
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("org.cubewhy."),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.utils."), "{:?}", labels);
     }
@@ -326,11 +356,14 @@ mod tests {
     #[test]
     fn test_import_pkg_with_name_prefix() {
         let idx = make_index();
-        let results = PackageProvider.provide(
-            root_scope(),
-            &import_ctx("org.cubewhy.Ma"),
-            &idx.view(root_scope()),
-        );
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("org.cubewhy.Ma"),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.Main"), "{:?}", labels);
         assert!(labels.contains(&"org.cubewhy.Main2"), "{:?}", labels);
@@ -340,11 +373,14 @@ mod tests {
     #[test]
     fn test_import_insert_text_is_fqn() {
         let idx = make_index();
-        let results = PackageProvider.provide(
-            root_scope(),
-            &import_ctx("org.cubewhy.Ma"),
-            &idx.view(root_scope()),
-        );
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("org.cubewhy.Ma"),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let main = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.Main")
@@ -355,11 +391,14 @@ mod tests {
     #[test]
     fn test_sub_package_insert_text_ends_with_dot() {
         let idx = make_index();
-        let results = PackageProvider.provide(
-            root_scope(),
-            &import_ctx("org.cubewhy."),
-            &idx.view(root_scope()),
-        );
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("org.cubewhy."),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let utils = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.utils.")
@@ -370,11 +409,14 @@ mod tests {
     #[test]
     fn test_sub_package_kind_is_package() {
         let idx = make_index();
-        let results = PackageProvider.provide(
-            root_scope(),
-            &import_ctx("org.cubewhy."),
-            &idx.view(root_scope()),
-        );
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("org.cubewhy."),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let utils = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.utils.")
@@ -385,8 +427,14 @@ mod tests {
     #[test]
     fn test_import_no_dot_returns_top_level_packages() {
         let idx = make_index();
-        let results =
-            PackageProvider.provide(root_scope(), &import_ctx("Main"), &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("Main"),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         // 大写开头不匹配包名，但现在 candidates_for_import 会匹配类名
         // PackageProvider 在 Import 场景下直接转发给 candidates_for_import
         // "Main" 大写开头 → 返回类，不返回包
@@ -400,11 +448,14 @@ mod tests {
     #[test]
     fn test_sub_package_label_is_full_path() {
         let idx = make_index();
-        let results = PackageProvider.provide(
-            root_scope(),
-            &import_ctx("org.cubewhy."),
-            &idx.view(root_scope()),
-        );
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &import_ctx("org.cubewhy."),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let utils = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.utils.")
@@ -415,19 +466,28 @@ mod tests {
     #[test]
     fn test_expression_with_dot_triggers() {
         let idx = make_index();
-        let results = PackageProvider.provide(
-            root_scope(),
-            &expr_ctx("org.cubewhy."),
-            &idx.view(root_scope()),
-        );
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &expr_ctx("org.cubewhy."),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         assert!(!results.is_empty(), "prefix with dot should trigger");
     }
 
     #[test]
     fn test_expression_no_dot_no_completion() {
         let idx = make_index();
-        let results =
-            PackageProvider.provide(root_scope(), &expr_ctx("Main"), &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(
+                root_scope(),
+                &expr_ctx("Main"),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         assert!(results.is_empty(), "no dot = no package completion");
     }
 
@@ -449,7 +509,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.is_empty(),
             "single uppercase segment should not trigger package completion"
@@ -475,7 +537,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let main = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.Main")
@@ -504,7 +568,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             !results.is_empty(),
             "org.cubewhy.| should trigger package completion: {:?}",
@@ -538,7 +604,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = PackageProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results
                 .iter()

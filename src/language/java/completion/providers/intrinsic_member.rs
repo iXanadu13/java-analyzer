@@ -1,4 +1,4 @@
-use crate::completion::provider::CompletionProvider;
+use crate::completion::provider::{CompletionProvider, ProviderCompletionResult};
 use crate::completion::{CandidateKind, CompletionCandidate, candidate::ReplacementMode};
 use crate::index::{IndexScope, IndexView};
 use crate::semantic::context::{JavaIntrinsicAccessKind, SemanticContext};
@@ -16,7 +16,8 @@ impl CompletionProvider for IntrinsicMemberProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         _index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         match ctx.java_intrinsic_access.as_ref().map(|a| a.kind) {
             Some(JavaIntrinsicAccessKind::ClassLiteral) => vec![
                 CompletionCandidate::new(
@@ -31,6 +32,7 @@ impl CompletionProvider for IntrinsicMemberProvider {
             ],
             _ => vec![],
         }
+        .into()
     }
 }
 
@@ -152,7 +154,9 @@ mod tests {
             Some(name_table),
         )));
         ContextEnricher::new(&view).enrich(&mut ctx);
-        let out = IntrinsicMemberProvider.provide(root_scope(), &ctx, &view);
+        let out = IntrinsicMemberProvider
+            .provide(root_scope(), &ctx, &view, None)
+            .candidates;
         (ctx, out)
     }
 

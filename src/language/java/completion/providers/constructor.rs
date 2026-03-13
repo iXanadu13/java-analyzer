@@ -25,27 +25,7 @@ impl CompletionProvider for ConstructorProvider {
 
     fn provide(
         &self,
-        scope: IndexScope,
-        ctx: &SemanticContext,
-        index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
-        self.provide_with_limit(scope, ctx, index, None).candidates
-    }
-
-    fn provide_with_limit(
-        &self,
         _scope: IndexScope,
-        ctx: &SemanticContext,
-        index: &IndexView,
-        limit: Option<usize>,
-    ) -> ProviderCompletionResult {
-        self.provide_internal(ctx, index, limit)
-    }
-}
-
-impl ConstructorProvider {
-    fn provide_internal(
-        &self,
         ctx: &SemanticContext,
         index: &IndexView,
         limit: Option<usize>,
@@ -452,7 +432,9 @@ mod tests {
     fn test_empty_prefix_returns_candidates() {
         let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             !results.is_empty(),
             "empty prefix should return constructor candidates"
@@ -463,7 +445,9 @@ mod tests {
     fn test_empty_prefix_includes_known_class() {
         let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "RandomClass"),
             "RandomClass should appear with empty prefix: {:?}",
@@ -471,13 +455,13 @@ mod tests {
         );
     }
 
-    // ── import logic (was inverted) ───────────────────────────────────────
-
     #[test]
     fn test_no_import_when_already_exact_imported() {
         let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.RandomClass".into()]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "should not add import when already imported: {:?}",
@@ -492,7 +476,9 @@ mod tests {
     fn test_no_import_when_wildcard_imported() {
         let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.*".into()]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "should not add import under wildcard: {:?}",
@@ -508,7 +494,9 @@ mod tests {
         let idx = make_index_with("org/cubewhy/a", "Helper", true);
         // enclosing package is org/cubewhy/a — same as Helper
         let ctx = make_ctx("Helper", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "same-package class should not need import: {:?}",
@@ -523,7 +511,9 @@ mod tests {
     fn test_generic_constructor_prefix_is_normalized_for_search() {
         let idx = make_index_with("org/cubewhy", "ArrayList", true);
         let ctx = make_ctx("ArrayList<String>", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "ArrayList"),
             "generic prefix should still match ArrayList: {:?}",
@@ -535,7 +525,9 @@ mod tests {
     fn test_non_generic_constructor_prefix_unchanged() {
         let idx = make_index_with("org/cubewhy", "ArrayList", true);
         let ctx = make_ctx("ArrayList", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "ArrayList"),
             "non-generic prefix should keep existing behavior: {:?}",
@@ -547,7 +539,9 @@ mod tests {
     fn test_import_added_when_not_imported() {
         let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results
                 .iter()
@@ -559,8 +553,6 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
-
-    // ── expected_type score boost ─────────────────────────────────────────
 
     #[test]
     fn test_expected_type_exact_match_scores_highest() {
@@ -593,7 +585,9 @@ mod tests {
 
         // expected_type = "String" → String should score higher than StringBuilder
         let ctx = make_ctx("S", Some("String"), vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
 
         let string_score = results
             .iter()
@@ -618,7 +612,9 @@ mod tests {
     fn test_no_expected_type_no_score_boost() {
         let idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         // score should be 0.0 (set by provider; Scorer adds on top in engine)
         assert!(
             results.iter().all(|c| c.score == 0.0),
@@ -672,7 +668,9 @@ mod tests {
                 Some(view.build_name_table()),
             )),
         );
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &view);
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &view, None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "BoxV"),
             "{:?}",
@@ -694,7 +692,9 @@ mod tests {
                 Some(view.build_name_table()),
             )),
         );
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &view);
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &view, None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Box"),
             "{:?}",
@@ -713,7 +713,9 @@ mod tests {
                 Some(view.build_name_table()),
             )),
         );
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &view);
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &view, None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "BoxV"),
             "{:?}",
@@ -744,7 +746,9 @@ mod tests {
                 Some(view.build_name_table()),
             ),
         ));
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &view);
+        let results = ConstructorProvider
+            .provide(root_scope(), &ctx, &view, None)
+            .candidates;
         assert!(
             results.iter().all(|c| c.label.as_ref() != "Box"),
             "{:?}",
@@ -784,21 +788,12 @@ mod tests {
         }]);
 
         let ctx = make_ctx("ArrayType", None, vec![]);
-        let limited = ConstructorProvider.provide_with_limit(
-            root_scope(),
-            &ctx,
-            &idx.view(root_scope()),
-            Some(5),
-        );
+        let limited =
+            ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()), Some(5));
         assert_eq!(limited.candidates.len(), 5);
         assert!(limited.is_incomplete);
 
-        let full = ConstructorProvider.provide_with_limit(
-            root_scope(),
-            &ctx,
-            &idx.view(root_scope()),
-            None,
-        );
+        let full = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()), None);
         assert!(
             full.candidates.len() >= 5,
             "unbounded path should not be capped"

@@ -1196,6 +1196,7 @@ fn is_object_method(name: &str, desc: &str) -> bool {
 mod tests {
     use super::*;
     use crate::completion::parser::parse_chain_from_expr;
+    use crate::completion::provider::CompletionProvider;
     use crate::index::ModuleId;
     use crate::index::{
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, WorkspaceIndex,
@@ -3397,7 +3398,8 @@ mod tests {
         );
 
         let add = MemberProvider
-            .provide(scope, &ctx, &view)
+            .provide(scope, &ctx, &view, None)
+            .candidates
             .into_iter()
             .find(|c| c.label.as_ref() == "add")
             .expect("add candidate should exist");
@@ -3411,7 +3413,6 @@ mod tests {
 
     #[test]
     fn test_nums_add_expected_type_and_detail_preserve_wildcard_structure() {
-        use crate::completion::provider::CompletionProvider;
         use crate::language::java::completion::providers::member::MemberProvider;
 
         let idx = make_index_with_list_add_box_for_expected_arg();
@@ -3482,7 +3483,7 @@ mod tests {
         );
 
         let provider = MemberProvider;
-        let results = provider.provide(scope, &ctx, &view);
+        let results = provider.provide(scope, &ctx, &view, None).candidates;
         let add = results
             .iter()
             .find(|c| c.label.as_ref() == "add")
@@ -3769,7 +3770,8 @@ mod tests {
             .with_extension(type_ctx);
             ContextEnricher::new(&view).enrich(&mut member_ctx);
             let add_detail_from_provider = MemberProvider
-                .provide(scope, &member_ctx, &view)
+                .provide(scope, &member_ctx, &view, None)
+                .candidates
                 .into_iter()
                 .find(|c| c.label.as_ref() == "add")
                 .and_then(|c| c.detail)
@@ -3938,7 +3940,8 @@ mod tests {
             .find(|lv| lv.name.as_ref() == "nums")
             .map(|lv| lv.type_internal.to_internal_with_generics());
         let nums_add_detail = MemberProvider
-            .provide(scope, &nums_ctx, &view)
+            .provide(scope, &nums_ctx, &view, None)
+            .candidates
             .into_iter()
             .find(|c| c.label.as_ref() == "add")
             .and_then(|c| c.detail)
@@ -3965,7 +3968,6 @@ mod tests {
 
     #[test]
     fn test_snapshot_wildcard_upper_bound_chain_lifting() {
-        use crate::completion::provider::CompletionProvider;
         use crate::language::java::completion::providers::member::MemberProvider;
 
         let idx = make_index_with_list_box_wildcard_chain();
@@ -4034,7 +4036,8 @@ mod tests {
                     .map(|s| s.to_string())
             });
         let member_labels: Vec<String> = MemberProvider
-            .provide(scope, &ctx, &view)
+            .provide(scope, &ctx, &view, None)
+            .candidates
             .into_iter()
             .map(|c| c.label.to_string())
             .collect();
@@ -4675,7 +4678,6 @@ mod tests {
 
     #[test]
     fn test_snapshot_chain_receiver_concretization_trim_and_constructor_new() {
-        use crate::completion::provider::CompletionProvider;
         use crate::language::java::completion::providers::member::MemberProvider;
 
         let idx = make_index_with_box_map_get_trim_and_constructor_chain();
@@ -4782,7 +4784,8 @@ mod tests {
         });
         ContextEnricher::new(&view).enrich(&mut ctx_trim);
         let mut trim_labels: Vec<String> = MemberProvider
-            .provide(scope, &ctx_trim, &view)
+            .provide(scope, &ctx_trim, &view, None)
+            .candidates
             .into_iter()
             .map(|c| c.label.to_string())
             .collect();
@@ -4853,7 +4856,8 @@ mod tests {
         });
         ContextEnricher::new(&view).enrich(&mut ctx_ctor);
         let mut ctor_labels: Vec<String> = MemberProvider
-            .provide(scope, &ctx_ctor, &view)
+            .provide(scope, &ctx_ctor, &view, None)
+            .candidates
             .into_iter()
             .map(|c| c.label.to_string())
             .collect();
@@ -5660,7 +5664,6 @@ mod tests {
 
     #[test]
     fn test_var_rhs_inference_propagates_receiver_generics_for_chain() {
-        use crate::completion::provider::CompletionProvider;
         use crate::language::java::completion::providers::member::MemberProvider;
 
         let idx = make_index_with_var_local_generic_types();
@@ -5713,7 +5716,8 @@ mod tests {
         }
 
         let labels: Vec<String> = MemberProvider
-            .provide(scope, &ctx, &view)
+            .provide(scope, &ctx, &view, None)
+            .candidates
             .into_iter()
             .map(|c| c.label.to_string())
             .collect();

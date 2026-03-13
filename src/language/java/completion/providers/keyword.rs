@@ -1,5 +1,8 @@
 use crate::{
-    completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
+    completion::{
+        CandidateKind, CompletionCandidate,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
@@ -32,10 +35,11 @@ impl CompletionProvider for KeywordProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         _index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
 
         // TODO: context based completation
@@ -53,6 +57,7 @@ impl CompletionProvider for KeywordProvider {
                     self.name(),
                 )
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 }

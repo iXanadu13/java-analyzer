@@ -1,5 +1,8 @@
 use crate::{
-    completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
+    completion::{
+        CandidateKind, CompletionCandidate,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
@@ -179,11 +182,12 @@ impl CompletionProvider for SnippetProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         _index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::TypeAnnotation { prefix } => prefix.as_str(),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
 
         tracing::debug!(
@@ -210,7 +214,8 @@ impl CompletionProvider for SnippetProvider {
                     .with_score(rule.score),
                 )
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 
@@ -283,7 +288,9 @@ mod tests {
     fn test_package_snippet_not_shown_when_pkg_declared() {
         let idx = WorkspaceIndex::new();
         let c = ctx("pack", None, Some("org/cubewhy"), None);
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().all(|r| r.label.as_ref() != "package"));
     }
 
@@ -291,7 +298,9 @@ mod tests {
     fn test_package_snippet_shown_with_inferred_pkg() {
         let idx = WorkspaceIndex::new();
         let c = ctx("pack", None, None, Some("org/cubewhy"));
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         let pkg = results
             .iter()
             .find(|r| r.label.as_ref() == "package")
@@ -307,7 +316,9 @@ mod tests {
     fn test_package_snippet_fallback_placeholder() {
         let idx = WorkspaceIndex::new();
         let c = ctx("pack", None, None, None);
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         let pkg = results
             .iter()
             .find(|r| r.label.as_ref() == "package")
@@ -323,7 +334,9 @@ mod tests {
     fn test_package_snippet_hidden_for_default_package_root() {
         let idx = WorkspaceIndex::new();
         let c = ctx("pack", None, None, Some(""));
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().all(|r| r.label.as_ref() != "package"));
     }
 
@@ -331,7 +344,9 @@ mod tests {
     fn test_class_snippet_uses_file_stem() {
         let idx = WorkspaceIndex::new();
         let c = ctx("class", Some("file:///path/to/MyService.java"), None, None);
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         let cls = results
             .iter()
             .find(|r| r.label.as_ref() == "class")
@@ -343,7 +358,9 @@ mod tests {
     fn test_all_class_like_snippets_on_empty_prefix() {
         let idx = WorkspaceIndex::new();
         let c = ctx("", Some("file:///Foo.java"), None, None);
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<&str> = results.iter().map(|r| r.label.as_ref()).collect();
         for expected in &[
             "class",
@@ -367,7 +384,9 @@ mod tests {
         let idx = WorkspaceIndex::new();
         // "main" 应该触发 psvm snippet，label 显示为 "main"
         let c = ctx_full("main", None, None, None, Some("MyClass"));
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         let m = results.iter().find(|r| r.label.as_ref() == "main");
         assert!(
             m.is_some(),
@@ -381,7 +400,9 @@ mod tests {
     fn test_psvm_label_also_matches() {
         let idx = WorkspaceIndex::new();
         let c = ctx_full("psvm", None, None, None, Some("MyClass"));
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|r| r.label.as_ref() == "psvm"),
             "{:?}",
@@ -394,7 +415,9 @@ mod tests {
         let idx = WorkspaceIndex::new();
         // enclosing_class = None → outside class
         let c = ctx("psvm", None, None, None);
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().all(|r| r.label.as_ref() != "psvm"),
             "psvm should not appear outside a class"
@@ -412,7 +435,9 @@ mod tests {
                 false,
             ))),
         ));
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         let m = results.iter().find(|r| r.label.as_ref() == "println");
         assert!(m.is_some(), "alias 'println' should match sout");
         assert!(m.unwrap().insert_text.contains("System.out.println"));
@@ -422,7 +447,9 @@ mod tests {
     fn test_annotation_label() {
         let idx = WorkspaceIndex::new();
         let c = ctx("ann", Some("file:///MyAnno.java"), None, None);
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|r| r.label.as_ref() == "annotation"),
             "{:?}",
@@ -443,7 +470,8 @@ mod tests {
         };
         assert!(
             SnippetProvider
-                .provide(root_scope(), &c, &idx.view(root_scope()))
+                .provide(root_scope(), &c, &idx.view(root_scope()), None)
+                .candidates
                 .is_empty()
         );
     }
@@ -452,7 +480,9 @@ mod tests {
     fn test_snippet_has_cursor_placeholder() {
         let idx = WorkspaceIndex::new();
         let c = ctx("class", Some("file:///Foo.java"), None, None);
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         let cls = results
             .iter()
             .find(|r| r.label.as_ref() == "class")
@@ -464,7 +494,9 @@ mod tests {
     fn test_prefix_filter() {
         let idx = WorkspaceIndex::new();
         let c = ctx("cl", Some("file:///Foo.java"), None, None);
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|r| r.label.as_ref() == "class"));
         assert!(results.iter().all(|r| r.label.as_ref() != "interface"));
     }
@@ -480,7 +512,9 @@ mod tests {
             None,
             Some("Foo"),
         );
-        let results = SnippetProvider.provide(root_scope(), &c, &idx.view(root_scope()));
+        let results = SnippetProvider
+            .provide(root_scope(), &c, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<&str> = results.iter().map(|r| r.label.as_ref()).collect();
         // psvm 应该出现（在 class 内）
         assert!(

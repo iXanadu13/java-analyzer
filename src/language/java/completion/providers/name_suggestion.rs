@@ -1,5 +1,8 @@
 use crate::{
-    completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
+    completion::{
+        CandidateKind, CompletionCandidate,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{IndexScope, IndexView},
     language::java::completion::providers::name_suggestion::rules::{
         BASE_RULES, ParsedType, pluralize,
@@ -22,14 +25,15 @@ impl CompletionProvider for NameSuggestionProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         _index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         let type_name = match &ctx.location {
             CursorLocation::VariableName { type_name } => type_name.as_str(),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
 
         if type_name.is_empty() {
-            return vec![];
+            return ProviderCompletionResult::default();
         }
 
         let suggestions = generate_name_suggestions(type_name);
@@ -48,12 +52,13 @@ impl CompletionProvider for NameSuggestionProvider {
                 .with_detail(format!("{} variable name", type_name))
                 .with_score(score)
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 
 /// Generate variable name suggestions from a type name.
-/// e.g. "StringBuilder" → ["sb", "builder", "stringBuilder", "StringBuilder"]  
+/// e.g. "StringBuilder" → ["sb", "builder", "stringBuilder", "StringBuilder"]
 pub fn generate_name_suggestions(type_name: &str) -> Vec<String> {
     let parsed = ParsedType::parse(type_name);
 
@@ -138,11 +143,14 @@ mod tests {
     #[test]
     fn test_string_builder_suggestions() {
         let idx = WorkspaceIndex::new();
-        let results = NameSuggestionProvider.provide(
-            root_scope(),
-            &ctx("StringBuilder"),
-            &idx.view(root_scope()),
-        );
+        let results = NameSuggestionProvider
+            .provide(
+                root_scope(),
+                &ctx("StringBuilder"),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
         let names: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             names.contains(&"sb"),
@@ -229,8 +237,9 @@ mod tests {
     #[test]
     fn test_empty_type_returns_empty() {
         let idx = WorkspaceIndex::new();
-        let results =
-            NameSuggestionProvider.provide(root_scope(), &ctx(""), &idx.view(root_scope()));
+        let results = NameSuggestionProvider
+            .provide(root_scope(), &ctx(""), &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.is_empty());
     }
 

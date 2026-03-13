@@ -1,6 +1,7 @@
-use rust_asm::constants::ACC_STATIC;
+use rust_asm::constants::{ACC_PRIVATE, ACC_STATIC};
 
 use crate::completion::fuzzy;
+use crate::completion::provider::ProviderCompletionResult;
 use crate::index::{IndexScope, IndexView};
 use crate::semantic::context::{CursorLocation, SemanticContext};
 use crate::semantic::types::ContextualResolver;
@@ -25,7 +26,8 @@ impl CompletionProvider for ThisMemberProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         tracing::debug!(
             "ThisMemberProvider: enclosing={:?}",
             ctx.enclosing_internal_name
@@ -33,11 +35,11 @@ impl CompletionProvider for ThisMemberProvider {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::MethodArgument { prefix } => prefix.as_str(),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
 
         if ctx.current_class_members.is_empty() && ctx.enclosing_internal_name.is_none() {
-            return vec![];
+            return ProviderCompletionResult::default();
         }
 
         let in_static = ctx.is_in_static_context();
@@ -129,7 +131,6 @@ impl CompletionProvider for ThisMemberProvider {
                     //     continue;
                     // }
                     // 跳过 private（继承不可见）
-                    use rust_asm::constants::ACC_PRIVATE;
                     if method.access_flags & ACC_PRIVATE != 0 {
                         continue;
                     }
@@ -226,7 +227,7 @@ impl CompletionProvider for ThisMemberProvider {
             }
         }
 
-        results
+        results.into()
     }
 }
 
@@ -324,7 +325,9 @@ mod tests {
         ];
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("fu", members);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
         assert!(results.iter().any(|c| c.label.as_ref() == "fun"));
         assert!(results.iter().all(|c| c.label.as_ref() != "other"));
@@ -336,7 +339,9 @@ mod tests {
         let members = vec![make_member("veryLongMemberName", false, false, false)];
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("vlmn", members);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results
                 .iter()
@@ -352,7 +357,9 @@ mod tests {
         let members = vec![make_member("pri", true, true, true)];
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("pr", members);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "pri"),
             "private method should be visible: {:?}",
@@ -365,7 +372,9 @@ mod tests {
         let members = vec![make_member("pri", true, true, true)];
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("pr", members);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|c| c.label.as_ref() == "pri"));
         assert!(matches!(
             results
@@ -382,7 +391,9 @@ mod tests {
         let members = vec![make_member("count", false, false, true)];
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("co", members);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let c = results
             .iter()
             .find(|c| c.label.as_ref() == "count")
@@ -396,7 +407,9 @@ mod tests {
         let members = vec![make_member("func", true, false, false)];
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("", members);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].label.as_ref(), "func");
     }
@@ -407,7 +420,8 @@ mod tests {
         let ctx = ctx_with_members("fu", vec![]);
         assert!(
             ThisMemberProvider
-                .provide(root_scope(), &ctx, &idx.view(root_scope()))
+                .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+                .candidates
                 .is_empty()
         );
     }
@@ -422,7 +436,9 @@ mod tests {
         ];
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("a", members);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "afterMethod"),
             "method defined after cursor should still be completable"
@@ -434,7 +450,9 @@ mod tests {
         let members = vec![make_member("CONST", false, true, false)];
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members("CO", members);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(matches!(
             results
                 .iter()
@@ -463,7 +481,9 @@ mod tests {
         }));
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.is_empty(),
             "ThisMemberProvider should return nothing inside a static method, got: {:?}",
@@ -486,7 +506,9 @@ mod tests {
         }));
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "helper"),
             "ThisMemberProvider should work inside an instance method"
@@ -515,7 +537,9 @@ mod tests {
             receiver_expr: "this".to_string(),
             arguments: None,
         };
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.is_empty(),
             "this.xxx should not complete inside a static method"
@@ -557,7 +581,9 @@ mod tests {
         .with_class_members(members)
         .with_enclosing_member(Some(enclosing_method));
 
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
 
         assert!(
             results.iter().any(|c| c.label.as_ref() == "pri"),
@@ -609,7 +635,9 @@ mod tests {
         .with_class_members(members)
         .with_enclosing_member(Some(enclosing_method));
 
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "pri"),
             "should find static method 'pri' with prefix 'pr' in static context: {:?}",
@@ -646,7 +674,9 @@ mod tests {
         .with_class_members(members)
         .with_enclosing_member(Some(enclosing_method));
 
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "pri"),
             "empty prefix in method arg should return static members in static context: {:?}",
@@ -671,7 +701,9 @@ mod tests {
         }));
         let idx = WorkspaceIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing_method);
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().all(|c| c.label.as_ref() != "helper"),
             "instance method should not appear in static context: {:?}",
@@ -757,7 +789,9 @@ mod tests {
         .with_class_members(vec![make_member("func", true, false, false)])
         .with_enclosing_member(Some(enclosing_method));
 
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "funcA"),
             "funcA inherited from BaseClass should be visible inside Main2 instance method, got: {:?}",
@@ -821,7 +855,9 @@ mod tests {
             vec![],
         );
 
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results
                 .iter()
@@ -898,7 +934,9 @@ mod tests {
         )
         .with_enclosing_member(Some(enclosing_method));
 
-        let results = ThisMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = ThisMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().all(|c| c.label.as_ref() != "superPrivate"),
             "private super method should NOT be visible in subclass"

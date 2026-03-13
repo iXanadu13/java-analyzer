@@ -14,6 +14,15 @@ pub struct ProviderCompletionResult {
     pub is_incomplete: bool,
 }
 
+impl From<Vec<CompletionCandidate>> for ProviderCompletionResult {
+    fn from(value: Vec<CompletionCandidate>) -> Self {
+        Self {
+            candidates: value,
+            is_incomplete: false,
+        }
+    }
+}
+
 pub trait CompletionProvider: Send + Sync {
     fn name(&self) -> &'static str;
 
@@ -25,24 +34,11 @@ pub trait CompletionProvider: Send + Sync {
         ProviderSearchSpace::Narrow
     }
 
-    // TODO: replace with provide_with_limit
     fn provide(
         &self,
         scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate>;
-
-    fn provide_with_limit(
-        &self,
-        scope: IndexScope,
-        ctx: &SemanticContext,
-        index: &IndexView,
         _limit: Option<usize>,
-    ) -> ProviderCompletionResult {
-        ProviderCompletionResult {
-            candidates: self.provide(scope, ctx, index),
-            is_incomplete: false,
-        }
-    }
+    ) -> ProviderCompletionResult;
 }

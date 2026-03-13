@@ -107,7 +107,7 @@ impl CompletionEngine {
             let ProviderCompletionResult {
                 candidates: mut out,
                 is_incomplete,
-            } = provider.provide_with_limit(scope, &ctx, index, limit);
+            } = provider.provide(scope, &ctx, index, limit);
             metadata.provider_truncated |= is_incomplete;
             tracing::debug!(
                 provider = provider.name(),
@@ -137,7 +137,7 @@ impl CompletionEngine {
             let ProviderCompletionResult {
                 candidates: mut out,
                 is_incomplete,
-            } = provider.provide_with_limit(scope, &ctx, index, limit);
+            } = provider.provide(scope, &ctx, index, limit);
             metadata.provider_truncated |= is_incomplete;
             tracing::debug!(
                 provider = provider.name(),
@@ -309,9 +309,10 @@ mod tests {
             _scope: IndexScope,
             _ctx: &SemanticContext,
             _index: &IndexView,
-        ) -> Vec<CompletionCandidate> {
+            _limit: Option<usize>,
+        ) -> ProviderCompletionResult {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            vec![]
+            ProviderCompletionResult::default()
         }
     }
 
@@ -333,8 +334,9 @@ mod tests {
             _scope: IndexScope,
             _ctx: &SemanticContext,
             _index: &IndexView,
-        ) -> Vec<CompletionCandidate> {
-            (0..self.count)
+            limit: Option<usize>,
+        ) -> ProviderCompletionResult {
+            let all = (0..self.count)
                 .map(|i| {
                     CompletionCandidate::new(
                         Arc::from(format!("Item{i}")),
@@ -343,17 +345,7 @@ mod tests {
                         self.name(),
                     )
                 })
-                .collect()
-        }
-
-        fn provide_with_limit(
-            &self,
-            _scope: IndexScope,
-            _ctx: &SemanticContext,
-            _index: &IndexView,
-            limit: Option<usize>,
-        ) -> ProviderCompletionResult {
-            let all = self.provide(_scope, _ctx, _index);
+                .collect::<Vec<_>>();
             let Some(limit) = limit else {
                 return ProviderCompletionResult {
                     candidates: all,
@@ -386,7 +378,8 @@ mod tests {
             _scope: IndexScope,
             _ctx: &SemanticContext,
             _index: &IndexView,
-        ) -> Vec<CompletionCandidate> {
+            _limit: Option<usize>,
+        ) -> ProviderCompletionResult {
             (0..self.count)
                 .map(|i| {
                     CompletionCandidate::new(
@@ -396,7 +389,8 @@ mod tests {
                         self.name(),
                     )
                 })
-                .collect()
+                .collect::<Vec<_>>()
+                .into()
         }
     }
 

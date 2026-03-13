@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use crate::{
-    completion::{CandidateKind, CompletionCandidate, fuzzy, provider::CompletionProvider},
+    completion::{
+        CandidateKind, CompletionCandidate, fuzzy,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext, StatementLabelCompletionKind},
 };
@@ -22,9 +25,10 @@ impl CompletionProvider for StatementLabelProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         _index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         let CursorLocation::StatementLabel { kind, ref prefix } = ctx.location else {
-            return vec![];
+            return ProviderCompletionResult::default();
         };
 
         let mut scored = Vec::new();
@@ -56,7 +60,8 @@ impl CompletionProvider for StatementLabelProvider {
                 .with_detail(format!("{:?}", label.target_kind))
                 .with_score(55.0 + score as f32 * 0.1)
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 
@@ -113,7 +118,8 @@ mod tests {
         );
 
         let labels: Vec<String> = StatementLabelProvider
-            .provide(root_scope(), &ctx, &idx.view(root_scope()))
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates
             .into_iter()
             .map(|c| c.label.to_string())
             .collect();
@@ -134,7 +140,8 @@ mod tests {
         );
 
         let labels: Vec<String> = StatementLabelProvider
-            .provide(root_scope(), &ctx, &idx.view(root_scope()))
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates
             .into_iter()
             .map(|c| c.label.to_string())
             .collect();

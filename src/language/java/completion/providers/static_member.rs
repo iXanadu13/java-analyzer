@@ -1,7 +1,10 @@
 use crate::{
     completion::{
-        CandidateKind, CompletionCandidate, candidate::ReplacementMode, fuzzy,
-        provider::CompletionProvider, scorer::AccessFilter,
+        CandidateKind, CompletionCandidate,
+        candidate::ReplacementMode,
+        fuzzy,
+        provider::{CompletionProvider, ProviderCompletionResult},
+        scorer::AccessFilter,
     },
     index::{IndexScope, IndexView},
     language::java::render,
@@ -25,7 +28,8 @@ impl CompletionProvider for StaticMemberProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         let (class_name_raw, member_prefix) = match &ctx.location {
             CursorLocation::StaticAccess {
                 class_internal_name,
@@ -42,7 +46,7 @@ impl CompletionProvider for StaticMemberProvider {
                 (receiver_expr.as_str(), member_prefix.as_str())
             }
 
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
 
         // class_name_raw could be a simple name ("Main") or an internal name ("org/cubewhy/Main")
@@ -55,9 +59,9 @@ impl CompletionProvider for StaticMemberProvider {
                 // class not in index at all — may be the currently-edited file;
                 // fall back to source members if we're accessing our own class
                 if is_self_class_by_simple_name(class_name_raw, ctx) {
-                    return self.provide_from_source_members(ctx, member_prefix);
+                    return self.provide_from_source_members(ctx, member_prefix).into();
                 }
-                return vec![];
+                return ProviderCompletionResult::default();
             }
             // same package first
             if let Some(pkg) = ctx.enclosing_package.as_deref()
@@ -80,7 +84,7 @@ impl CompletionProvider for StaticMemberProvider {
         // When accessing own class and source members are available, prefer them
         // (handles the case where the current file is not yet compiled into the index)
         if is_same_class && !ctx.current_class_members.is_empty() {
-            return self.provide_from_source_members(ctx, member_prefix);
+            return self.provide_from_source_members(ctx, member_prefix).into();
         }
 
         let filter = if is_same_class {
@@ -182,7 +186,7 @@ impl CompletionProvider for StaticMemberProvider {
             );
         }
 
-        results
+        results.into()
     }
 }
 
@@ -387,7 +391,9 @@ mod tests {
     fn test_static_access_by_simple_name() {
         let index = make_index_with_main();
         let ctx = static_ctx("Main", "fun", "org/cubewhy");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "func"),
             "should find func via simple name lookup: {:?}",
@@ -399,7 +405,9 @@ mod tests {
     fn test_static_access_by_internal_name() {
         let index = make_index_with_main();
         let ctx = static_ctx("org/cubewhy/Main", "fun", "org/cubewhy");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
 
@@ -407,7 +415,9 @@ mod tests {
     fn test_static_access_empty_prefix_returns_all_static() {
         let index = make_index_with_main();
         let ctx = static_ctx("Main", "", "org/cubewhy");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(!results.is_empty());
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
@@ -481,7 +491,9 @@ mod tests {
         // Main.| from inside Main — private static field must appear
         let idx = make_index_with_self_class();
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
             "private static field should be visible when accessing own class: {:?}",
@@ -493,7 +505,9 @@ mod tests {
     fn test_self_class_static_public_field_visible() {
         let idx = make_index_with_self_class();
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|c| c.label.as_ref() == "publicField"));
     }
 
@@ -533,7 +547,9 @@ mod tests {
             origin: ClassOrigin::Unknown,
         }]);
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "staticF"),
             "static field must appear"
@@ -549,7 +565,9 @@ mod tests {
     fn test_self_class_prefix_filter() {
         let idx = make_index_with_self_class();
         let ctx = self_static_ctx("rand");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
             "prefix 'rand' should match 'randomField': {:?}",
@@ -605,7 +623,9 @@ mod tests {
         )
         .with_class_members(members);
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
 
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
@@ -663,7 +683,9 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().all(|c| c.label.as_ref() != "secret"),
             "private field of another class must NOT be visible: {:?}",
@@ -820,7 +842,9 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "FIELD"),
             "lowercase class name static field should be found via provider, got: {:?}",
@@ -862,7 +886,9 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|c| c.label.as_ref() == "main"));
         assert!(
             results
@@ -909,7 +935,9 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results
                 .iter()
@@ -966,7 +994,9 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"Box"), "{:?}", labels);
     }
@@ -1032,7 +1062,9 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"BoxV"), "{:?}", labels);
     }
@@ -1059,7 +1091,9 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = StaticMemberProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let labels: Vec<&str> = results
             .iter()
             .map(|candidate| candidate.label.as_ref())

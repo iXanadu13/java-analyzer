@@ -2,8 +2,9 @@ use rust_asm::constants::ACC_ANNOTATION;
 
 use crate::{
     completion::{
-        CandidateKind, CompletionCandidate, fuzzy, import_utils::is_import_needed,
-        provider::CompletionProvider,
+        CandidateKind, CompletionCandidate, fuzzy,
+        import_utils::is_import_needed,
+        provider::{CompletionProvider, ProviderCompletionResult},
     },
     index::{ClassMetadata, IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
@@ -22,13 +23,14 @@ impl CompletionProvider for AnnotationProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _limit: Option<usize>,
+    ) -> ProviderCompletionResult {
         let (prefix, et) = match &ctx.location {
             CursorLocation::Annotation {
                 prefix,
                 target_element_type,
             } => (prefix.as_str(), target_element_type),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
 
         let prefix_lower = prefix.to_lowercase();
@@ -131,17 +133,17 @@ impl CompletionProvider for AnnotationProvider {
             });
         }
 
-        results
+        results.into()
     }
 }
 
 fn matches_target(meta: &ClassMetadata, element_type: Option<&str>) -> bool {
     let et = match element_type {
-        None => return true, // 位置未知，不过滤
+        None => return true, // unknown target (etc. inside ERROR node), should not filter
         Some(et) => et,
     };
     match meta.annotation_targets() {
-        None => true, // 无 @Target，适用所有位置
+        None => true, // No @Target specified in annotation declaration
         Some(targets) => targets.iter().any(|t| t.as_ref() == et),
     }
 }
@@ -291,7 +293,9 @@ mod tests {
         idx.add_classes(vec![make_class("com/example", "NotAnAnnotation")]);
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Not", vec![], "com/example");
-        let results = AnnotationProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = AnnotationProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results
                 .iter()
@@ -306,7 +310,9 @@ mod tests {
         idx.add_classes(builtin_java_annotations());
         idx.add_classes(vec![make_annotation("org/junit", "Test")]);
         let ctx = annotation_ctx("Te", vec!["org.junit.Test".into()], "com/example");
-        let results = AnnotationProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = AnnotationProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Test"),
             "imported annotation should appear: {:?}",
@@ -320,7 +326,9 @@ mod tests {
         idx.add_classes(vec![make_annotation("org/junit", "Test")]);
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Te", vec![], "com/example");
-        let results = AnnotationProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = AnnotationProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let test_candidate = results.iter().find(|c| c.label.as_ref() == "Test");
         assert!(test_candidate.is_some(), "Test annotation should appear");
         assert_eq!(
@@ -335,7 +343,9 @@ mod tests {
         let idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("Over", vec![], "com/example");
-        let results = AnnotationProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = AnnotationProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let c = results
             .iter()
             .find(|c| c.label.as_ref() == "Override")
@@ -351,7 +361,9 @@ mod tests {
         let idx = WorkspaceIndex::new();
         idx.add_classes(builtin_java_annotations());
         let ctx = annotation_ctx("over", vec![], "com/example");
-        let results = AnnotationProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = AnnotationProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Override"),
             "case-insensitive prefix should match Override"
@@ -392,7 +404,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = AnnotationProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        let results = AnnotationProvider
+            .provide(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().all(|c| c.label.as_ref() != "ClassOnly"));
     }
 }

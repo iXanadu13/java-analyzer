@@ -39,27 +39,7 @@ impl CompletionProvider for ExpressionProvider {
 
     fn provide(
         &self,
-        scope: IndexScope,
-        ctx: &SemanticContext,
-        index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
-        self.provide_with_limit(scope, ctx, index, None).candidates
-    }
-
-    fn provide_with_limit(
-        &self,
         _scope: IndexScope,
-        ctx: &SemanticContext,
-        index: &IndexView,
-        limit: Option<usize>,
-    ) -> ProviderCompletionResult {
-        self.provide_internal(ctx, index, limit)
-    }
-}
-
-impl ExpressionProvider {
-    fn provide_internal(
-        &self,
         ctx: &SemanticContext,
         index: &IndexView,
         limit: Option<usize>,
@@ -593,7 +573,9 @@ mod tests {
         let index = make_index();
         index.add_classes(vec![make_cls("com/other", "Main")]);
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         // com/other/Main should appear (with auto-import)
         assert!(
             results.iter().any(|c| {
@@ -608,7 +590,9 @@ mod tests {
         // The class itself should appear in the completion (this can be used for type annotations, static access, etc.)
         let index = make_index();
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Main"),
             "enclosing class itself should appear as a completion candidate: {:?}",
@@ -621,7 +605,9 @@ mod tests {
         let index = make_index();
         index.add_classes(vec![make_cls("com/other", "Main")]);
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         // Both Main (no import) and com/other/Main (requires import) in the same package should appear.
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Main"),
@@ -644,7 +630,9 @@ mod tests {
         index.add_classes(vec![nested_cls, make_cls("java/util", "Map")]);
 
         let ctx = ctx("Map", "Test", "app", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
 
         // Map 应该出现，但 Map$Entry 不应该出现
         assert!(results.iter().any(|c| c.label.as_ref() == "Map"));
@@ -660,9 +648,10 @@ mod tests {
         ]);
 
         let ctx = ctx("List", "Test", "app", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
 
-        // 验证两个 List 都存在
         let list_candidates: Vec<_> = results
             .iter()
             .filter(|c| c.label.as_ref() == "List")
@@ -695,7 +684,9 @@ mod tests {
             Some(Arc::from("org/cubewhy")),
             vec![],
         );
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Box"),
             "in-scope inner Box should be visible for TypeAnnotation"
@@ -726,7 +717,9 @@ mod tests {
             Some(Arc::from("org/cubewhy")),
             vec![],
         );
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(
             !results.iter().any(|c| c.label.as_ref() == "Box"),
             "unrelated inner Box should remain hidden"
@@ -761,7 +754,9 @@ mod tests {
                 Some(index.view(root_scope()).build_name_table()),
             ),
         ));
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Box"),
             "{results:?}"
@@ -805,7 +800,9 @@ mod tests {
                 Some(index.view(root_scope()).build_name_table()),
             ),
         ));
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "BoxV"),
             "{results:?}"
@@ -838,7 +835,9 @@ mod tests {
             Some(Arc::from("org/cubewhy")),
             vec![],
         );
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Box"),
             "{results:?}"
@@ -867,7 +866,9 @@ mod tests {
             vec![],
         );
         assert!(ExpressionProvider.is_applicable(&ctx));
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Box"),
             "{results:?}"
@@ -912,7 +913,9 @@ mod tests {
         let slow_ms = t_slow.elapsed().as_secs_f64() * 1000.0;
 
         let t_fast = Instant::now();
-        let fast_candidates = ExpressionProvider.provide(root_scope(), &ctx, &view);
+        let fast_candidates = ExpressionProvider
+            .provide(root_scope(), &ctx, &view, None)
+            .candidates;
         let fast_ms = t_fast.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
             "expression_provider_perf_baseline: slow_scan_ms={slow_ms:.3} fast_provider_ms={fast_ms:.3} slow_hits={slow} fast_hits={}",
@@ -977,7 +980,9 @@ mod tests {
         let slow_ms = t_slow.elapsed().as_secs_f64() * 1000.0;
 
         let t_fast = Instant::now();
-        let fast_candidates = ExpressionProvider.provide(root_scope(), &ctx, &view);
+        let fast_candidates = ExpressionProvider
+            .provide(root_scope(), &ctx, &view, None)
+            .candidates;
         let fast_ms = t_fast.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
             "expression_member_zero_result_perf: slow_scan_ms={slow_ms:.3} fast_provider_ms={fast_ms:.3} slow_hits={slow} fast_hits={}",
@@ -1011,7 +1016,9 @@ mod tests {
         .with_class_member_position(true);
 
         assert!(ExpressionProvider.is_applicable(&ctx));
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &view);
+        let results = ExpressionProvider
+            .provide(root_scope(), &ctx, &view, None)
+            .candidates;
         assert!(
             !results.is_empty(),
             "provider should still produce valid expression candidates"
@@ -1056,7 +1063,7 @@ mod tests {
             ],
         );
 
-        let results = ExpressionProvider.provide_with_limit(root_scope(), &ctx, &view, Some(256));
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &view, Some(256));
         assert!(
             !results.candidates.is_empty(),
             "broad path should still produce candidates"

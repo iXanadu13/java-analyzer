@@ -1,9 +1,14 @@
 use crate::{
-    completion::{CandidateKind, CompletionCandidate, fuzzy, provider::CompletionProvider},
+    completion::{
+        CandidateKind, CompletionCandidate, fuzzy,
+        provider::{CompletionProvider, ProviderCompletionResult},
+    },
     index::{IndexScope, IndexView},
     language::java::render,
-    semantic::context::{CursorLocation, SemanticContext},
-    semantic::types::ContextualResolver,
+    semantic::{
+        context::{CursorLocation, SemanticContext},
+        types::ContextualResolver,
+    },
 };
 use std::sync::Arc;
 
@@ -19,12 +24,13 @@ impl CompletionProvider for LocalVarProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-    ) -> Vec<CompletionCandidate> {
+        _index: Option<usize>,
+    ) -> ProviderCompletionResult {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::MethodArgument { prefix } => prefix.as_str(),
             CursorLocation::TypeAnnotation { prefix } => prefix.as_str(),
-            _ => return vec![],
+            _ => return ProviderCompletionResult::default(),
         };
         let resolver = ContextualResolver::new(index, ctx);
 
@@ -49,7 +55,8 @@ impl CompletionProvider for LocalVarProvider {
                 ))
                 .with_score(50.0 + score as f32 * 0.1)
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 
@@ -96,7 +103,9 @@ mod tests {
             "str",
             vec![("str", "java/lang/String"), ("aVar", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|c| c.label.as_ref() == "str"));
         assert!(results.iter().all(|c| c.label.as_ref() != "aVar"));
     }
@@ -109,7 +118,9 @@ mod tests {
             "aV",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|c| c.label.as_ref() == "aVar"));
         assert!(results.iter().all(|c| c.label.as_ref() != "str"));
     }
@@ -122,7 +133,9 @@ mod tests {
             "",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert_eq!(
             results.len(),
             2,
@@ -136,7 +149,9 @@ mod tests {
         let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx("AVAR", vec![("aVar", "java/lang/String")]);
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.iter().any(|c| c.label.as_ref() == "aVar"));
     }
 
@@ -159,7 +174,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "should complete locals inside method arguments"
@@ -174,7 +191,9 @@ mod tests {
             "var",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "fuzzy: 'var' should match 'aVar': {:?}",
@@ -187,7 +206,9 @@ mod tests {
         let idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx("xyz", vec![("aVar", "java/lang/String")]);
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(results.is_empty(), "no fuzzy match should return empty");
     }
 
@@ -214,7 +235,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.is_empty(),
             "LocalVarProvider should not return locals for MemberAccess: {:?}",
@@ -241,7 +264,9 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "should complete locals inside TypeAnnotation context due to parsing ambiguity"
@@ -256,7 +281,9 @@ mod tests {
             "",
             vec![("numbers", "int[]"), ("parts", "java/lang/String[]")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
+        let results = LocalVarProvider
+            .provide(scope, &ctx, &idx.view(root_scope()), None)
+            .candidates;
         let numbers = results
             .iter()
             .find(|c| c.label.as_ref() == "numbers")
