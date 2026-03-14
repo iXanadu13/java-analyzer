@@ -4240,7 +4240,10 @@ mod tests {
     #[test]
     fn test_wrapper_arithmetic_var_materialization_surfaces_double_in_completion() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(vec![make_class("java/lang", "Object")]);
+        idx.add_classes(vec![
+            make_class("java/lang", "Object"),
+            make_class("java/lang", "Integer"),
+        ]);
         let view = idx.view(root_scope());
 
         let src = indoc::indoc! {r#"

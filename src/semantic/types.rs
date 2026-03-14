@@ -1405,7 +1405,7 @@ impl<'idx> TypeResolver<'idx> {
                 }
                 return ConversionKind::Identity;
             }
-            if is_widening_primitive(src, dst) {
+            if is_widening_primitive_conversion(src, dst) {
                 if source.is_primitive() && target.is_primitive() {
                     return ConversionKind::WideningPrimitive;
                 }
@@ -1465,7 +1465,8 @@ fn is_reference_widening(view: &IndexView, source: &TypeName, target: &TypeName)
         .any(|c| c.internal_name.as_ref() == dst)
 }
 
-fn is_widening_primitive(source: &str, target: &str) -> bool {
+/// See https://docs.oracle.com/javase/specs/jls/se25/html/jls-5.html#jls-5.1.2
+fn is_widening_primitive_conversion(source: &str, target: &str) -> bool {
     matches!(
         (source, target),
         ("byte", "short")
@@ -1515,14 +1516,14 @@ pub(crate) fn unboxed_primitive_type_name(ty: &str) -> Option<&'static str> {
         "long" => Some("long"),
         "float" => Some("float"),
         "double" => Some("double"),
-        "java/lang/Boolean" | "Boolean" => Some("boolean"),
-        "java/lang/Byte" | "Byte" => Some("byte"),
-        "java/lang/Character" | "Character" => Some("char"),
-        "java/lang/Short" | "Short" => Some("short"),
-        "java/lang/Integer" | "Integer" => Some("int"),
-        "java/lang/Long" | "Long" => Some("long"),
-        "java/lang/Float" | "Float" => Some("float"),
-        "java/lang/Double" | "Double" => Some("double"),
+        "java/lang/Boolean" => Some("boolean"),
+        "java/lang/Byte" => Some("byte"),
+        "java/lang/Character" => Some("char"),
+        "java/lang/Short" => Some("short"),
+        "java/lang/Integer" => Some("int"),
+        "java/lang/Long" => Some("long"),
+        "java/lang/Float" => Some("float"),
+        "java/lang/Double" => Some("double"),
         _ => None,
     }
 }
@@ -3691,7 +3692,10 @@ mod tests {
             unboxed_primitive_type_name("java/lang/Integer"),
             Some("int")
         );
-        assert_eq!(unboxed_primitive_type_name("Double"), Some("double"));
+        assert_eq!(
+            unboxed_primitive_type_name("java/lang/Double"),
+            Some("double")
+        );
         assert_eq!(
             promoted_numeric_result_type_name("java/lang/Integer", "double"),
             Some("double")
