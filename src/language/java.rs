@@ -583,14 +583,6 @@ impl JavaContextExtractor {
             vec![],
         )
     }
-
-    fn make_parser(&self) -> Parser {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_java::LANGUAGE.into())
-            .expect("failed to load java grammar");
-        parser
-    }
 }
 
 fn extract_lambda_params_from_error_arrow(
@@ -598,7 +590,7 @@ fn extract_lambda_params_from_error_arrow(
     _cursor_node: Option<Node>,
     root: Node,
 ) -> Vec<Arc<str>> {
-    // 在 root 里找 `->` anonymous node，且 cursor 在 `->` 之后
+    // Find the anonymous node with `->` in the root directory, where the cursor is after `->`.
     fn find_arrow_before_cursor<'a>(node: Node<'a>, offset: usize, result: &mut Option<Node<'a>>) {
         if node.kind() == "->" && node.end_byte() <= offset {
             *result = Some(node);
@@ -616,8 +608,8 @@ fn extract_lambda_params_from_error_arrow(
         return vec![];
     };
 
-    // 找 `->` 之前的 identifier 或 inferred_parameters
-    // params 是 `->` 的前一个 sibling
+    // Find the identifier or inferred_parameters preceding `->`
+    // params is the sibling preceding `->`
     let Some(parent) = arrow.parent() else {
         return vec![];
     };
@@ -631,7 +623,6 @@ fn extract_lambda_params_from_error_arrow(
     }
     let params_node = children[arrow_idx - 1];
 
-    // 从 params_node 提取参数名
     match params_node.kind() {
         "identifier" => vec![Arc::from(ctx.node_text(params_node))],
         "inferred_parameters" => {
