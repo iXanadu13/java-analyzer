@@ -24,7 +24,7 @@ impl CompletionProvider for LocalVarProvider {
         _scope: IndexScope,
         ctx: &SemanticContext,
         index: &IndexView,
-        _index: Option<usize>,
+        _limit: Option<usize>,
     ) -> ProviderCompletionResult {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),

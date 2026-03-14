@@ -156,33 +156,33 @@ fn determine_location_impl(
             }
 
             "ERROR" => {
-                if let Some(p) = current.parent() {
-                    if p.kind() == "argument_list" {
-                        // Check if this ERROR node is a bare dot (trailing dot after an expression).
-                        let is_trailing_dot = {
-                            let mut wc = current.walk();
-                            let children: Vec<_> = current.children(&mut wc).collect();
-                            children.len() == 1 && children[0].kind() == "."
-                        };
-                        if is_trailing_dot {
-                            // Find the preceding sibling in argument_list.
-                            let receiver = find_preceding_named_sibling(current, p);
-                            if let Some(recv) = receiver {
-                                let receiver_expr = ctx.node_text(recv).to_string();
-                                return (
-                                    CursorLocation::MemberAccess {
-                                        receiver_semantic_type: None,
-                                        receiver_type: None,
-                                        member_prefix: String::new(),
-                                        receiver_expr,
-                                        arguments: None,
-                                    },
-                                    String::new(),
-                                );
-                            }
+                if let Some(p) = current.parent()
+                    && p.kind() == "argument_list"
+                {
+                    // Check if this ERROR node is a bare dot (trailing dot after an expression).
+                    let is_trailing_dot = {
+                        let mut wc = current.walk();
+                        let children: Vec<_> = current.children(&mut wc).collect();
+                        children.len() == 1 && children[0].kind() == "."
+                    };
+                    if is_trailing_dot {
+                        // Find the preceding sibling in argument_list.
+                        let receiver = find_preceding_named_sibling(current, p);
+                        if let Some(recv) = receiver {
+                            let receiver_expr = ctx.node_text(recv).to_string();
+                            return (
+                                CursorLocation::MemberAccess {
+                                    receiver_semantic_type: None,
+                                    receiver_type: None,
+                                    member_prefix: String::new(),
+                                    receiver_expr,
+                                    arguments: None,
+                                },
+                                String::new(),
+                            );
                         }
-                        return handle_argument_list(ctx, p);
                     }
+                    return handle_argument_list(ctx, p);
                 }
                 return (CursorLocation::Unknown, String::new());
             }
@@ -283,10 +283,7 @@ fn detect_statement_label_location(
                                     break;
                                 }
                             }
-                            match found {
-                                Some(f) => f,
-                                None => return None, // not a jump statement error
-                            }
+                            found?
                         };
                         if ctx.offset > keyword_end {
                             return Some((
@@ -907,10 +904,10 @@ fn handle_identifier(
             }
 
             "ERROR" => {
-                if let Some(p) = ancestor.parent() {
-                    if p.kind() == "argument_list" {
-                        return handle_argument_list(ctx, p);
-                    }
+                if let Some(p) = ancestor.parent()
+                    && p.kind() == "argument_list"
+                {
+                    return handle_argument_list(ctx, p);
                 }
                 // Check if this ERROR looks like an incomplete generic type expression.
                 // e.g., `Function<String, S` → ERROR containing `<` and `,`
