@@ -133,25 +133,24 @@ pub(crate) fn get_initializer_text(type_node: Node, bytes: &[u8]) -> Option<Stri
 }
 
 pub(crate) fn find_enclosing_method_in_error(root: Node, offset: usize) -> Option<Node> {
-    // When the file is a top-level ERROR, method_declaration nodes may still
-    // exist as direct children of the ERROR node
-    fn dfs<'a>(node: Node<'a>, offset: usize, result: &mut Option<Node<'a>>) {
+    let mut stack = vec![root];
+    let mut result = None;
+    while let Some(node) = stack.pop() {
         if node.start_byte() > offset {
-            return;
+            continue;
         }
         if node.kind() == "method_declaration"
             && node.start_byte() <= offset
             && node.end_byte() >= offset
         {
-            *result = Some(node);
+            result = Some(node);
         }
         let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            dfs(child, offset, result);
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
         }
     }
-    let mut result = None;
-    dfs(root, offset, &mut result);
     result
 }
 

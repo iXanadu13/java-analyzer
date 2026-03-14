@@ -167,20 +167,16 @@ fn extract_misread_var_decls(
 
 fn collect_misread_decls(
     ctx: &JavaContextExtractor,
-    node: Node,
+    root: Node,
     vars: &mut Vec<RankedLocal>,
     type_ctx: Option<&SourceTypeCtx>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        // Pattern: variable_declarator containing assignment_expression
-        // where the declarator's ERROR sibling contains a type keyword
-        if child.kind() == "variable_declarator" {
-            // Look for assignment_expression inside this declarator
-            let mut vc = child.walk();
-            for vchild in child.children(&mut vc) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "variable_declarator" {
+            let mut vc = node.walk();
+            for vchild in node.children(&mut vc) {
                 if vchild.kind() == "assignment_expression" {
-                    // Left side is the misread variable name
                     let lhs = vchild.child_by_field_name("left").or_else(|| {
                         let mut wc = vchild.walk();
                         vchild.named_children(&mut wc).next()
@@ -197,8 +193,7 @@ fn collect_misread_decls(
                             continue;
                         }
                         let name = ctx.node_text(name_node);
-                        // Find type from ERROR sibling (contains "var" or type_identifier)
-                        let type_name = find_type_in_error_sibling(ctx, child);
+                        let type_name = find_type_in_error_sibling(ctx, node);
                         let init_text = ctx.node_text(init_node).to_string();
                         let lv = if type_name.as_deref() == Some("var") {
                             LocalVar {
@@ -217,14 +212,19 @@ fn collect_misread_decls(
                         vars.push(RankedLocal {
                             local: lv,
                             declaration_start: name_node.start_byte(),
-                            visibility_scope: local_visibility_scope(child)
+                            visibility_scope: local_visibility_scope(node)
                                 .unwrap_or_else(|| fallback_visibility_scope(ctx.offset)),
                         });
                     }
                 }
             }
         }
-        collect_misread_decls(ctx, child, vars, type_ctx);
+        // Push children in reverse order so we visit them left-to-right
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
     }
 }
 
@@ -652,14 +652,13 @@ fn extract_locals_from_error_nodes(
 
 fn collect_locals_in_errors(
     ctx: &JavaContextExtractor,
-    node: Node,
+    root: Node,
     vars: &mut Vec<RankedLocal>,
     type_ctx: Option<&SourceTypeCtx>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "ERROR" {
-            // ERROR may contain local_variable_declaration
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "ERROR" {
             let q_src = r#"
                 (local_variable_declaration
                     type: (_) @type
@@ -669,7 +668,7 @@ fn collect_locals_in_errors(
             if let Ok(q) = Query::new(&tree_sitter_java::LANGUAGE.into(), q_src) {
                 let type_idx = q.capture_index_for_name("type").unwrap();
                 let name_idx = q.capture_index_for_name("name").unwrap();
-                let found: Vec<RankedLocal> = run_query(&q, child, ctx.bytes(), None)
+                let found: Vec<RankedLocal> = run_query(&q, node, ctx.bytes(), None)
                     .into_iter()
                     .filter_map(|captures| {
                         let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
@@ -689,7 +688,6 @@ fn collect_locals_in_errors(
                         }
                         let name = name_node.utf8_text(ctx.bytes()).ok()?;
                         let raw_ty = recovered_declared_type_text(ctx, decl, ty_node)?.to_string();
-
                         if raw_ty == "var" {
                             return Some(RankedLocal {
                                 local: LocalVar {
@@ -701,7 +699,6 @@ fn collect_locals_in_errors(
                                 visibility_scope,
                             });
                         }
-
                         Some(RankedLocal {
                             local: LocalVar {
                                 name: Arc::from(name),
@@ -715,10 +712,12 @@ fn collect_locals_in_errors(
                     .collect();
                 vars.extend(found);
             }
-            // Recursive entry into nested ERROR
-            collect_locals_in_errors(ctx, child, vars, type_ctx);
-        } else {
-            collect_locals_in_errors(ctx, child, vars, type_ctx);
+        }
+        // Push children in reverse for left-to-right traversal
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
         }
     }
 }
@@ -778,22 +777,22 @@ fn recover_type_text_from_decl<'a>(
         .filter(|text| is_plausible_local_type_text(text))
 }
 
-fn collect_last_type_like_before<'a>(node: Node<'a>, boundary: usize, best: &mut Option<Node<'a>>) {
-    if node.end_byte() > boundary {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            collect_last_type_like_before(child, boundary, best);
+fn collect_last_type_like_before<'a>(root: Node<'a>, boundary: usize, best: &mut Option<Node<'a>>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.start_byte() >= boundary {
+            continue;
         }
-        return;
-    }
-
-    if is_type_like_node(node.kind()) {
-        *best = Some(node);
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_last_type_like_before(child, boundary, best);
+        if node.end_byte() <= boundary && is_type_like_node(node.kind()) {
+            *best = Some(node);
+        }
+        // Push children in reverse order for left-to-right DFS,
+        // ensuring later (rightmost) matches overwrite earlier ones in `best`
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
     }
 }
 
