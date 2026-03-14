@@ -111,6 +111,19 @@ pub(crate) fn find_ancestor<'a>(mut node: Node<'a>, kind: &str) -> Option<Node<'
     }
 }
 
+pub(crate) fn is_descendant_of(node: Node, ancestor: Node) -> bool {
+    let mut cur = node;
+    loop {
+        if cur.id() == ancestor.id() {
+            return true;
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
+
 /// Remove SENTINEL from the string (the prefix in the injection path may contain it).
 pub(crate) fn strip_sentinel(s: &str) -> String {
     s.replace(SENTINEL, "")
@@ -444,6 +457,17 @@ pub fn is_in_type_position(id_node: Node, decl_node: Node) -> bool {
             continue;
         }
         return child.id() == id_node.id();
+    }
+    false
+}
+
+pub fn is_in_type_arguments(node: Node) -> bool {
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        if parent.kind() == "type_arguments" {
+            return true;
+        }
+        cur = parent;
     }
     false
 }

@@ -475,6 +475,42 @@ pub fn inject_and_determine(
         "inject_and_determine"
     );
 
+    // Detect misparse: `primitive.SENTINEL` -> local_variable_declaration(type=primitive, name=SENTINEL)
+    // This happens because `int.foo` is not valid Java syntax.
+    if sentinel_node.kind() == "identifier"
+        && let Some(declarator) = sentinel_node
+            .parent()
+            .filter(|p| p.kind() == "variable_declarator")
+        && let Some(decl) = declarator
+            .parent()
+            .filter(|p| p.kind() == "local_variable_declaration")
+    {
+        // Confirm sentinel is the variable name, not in the initializer.
+        let is_name = declarator
+            .child_by_field_name("name")
+            .is_some_and(|n| n.id() == sentinel_node.id());
+        if is_name {
+            // Extract receiver from the type position of the declaration.
+            let mut wc = decl.walk();
+            let receiver_expr = decl
+                .named_children(&mut wc)
+                .find(|c| c.kind() != "modifiers" && c.kind() != "variable_declarator")
+                .and_then(|n| n.utf8_text(injected_source.as_bytes()).ok())
+                .map(|s| strip_sentinel(s.trim()))
+                .unwrap_or_default();
+            if !receiver_expr.is_empty() {
+                let clean_loc = CursorLocation::MemberAccess {
+                    receiver_semantic_type: None,
+                    receiver_type: None,
+                    member_prefix: String::new(),
+                    receiver_expr,
+                    arguments: None,
+                };
+                return Some((clean_loc, String::new()));
+            }
+        }
+    }
+
     if sentinel_node.kind() == "identifier" || sentinel_node.kind() == "type_identifier" {
         let tmp = JavaContextExtractor::new(
             injected_source.clone(),
