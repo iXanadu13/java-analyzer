@@ -231,7 +231,7 @@ fn build_candidate(
         format!("{} ", visibility)
     };
 
-    let insert_text = if ctx.has_paren_after_cursor() {
+    let insert_text = if ctx.is_followed_by_opener() {
         format!(
             "@Override\n{}{}  {}(",
             vis_prefix, return_type_source, method.name

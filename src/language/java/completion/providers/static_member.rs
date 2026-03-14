@@ -124,7 +124,7 @@ impl CompletionProvider for StaticMemberProvider {
                 .with_callable_insert(
                     method.name.as_ref(),
                     &method.params.param_names(),
-                    ctx.has_paren_after_cursor(),
+                    ctx.is_followed_by_opener(),
                 )
                 .with_detail(render::method_detail(
                     class_name,
@@ -240,7 +240,7 @@ impl StaticMemberProvider {
                     candidate.with_callable_insert(
                         md.name.as_ref(),
                         &md.params.param_names(),
-                        ctx.has_paren_after_cursor(),
+                        ctx.is_followed_by_opener(),
                     )
                 } else {
                     candidate
@@ -770,7 +770,7 @@ mod tests {
         let col = raw.find("priFunc").unwrap() as u32 + "priFunc".len() as u32;
         let ctx = at(src, line, col);
         assert!(
-            ctx.has_paren_after_cursor(),
+            ctx.is_followed_by_opener(),
             "char after cursor should be '(', got {:?}",
             ctx.char_after_cursor
         );
@@ -791,7 +791,7 @@ mod tests {
         let col = raw.find("priFunc").unwrap() as u32 + "priFunc".len() as u32;
         let ctx = at(src, line, col);
         assert!(
-            !ctx.has_paren_after_cursor(),
+            !ctx.is_followed_by_opener(),
             "no paren after cursor, got {:?}",
             ctx.char_after_cursor
         );

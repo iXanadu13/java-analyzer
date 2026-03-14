@@ -96,7 +96,7 @@ impl CompletionProvider for ThisMemberProvider {
                     candidate.with_callable_insert(
                         md.name.as_ref(),
                         &md.params.param_names(),
-                        ctx.has_paren_after_cursor(),
+                        ctx.is_followed_by_opener(),
                     )
                 } else {
                     candidate
@@ -167,7 +167,7 @@ impl CompletionProvider for ThisMemberProvider {
                         .with_callable_insert(
                             method.name.as_ref(),
                             &method.params.param_names(),
-                            ctx.has_paren_after_cursor(),
+                            ctx.is_followed_by_opener(),
                         )
                         .with_detail(render::method_detail(
                             class_meta.internal_name.as_ref(),

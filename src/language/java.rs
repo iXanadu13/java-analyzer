@@ -6448,7 +6448,7 @@ mod tests {
 
         let (ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
         assert!(
-            ctx.has_paren_after_cursor(),
+            ctx.is_followed_by_opener(),
             "expected parser to detect existing '(' after cursor"
         );
         let foo = candidates
@@ -6545,7 +6545,7 @@ mod tests {
         let col = raw.find("fun").unwrap() as u32 + 3;
         let ctx = at(src, line, col);
         assert!(
-            ctx.has_paren_after_cursor(),
+            ctx.is_followed_by_opener(),
             "char after identifier should be '(', got {:?}",
             ctx.char_after_cursor
         );
@@ -6567,7 +6567,7 @@ mod tests {
         let col = raw.find("priFunc").unwrap() as u32 + "priFunc".len() as u32;
         let ctx = at(src, line, col);
         assert!(
-            ctx.has_paren_after_cursor(),
+            ctx.is_followed_by_opener(),
             "after 'priFunc' should see '(', char_after_cursor={:?}",
             ctx.char_after_cursor
         );

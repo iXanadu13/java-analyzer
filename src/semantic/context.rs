@@ -543,8 +543,11 @@ impl SemanticContext {
     }
 
     /// The cursor is immediately followed by '(', and method completion does not require additional parentheses.
-    pub fn has_paren_after_cursor(&self) -> bool {
-        self.char_after_cursor == Some('(')
+    pub fn is_followed_by_opener(&self) -> bool {
+        matches!(
+            self.char_after_cursor,
+            Some('(') | Some('<') | Some('{') | Some('[')
+        )
     }
 
     pub fn file_stem(&self) -> Option<&str> {

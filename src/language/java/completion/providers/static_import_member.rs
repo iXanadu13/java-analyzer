@@ -121,7 +121,7 @@ fn all_static_members(
             .with_callable_insert(
                 method.name.as_ref(),
                 &method.params.param_names(),
-                ctx.has_paren_after_cursor(),
+                ctx.is_followed_by_opener(),
             )
             .with_detail(render::method_detail(class_path, meta, method, &resolver))
             .with_score(75.0),
@@ -183,7 +183,7 @@ fn specific_static_member(
             .with_callable_insert(
                 method.name.as_ref(),
                 &method.params.param_names(),
-                ctx.has_paren_after_cursor(),
+                ctx.is_followed_by_opener(),
             )
             .with_detail(render::method_detail(class_path, meta, method, &resolver))
             .with_score(80.0),

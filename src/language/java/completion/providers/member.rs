@@ -68,7 +68,7 @@ impl CompletionProvider for MemberProvider {
             if ctx.is_in_static_context() {
                 return ProviderCompletionResult::default();
             }
-            let has_paren_after_cursor = ctx.has_paren_after_cursor();
+            let has_paren_after_cursor = ctx.is_followed_by_opener();
 
             // source members (including private members, directly parsed from the AST)
             let mut results = if !ctx.current_class_members.is_empty() {
@@ -212,7 +212,7 @@ impl CompletionProvider for MemberProvider {
         } else {
             Some(member_prefix.to_lowercase())
         };
-        let has_paren_after_cursor = ctx.has_paren_after_cursor();
+        let has_paren_after_cursor = ctx.is_followed_by_opener();
         let mut results = Vec::new();
         let flow_receiver_cast_plan =
             build_flow_receiver_cast_plan(ctx, index, receiver_expr, &resolved_effective);
@@ -396,7 +396,7 @@ impl MemberProvider {
             Some(member_prefix.to_lowercase())
         };
         let resolver = ContextualResolver::new(index, ctx);
-        let has_paren_after_cursor = ctx.has_paren_after_cursor();
+        let has_paren_after_cursor = ctx.is_followed_by_opener();
         let mut results = Vec::new();
         let mut seen_methods = std::collections::HashSet::new();
 
@@ -780,7 +780,7 @@ impl MemberProvider {
                     candidate.with_callable_insert(
                         md.name.as_ref(),
                         &md.params.param_names(),
-                        ctx.has_paren_after_cursor(),
+                        ctx.is_followed_by_opener(),
                     )
                 } else {
                     candidate

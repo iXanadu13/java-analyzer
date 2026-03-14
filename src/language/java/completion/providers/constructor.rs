@@ -111,7 +111,7 @@ impl CompletionProvider for ConstructorProvider {
                     },
                     self.name(),
                 )
-                .with_callable_insert(meta.name.as_ref(), &[], ctx.has_paren_after_cursor())
+                .with_callable_insert(meta.name.as_ref(), &[], ctx.is_followed_by_opener())
                 .with_detail(format!("new {}()", fqn))
                 .with_score(type_score_boost);
 
@@ -119,7 +119,7 @@ impl CompletionProvider for ConstructorProvider {
                     candidate.with_generics_callable_insert(
                         meta.name.as_ref(),
                         &[],
-                        ctx.has_paren_after_cursor(),
+                        ctx.is_followed_by_opener(),
                     )
                 } else {
                     candidate
@@ -153,7 +153,7 @@ impl CompletionProvider for ConstructorProvider {
                 .with_callable_insert(
                     meta.name.as_ref(),
                     &ctor.params.param_names(),
-                    ctx.has_paren_after_cursor(),
+                    ctx.is_followed_by_opener(),
                 )
                 .with_detail(detail)
                 .with_score(type_score_boost);
@@ -162,7 +162,7 @@ impl CompletionProvider for ConstructorProvider {
                     candidate.with_generics_callable_insert(
                         meta.name.as_ref(),
                         &[],
-                        ctx.has_paren_after_cursor(),
+                        ctx.is_followed_by_opener(),
                     )
                 } else {
                     candidate
