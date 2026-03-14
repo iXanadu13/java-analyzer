@@ -1,0 +1,636 @@
+use crate::language::java::JavaContextExtractor;
+use crate::language::java::utils::{find_ancestor, strip_sentinel};
+use crate::semantic::CursorLocation;
+use crate::semantic::context::{
+    ExpectedTypeSource, FunctionalExprShape, FunctionalMethodCallHint, FunctionalTargetHint,
+    MethodRefQualifierKind, StatementLabelCompletionKind,
+};
+use tree_sitter::Node;
+
+use super::utils::{cursor_truncated_text, is_descendant_of};
+
+pub(crate) fn infer_functional_target_hint(
+    ctx: &JavaContextExtractor,
+    cursor_node: Option<Node>,
+) -> Option<FunctionalTargetHint> {
+    let node = cursor_node?;
+    let (expected_type_source, mut expected_type_context) = infer_expected_type_source(ctx, node);
+    let assignment_lhs_expr = infer_assignment_rhs_lhs_expr(ctx, node);
+    if expected_type_context.is_none() && assignment_lhs_expr.is_some() {
+        expected_type_context = Some(ExpectedTypeSource::AssignmentRhs);
+    }
+    let method_call = infer_method_argument_target_hint(ctx, node);
+    let expr_shape = infer_functional_expr_shape(ctx, node);
+    if expected_type_source.is_none() && assignment_lhs_expr.is_none() && method_call.is_none() {
+        // Fallback: when the cursor is inside an ERROR node that contains `->`,
+        // try to recover the expected type from `Type name = ... -> ...` pattern.
+        return infer_functional_target_hint_from_error_arrow(ctx, node);
+    }
+    Some(FunctionalTargetHint {
+        expected_type_source,
+        expected_type_context,
+        assignment_lhs_expr,
+        method_call,
+        expr_shape,
+    })
+}
+
+/// Fallback: recover functional target hint from ERROR node containing `->`.
+///
+/// When tree-sitter produces a top-level ERROR for incomplete lambda syntax like
+///   `Function<String, Integer> f = s -> s.subs`
+/// we scan the ERROR's children for `->` and extract the type from the preceding
+/// `Type name =` pattern.
+fn infer_functional_target_hint_from_error_arrow(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> Option<FunctionalTargetHint> {
+    // Walk up to find an ERROR (or program-level ERROR) containing `->`
+    let mut container = None;
+    let mut current = Some(node);
+    while let Some(n) = current {
+        if n.kind() == "ERROR" || n.kind() == "program" {
+            let mut wc = n.walk();
+            let has_arrow = n
+                .children(&mut wc)
+                .any(|c| c.kind() == "->" && c.end_byte() <= ctx.offset);
+            if has_arrow {
+                container = Some(n);
+                break;
+            }
+        }
+        current = n.parent();
+    }
+    let container = container?;
+
+    let mut wc = container.walk();
+    let children: Vec<Node> = container.children(&mut wc).collect();
+
+    // Find the `->` before cursor
+    let arrow_idx = children
+        .iter()
+        .rposition(|n| n.kind() == "->" && n.end_byte() <= ctx.offset)?;
+
+    // Look for pattern: ... Type name = params -> ...
+    // We need `=` before params, and a type node before `name`.
+    // Walk backwards from arrow: params_node is at arrow_idx-1, then `=`, then `name`, then `Type`
+    if arrow_idx < 3 {
+        return None;
+    }
+
+    let params_node = &children[arrow_idx - 1];
+    // Validate params_node looks like lambda parameters
+    if !matches!(
+        params_node.kind(),
+        "identifier" | "inferred_parameters" | "formal_parameters"
+    ) {
+        return None;
+    }
+
+    // Find `=` before params
+    let eq_idx = (0..arrow_idx - 1)
+        .rev()
+        .find(|&i| children[i].kind() == "=")?;
+
+    // The identifier (variable name) should be right before `=`
+    if eq_idx == 0 {
+        return None;
+    }
+    let _name_node = &children[eq_idx - 1];
+
+    // The type node should be before the name
+    if eq_idx < 2 {
+        return None;
+    }
+
+    // Collect the type: it could be a generic_type, type_identifier, etc.
+    // Take the named node just before the variable name.
+    let type_node = &children[eq_idx - 2];
+    if !matches!(
+        type_node.kind(),
+        "generic_type" | "type_identifier" | "scoped_type_identifier" | "array_type"
+    ) {
+        return None;
+    }
+
+    let expected_type = ctx.node_text(*type_node).trim().to_string();
+    if expected_type.is_empty() {
+        return None;
+    }
+
+    // Infer lambda param count from params_node
+    let param_count = match params_node.kind() {
+        "identifier" => Some(1usize),
+        "inferred_parameters" => {
+            let mut wc2 = params_node.walk();
+            Some(
+                params_node
+                    .named_children(&mut wc2)
+                    .filter(|n| n.kind() == "identifier")
+                    .count(),
+            )
+        }
+        "formal_parameters" => {
+            let mut wc2 = params_node.walk();
+            Some(
+                params_node
+                    .named_children(&mut wc2)
+                    .filter(|n| matches!(n.kind(), "formal_parameter" | "spread_parameter"))
+                    .count(),
+            )
+        }
+        _ => None,
+    };
+
+    // Build expression body (text between `->` and cursor, if not a block)
+    let arrow_end = children[arrow_idx].end_byte();
+    let expression_body = if ctx.offset > arrow_end {
+        let body_text = ctx.source[arrow_end..ctx.offset].trim();
+        if body_text.is_empty() || body_text.starts_with('{') {
+            None
+        } else {
+            Some(body_text.to_string())
+        }
+    } else {
+        None
+    };
+
+    let expr_shape = param_count.map(|pc| FunctionalExprShape::Lambda {
+        param_count: pc,
+        expression_body,
+    });
+
+    Some(FunctionalTargetHint {
+        expected_type_source: Some(expected_type),
+        expected_type_context: Some(ExpectedTypeSource::VariableInitializer),
+        assignment_lhs_expr: None,
+        method_call: None,
+        expr_shape,
+    })
+}
+
+fn infer_expected_type_source(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> (Option<String>, Option<ExpectedTypeSource>) {
+    if let Some(ty) = infer_assignment_rhs_expected_type(ctx, node) {
+        return (Some(ty), Some(ExpectedTypeSource::VariableInitializer));
+    }
+    if let Some(ty) = infer_return_expected_type(ctx, node) {
+        return (Some(ty), Some(ExpectedTypeSource::ReturnExpr));
+    }
+    (None, None)
+}
+
+fn infer_assignment_rhs_expected_type(ctx: &JavaContextExtractor, node: Node) -> Option<String> {
+    let declarator = find_ancestor(node, "variable_declarator")?;
+    let value_node = declarator.child_by_field_name("value")?;
+    if !is_descendant_of(node, value_node) {
+        return None;
+    }
+    let decl = declarator.parent()?;
+    if decl.kind() != "local_variable_declaration" && decl.kind() != "field_declaration" {
+        return None;
+    }
+    Some(extract_type_from_decl(ctx, decl))
+}
+
+fn infer_return_expected_type(ctx: &JavaContextExtractor, node: Node) -> Option<String> {
+    let return_stmt = find_ancestor(node, "return_statement")?;
+    return_stmt.child_by_field_name("value")?;
+    let method_decl = find_ancestor(return_stmt, "method_declaration")?;
+    let mut walker = method_decl.walk();
+    for child in method_decl.named_children(&mut walker) {
+        if matches!(child.kind(), "modifiers" | "type_parameters") {
+            continue;
+        }
+        if child.kind() == "identifier" || child.kind() == "formal_parameters" {
+            break;
+        }
+        let ty = ctx.node_text(child).trim();
+        if !ty.is_empty() {
+            return Some(ty.to_string());
+        }
+    }
+    None
+}
+
+fn infer_assignment_rhs_lhs_expr(ctx: &JavaContextExtractor, node: Node) -> Option<String> {
+    let assign = find_ancestor(node, "assignment_expression")?;
+    let right = assign.child_by_field_name("right")?;
+    if !is_descendant_of(node, right) {
+        return None;
+    }
+    let left = assign.child_by_field_name("left")?;
+    let lhs = ctx.node_text(left).trim();
+    if lhs.is_empty() {
+        return None;
+    }
+    Some(lhs.to_string())
+}
+
+fn infer_method_argument_target_hint(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> Option<FunctionalMethodCallHint> {
+    let arg_list = find_ancestor(node, "argument_list")?;
+    let invocation = arg_list.parent()?;
+    if invocation.kind() != "method_invocation" {
+        return None;
+    }
+    let receiver_expr = invocation
+        .child_by_field_name("object")
+        .map(|n| ctx.node_text(n).to_string())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "this".to_string());
+    let method_name = invocation
+        .child_by_field_name("name")
+        .map(|n| ctx.node_text(n).to_string())
+        .unwrap_or_default();
+    if method_name.is_empty() {
+        return None;
+    }
+    let arg_index = argument_index_at_cursor(ctx, arg_list);
+    let arg_texts = split_argument_texts(ctx, arg_list);
+    Some(FunctionalMethodCallHint {
+        receiver_expr,
+        method_name,
+        arg_index,
+        arg_texts,
+    })
+}
+
+fn argument_index_at_cursor(ctx: &JavaContextExtractor, arg_list: Node) -> usize {
+    let start = arg_list.start_byte().saturating_add(1);
+    let end = arg_list.end_byte().saturating_sub(1).min(ctx.offset);
+    if end <= start {
+        return 0;
+    }
+    count_top_level_commas(&ctx.source[start..end])
+}
+
+fn split_argument_texts(ctx: &JavaContextExtractor, arg_list: Node) -> Vec<String> {
+    let start = arg_list.start_byte().saturating_add(1);
+    let end = arg_list.end_byte().saturating_sub(1);
+    if end <= start {
+        return vec![];
+    }
+    split_top_level_args(&ctx.source[start..end])
+}
+
+pub(super) fn count_top_level_commas(s: &str) -> usize {
+    let mut depth = 0i32;
+    let mut prev = None;
+    let mut commas = 0usize;
+    for c in s.chars() {
+        match c {
+            '(' | '<' | '[' | '{' => depth += 1,
+            '>' if prev == Some('-') => {}
+            ')' | '>' | ']' | '}' => depth = (depth - 1).max(0),
+            ',' if depth == 0 => commas += 1,
+            _ => {}
+        }
+        prev = Some(c);
+    }
+    commas
+}
+
+pub(super) fn split_top_level_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut prev = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '<' | '[' | '{' => depth += 1,
+            '>' if prev == Some('-') => {}
+            ')' | '>' | ']' | '}' => depth = (depth - 1).max(0),
+            ',' if depth == 0 => {
+                let part = s[start..i].trim();
+                if !part.is_empty() {
+                    out.push(part.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        prev = Some(c);
+    }
+    let tail = s[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
+fn infer_functional_expr_shape(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> Option<FunctionalExprShape> {
+    if let Some(method_ref) = find_ancestor(node, "method_reference") {
+        return infer_method_reference_shape(ctx, method_ref);
+    }
+    if let Some(lambda) = find_ancestor(node, "lambda_expression") {
+        return infer_lambda_shape(ctx, lambda);
+    }
+    None
+}
+
+fn infer_method_reference_shape(
+    ctx: &JavaContextExtractor,
+    method_ref: Node,
+) -> Option<FunctionalExprShape> {
+    let raw = strip_sentinel(ctx.node_text(method_ref).trim());
+    let sep_idx = raw.find("::")?;
+    let qualifier_expr = raw[..sep_idx].trim().to_string();
+    if qualifier_expr.is_empty() {
+        return None;
+    }
+    let rhs_raw = raw[sep_idx + 2..].trim_start();
+    let rhs_no_type_args = strip_leading_type_arguments(rhs_raw);
+    let member_name = strip_sentinel(rhs_no_type_args.trim()).to_string();
+    if member_name.is_empty() {
+        return None;
+    }
+    let is_constructor = member_name == "new" || member_name.starts_with("new");
+    let qualifier_kind = infer_method_ref_qualifier_kind(&qualifier_expr);
+    Some(FunctionalExprShape::MethodReference {
+        qualifier_expr,
+        member_name,
+        is_constructor,
+        qualifier_kind,
+    })
+}
+
+fn strip_leading_type_arguments(s: &str) -> &str {
+    let trimmed = s.trim_start();
+    if !trimmed.starts_with('<') {
+        return trimmed;
+    }
+    let mut depth = 0i32;
+    for (i, c) in trimmed.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return trimmed[i + 1..].trim_start();
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed
+}
+
+fn infer_method_ref_qualifier_kind(qualifier_expr: &str) -> MethodRefQualifierKind {
+    let trimmed = qualifier_expr.trim();
+    if trimmed == "this" || trimmed == "super" {
+        return MethodRefQualifierKind::Expr;
+    }
+    if trimmed
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase())
+    {
+        return MethodRefQualifierKind::Type;
+    }
+    MethodRefQualifierKind::Unknown
+}
+
+fn infer_lambda_shape(ctx: &JavaContextExtractor, lambda: Node) -> Option<FunctionalExprShape> {
+    let raw = strip_sentinel(ctx.node_text(lambda).trim());
+    let arrow = raw.find("->")?;
+    let params_raw = raw[..arrow].trim();
+    let body_raw = raw[arrow + 2..].trim();
+    let param_count = parse_lambda_param_count(params_raw)?;
+    let expression_body = if body_raw.starts_with('{') || body_raw.is_empty() {
+        None
+    } else {
+        Some(body_raw.to_string())
+    };
+    Some(FunctionalExprShape::Lambda {
+        param_count,
+        expression_body,
+    })
+}
+
+fn parse_lambda_param_count(params_raw: &str) -> Option<usize> {
+    let p = params_raw.trim();
+    if p.is_empty() {
+        return None;
+    }
+    if let Some(inner) = p.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+        let inner = inner.trim();
+        if inner.is_empty() {
+            return Some(0);
+        }
+        return Some(split_top_level_args(inner).len());
+    }
+    if p.contains(',') {
+        return None;
+    }
+    Some(1)
+}
+
+fn extract_type_from_decl(ctx: &JavaContextExtractor, decl_node: Node) -> String {
+    let mut walker = decl_node.walk();
+    for child in decl_node.named_children(&mut walker) {
+        if child.kind() == "modifiers" {
+            continue;
+        }
+        return ctx.node_text(child).trim().to_string();
+    }
+    String::new()
+}
+
+// ── statement label detection ─────────────────────────────────────────────────
+
+pub(super) fn detect_statement_label_location(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> Option<(CursorLocation, String)> {
+    if let Some(statement) = find_jump_statement_ancestor(node) {
+        return jump_statement_location(ctx, statement);
+    }
+    detect_partial_jump_label_location(ctx, node)
+}
+
+fn find_jump_statement_ancestor(node: Node) -> Option<Node> {
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        if matches!(candidate.kind(), "break_statement" | "continue_statement") {
+            return Some(candidate);
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+fn jump_statement_location(
+    ctx: &JavaContextExtractor,
+    stmt: Node,
+) -> Option<(CursorLocation, String)> {
+    let kind = match stmt.kind() {
+        "break_statement" => StatementLabelCompletionKind::Break,
+        "continue_statement" => StatementLabelCompletionKind::Continue,
+        _ => return None,
+    };
+    if !is_active_jump_label_slot(ctx, stmt) {
+        return None;
+    }
+    let prefix = stmt
+        .named_children(&mut stmt.walk())
+        .find(|child| child.kind() == "identifier")
+        .map(|ident| cursor_truncated_text(ctx, ident))
+        .unwrap_or_else(|| extract_jump_label_prefix_from_text(ctx, stmt.start_byte()));
+    let prefix = strip_sentinel(&prefix);
+    Some((
+        CursorLocation::StatementLabel {
+            kind,
+            prefix: prefix.clone(),
+        },
+        prefix,
+    ))
+}
+
+fn extract_jump_label_prefix_from_text(ctx: &JavaContextExtractor, stmt_start: usize) -> String {
+    let raw = strip_sentinel(ctx.byte_slice(stmt_start, ctx.offset));
+    let trimmed = raw.trim_end();
+    if let Some(rest) = trimmed.strip_prefix("break") {
+        return rest.trim().to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("continue") {
+        return rest.trim().to_string();
+    }
+    String::new()
+}
+
+fn is_active_jump_label_slot(ctx: &JavaContextExtractor, stmt: Node) -> bool {
+    let identifier = stmt
+        .named_children(&mut stmt.walk())
+        .find(|child| child.kind() == "identifier");
+    if let Some(ident) = identifier {
+        return ctx.offset >= ident.start_byte() && ctx.offset <= ident.end_byte();
+    }
+    let keyword_end = stmt.start_byte()
+        + match stmt.kind() {
+            "break_statement" => "break".len(),
+            "continue_statement" => "continue".len(),
+            _ => return false,
+        };
+    ctx.offset >= keyword_end && ctx.offset < stmt.end_byte()
+}
+
+fn detect_partial_jump_label_location(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> Option<(CursorLocation, String)> {
+    let lower_bound = partial_jump_scan_lower_bound(node);
+    let before = strip_sentinel(ctx.byte_slice(lower_bound, ctx.offset));
+    let trimmed = before.trim_end();
+
+    let (kind, prefix) = if let Some(rest) = trimmed.strip_suffix("break") {
+        if rest
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return None;
+        }
+        (StatementLabelCompletionKind::Break, String::new())
+    } else if let Some(rest) = trimmed.strip_suffix("continue") {
+        if rest
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return None;
+        }
+        (StatementLabelCompletionKind::Continue, String::new())
+    } else {
+        let prefix = extract_identifier_prefix_near_cursor(ctx, lower_bound);
+        if prefix.is_empty() {
+            return None;
+        }
+        let ident_start = ctx.offset.saturating_sub(prefix.len());
+        let head = strip_sentinel(ctx.byte_slice(lower_bound, ident_start));
+        let trimmed_head = head.trim_end();
+        if let Some(rest) = trimmed_head.strip_suffix("break") {
+            if rest
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return None;
+            }
+            (StatementLabelCompletionKind::Break, prefix)
+        } else if let Some(rest) = trimmed_head.strip_suffix("continue") {
+            if rest
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return None;
+            }
+            (StatementLabelCompletionKind::Continue, prefix)
+        } else {
+            return None;
+        }
+    };
+
+    Some((
+        CursorLocation::StatementLabel {
+            kind,
+            prefix: prefix.clone(),
+        },
+        prefix,
+    ))
+}
+
+fn partial_jump_scan_lower_bound(node: Node) -> usize {
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        match candidate.kind() {
+            "block"
+            | "switch_block_statement_group"
+            | "switch_rule"
+            | "program"
+            | "method_declaration"
+            | "constructor_declaration"
+            | "lambda_expression"
+            | "class_body" => return candidate.start_byte(),
+            _ => current = candidate.parent(),
+        }
+    }
+    0
+}
+
+fn extract_identifier_prefix_near_cursor(ctx: &JavaContextExtractor, lower_bound: usize) -> String {
+    let mut i = ctx.offset.min(ctx.source.len());
+    while i > lower_bound {
+        let ch = ctx.source.as_bytes()[i - 1] as char;
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    if i >= ctx.offset {
+        return String::new();
+    }
+    strip_sentinel(&ctx.source[i..ctx.offset])
+}
+
+#[cfg(test)]
+mod tests {
+
+    use crate::language::java::location::hints::{count_top_level_commas, split_top_level_args};
+
+    #[test]
+    fn test_split_top_level_args_keeps_lambda_arrow_from_hiding_commas() {
+        let args = split_top_level_args(r##"s -> s.subs, "hello""##);
+        assert_eq!(args, vec![r#"s -> s.subs"#, r#""hello""#]);
+        assert_eq!(count_top_level_commas(r##"s -> s.subs, "hello""##), 1);
+    }
+}

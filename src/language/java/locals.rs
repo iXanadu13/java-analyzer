@@ -136,7 +136,7 @@ pub fn extract_locals_with_type_ctx(
     vars.extend(extract_misread_var_decls(ctx, search_root, type_ctx));
     vars.extend(extract_locals_from_error_nodes(ctx, search_root, type_ctx));
     vars.extend(extract_params(ctx, root, cursor_node, type_ctx));
-    vars.extend(extract_lambda_params(ctx, cursor_node));
+    vars.extend(extract_lambda_params(ctx, cursor_node, type_ctx));
 
     normalize_visible_locals(vars)
 }
@@ -316,6 +316,7 @@ fn extract_params(
 fn extract_lambda_params(
     ctx: &JavaContextExtractor,
     cursor_node: Option<Node>,
+    type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<RankedLocal> {
     let mut lambdas = Vec::new();
     let mut current = cursor_node;
@@ -325,8 +326,10 @@ fn extract_lambda_params(
         }
         current = node.parent();
     }
+    if lambdas.is_empty() {
+        return extract_lambda_params_from_error_nodes_in_ancestry(ctx, cursor_node, type_ctx);
+    }
     lambdas.reverse();
-
     let mut vars = Vec::new();
     for lambda in lambdas {
         let Some(body) = lambda.child_by_field_name("body") else {
@@ -335,29 +338,171 @@ fn extract_lambda_params(
         if ctx.offset < body.start_byte() || ctx.offset > body.end_byte() {
             continue;
         }
-
         let Some(params) = lambda.child_by_field_name("parameters") else {
             continue;
         };
-        vars.extend(extract_lambda_params_from_node(ctx, params));
+        vars.extend(extract_lambda_params_from_node(ctx, params, type_ctx));
     }
     vars
 }
 
-fn extract_lambda_params_from_node(ctx: &JavaContextExtractor, params: Node) -> Vec<RankedLocal> {
-    extract_lambda_param_names_with_starts(ctx, params)
-        .into_iter()
-        .map(|(name, declaration_start)| RankedLocal {
+fn extract_lambda_params_from_error_nodes_in_ancestry(
+    ctx: &JavaContextExtractor,
+    cursor_node: Option<Node>,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Vec<RankedLocal> {
+    let mut current = cursor_node;
+    while let Some(node) = current {
+        if node.kind() == "ERROR" || node.kind() == "block" || node.kind() == "program" {
+            if let Some(result) = extract_lambda_params_from_error_arrow_node(ctx, node, type_ctx) {
+                return result;
+            }
+        }
+        current = node.parent();
+    }
+    vec![]
+}
+
+fn extract_lambda_params_from_error_arrow_node(
+    ctx: &JavaContextExtractor,
+    container: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Option<Vec<RankedLocal>> {
+    let mut wc = container.walk();
+    let children: Vec<Node> = container.children(&mut wc).collect();
+    let arrow_idx = children
+        .iter()
+        .rposition(|n| n.kind() == "->" && n.end_byte() <= ctx.offset)?;
+    if arrow_idx == 0 {
+        return None;
+    }
+    let arrow_end = children[arrow_idx].end_byte();
+    if ctx.offset < arrow_end {
+        return None;
+    }
+    let params_node = children[arrow_idx - 1];
+    let visibility_scope = lambda_param_visibility_scope(params_node)
+        .unwrap_or_else(|| fallback_visibility_scope(ctx.offset));
+
+    let param_entries: Vec<(Arc<str>, TypeName, usize)> = match params_node.kind() {
+        "identifier" => vec![(
+            Arc::from(ctx.node_text(params_node)),
+            TypeName::new("unknown"),
+            params_node.start_byte(),
+        )],
+        "inferred_parameters" => {
+            let mut wc2 = params_node.walk();
+            params_node
+                .named_children(&mut wc2)
+                .filter(|n| n.kind() == "identifier")
+                .map(|n| {
+                    (
+                        Arc::from(ctx.node_text(n)),
+                        TypeName::new("unknown"),
+                        n.start_byte(),
+                    )
+                })
+                .collect()
+        }
+        "formal_parameters" => {
+            let mut wc2 = params_node.walk();
+            params_node
+                .named_children(&mut wc2)
+                .filter_map(|n| {
+                    if matches!(n.kind(), "formal_parameter" | "spread_parameter") {
+                        let name_node = n.child_by_field_name("name")?;
+                        let ty = extract_lambda_formal_param_type(ctx, n, type_ctx);
+                        Some((
+                            Arc::from(ctx.node_text(name_node)),
+                            ty,
+                            name_node.start_byte(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        _ => return None,
+    };
+
+    if param_entries.is_empty() {
+        return None;
+    }
+    Some(
+        param_entries
+            .into_iter()
+            .map(|(name, type_internal, declaration_start)| RankedLocal {
+                local: LocalVar {
+                    name,
+                    type_internal,
+                    init_expr: None,
+                },
+                declaration_start,
+                visibility_scope,
+            })
+            .collect(),
+    )
+}
+
+fn extract_lambda_params_from_node(
+    ctx: &JavaContextExtractor,
+    params: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Vec<RankedLocal> {
+    let visibility_scope = lambda_param_visibility_scope(params)
+        .unwrap_or_else(|| fallback_visibility_scope(ctx.offset));
+
+    match params.kind() {
+        "identifier" => vec![RankedLocal {
             local: LocalVar {
-                name,
+                name: Arc::from(ctx.node_text(params)),
                 type_internal: TypeName::new("unknown"),
                 init_expr: None,
             },
-            declaration_start,
-            visibility_scope: lambda_param_visibility_scope(params)
-                .unwrap_or_else(|| fallback_visibility_scope(ctx.offset)),
-        })
-        .collect()
+            declaration_start: params.start_byte(),
+            visibility_scope,
+        }],
+        "inferred_parameters" => {
+            let mut wc = params.walk();
+            params
+                .named_children(&mut wc)
+                .filter(|n| n.kind() == "identifier")
+                .map(|n| RankedLocal {
+                    local: LocalVar {
+                        name: Arc::from(ctx.node_text(n)),
+                        type_internal: TypeName::new("unknown"),
+                        init_expr: None,
+                    },
+                    declaration_start: n.start_byte(),
+                    visibility_scope,
+                })
+                .collect()
+        }
+        "formal_parameters" => {
+            let mut wc = params.walk();
+            params
+                .named_children(&mut wc)
+                .filter_map(|n| {
+                    if !matches!(n.kind(), "formal_parameter" | "spread_parameter") {
+                        return None;
+                    }
+                    let name_node = n.child_by_field_name("name")?;
+                    let ty = extract_lambda_formal_param_type(ctx, n, type_ctx);
+                    Some(RankedLocal {
+                        local: LocalVar {
+                            name: Arc::from(ctx.node_text(name_node)),
+                            type_internal: ty,
+                            init_expr: None,
+                        },
+                        declaration_start: name_node.start_byte(),
+                        visibility_scope,
+                    })
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 pub(crate) fn extract_active_lambda_param_names(
@@ -378,9 +523,40 @@ pub(crate) fn extract_active_lambda_param_names(
             };
             return extract_lambda_param_names(ctx, params);
         }
+        // ERROR 或 block 里的 `->` — 尝试从 anonymous node 提取
+        if matches!(node.kind(), "ERROR" | "block" | "program")
+            && let Some(names) = extract_active_lambda_names_from_error_arrow(ctx, node)
+        {
+            return names;
+        }
         current = node.parent();
     }
     vec![]
+}
+
+fn extract_active_lambda_names_from_error_arrow(
+    ctx: &JavaContextExtractor,
+    container: Node,
+) -> Option<Vec<Arc<str>>> {
+    let mut wc = container.walk();
+    let children: Vec<Node> = container.children(&mut wc).collect();
+
+    let arrow_idx = children
+        .iter()
+        .rposition(|n| n.kind() == "->" && n.end_byte() <= ctx.offset)?;
+
+    if arrow_idx == 0 {
+        return None;
+    }
+
+    let arrow_end = children[arrow_idx].end_byte();
+    if ctx.offset < arrow_end {
+        return None;
+    }
+
+    let params_node = children[arrow_idx - 1];
+    let names = extract_lambda_param_names(ctx, params_node);
+    if names.is_empty() { None } else { Some(names) }
 }
 
 fn extract_lambda_param_names(ctx: &JavaContextExtractor, params: Node) -> Vec<Arc<str>> {
@@ -388,6 +564,25 @@ fn extract_lambda_param_names(ctx: &JavaContextExtractor, params: Node) -> Vec<A
         .into_iter()
         .map(|(name, _)| name)
         .collect()
+}
+
+/// 从 formal_parameter 节点提取 lambda 参数类型。
+/// - 无显式类型（inferred）→ "unknown"（让 SAM 绑定接管）
+/// - var → "unknown"（让 SAM 绑定接管）  
+/// - 显式类型 → 解析为内部名
+fn extract_lambda_formal_param_type(
+    ctx: &JavaContextExtractor,
+    param_node: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> TypeName {
+    let Some(type_node) = param_node.child_by_field_name("type") else {
+        return TypeName::new("unknown");
+    };
+    let raw_ty = ctx.node_text(type_node).trim().to_string();
+    if raw_ty.is_empty() || raw_ty == "var" {
+        return TypeName::new("unknown");
+    }
+    resolve_declared_source_type(&raw_ty, type_ctx)
 }
 
 fn extract_lambda_param_names_with_starts(
@@ -623,12 +818,22 @@ fn local_visibility_scope(decl: Node) -> Option<ScopeRange> {
 }
 
 fn lambda_param_visibility_scope(params: Node) -> Option<ScopeRange> {
-    let lambda = params.parent()?;
-    if lambda.kind() != "lambda_expression" {
-        return None;
+    let parent = params.parent()?;
+    if parent.kind() == "lambda_expression" {
+        let body = parent.child_by_field_name("body")?;
+        return Some(node_scope_range(body));
     }
-    let body = lambda.child_by_field_name("body")?;
-    Some(node_scope_range(body))
+    // Fallback for ERROR nodes: find `->` sibling after params,
+    // scope extends from `->` end to the parent's end.
+    let mut wc = parent.walk();
+    let children: Vec<Node> = parent.children(&mut wc).collect();
+    let params_idx = children.iter().position(|n| n.id() == params.id())?;
+    // Next sibling should be `->`
+    let arrow = children.get(params_idx + 1).filter(|n| n.kind() == "->")?;
+    Some(ScopeRange {
+        start: arrow.end_byte(),
+        end: parent.end_byte(),
+    })
 }
 
 fn method_like_body_scope(method: Node) -> Option<ScopeRange> {
@@ -1297,6 +1502,60 @@ mod tests {
                     var.type_internal.to_internal_with_generics()
                 ))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_extract_explicit_typed_lambda_param() {
+        let src = indoc::indoc! {r#"
+    import java.util.function.Function;
+    class T {
+        void m() {
+            Function<String, Integer> f = (String x) -> x/*caret*/;
+        }
+    }
+    "#};
+        let offset = src.find("/*caret*/").unwrap();
+        let src = src.replacen("/*caret*/", "", 1);
+        let (ctx, tree) = setup(&src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+        // (String x) 的 x 应该提取为 String，而非 unknown
+        let x = vars
+            .iter()
+            .find(|v| v.name.as_ref() == "x")
+            .expect("x should exist");
+        assert_eq!(
+            x.type_internal.to_internal_with_generics(),
+            "String",
+            "explicit typed lambda param should use declared type"
+        );
+    }
+
+    #[test]
+    fn test_extract_var_lambda_param_stays_unknown_for_sam_binding() {
+        let src = indoc::indoc! {r#"
+    import java.util.function.Function;
+    class T {
+        void m() {
+            Function<String, Integer> f = (var x) -> x/*caret*/;
+        }
+    }
+    "#};
+        let offset = src.find("/*caret*/").unwrap();
+        let src = src.replacen("/*caret*/", "", 1);
+        let (ctx, tree) = setup(&src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+        // (var x) 的 x 应该是 unknown，让 SAM 绑定接管
+        let x = vars
+            .iter()
+            .find(|v| v.name.as_ref() == "x")
+            .expect("x should exist");
+        assert_eq!(
+            x.type_internal.erased_internal(),
+            "unknown",
+            "var lambda param should remain unknown for SAM binding"
         );
     }
 }

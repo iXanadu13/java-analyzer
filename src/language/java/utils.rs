@@ -1,5 +1,5 @@
 use crate::language::java::SENTINEL;
-use crate::semantic::context::{CursorLocation, StatementLabelTargetKind};
+use crate::semantic::context::StatementLabelTargetKind;
 use ropey::Rope;
 use rust_asm::constants::{
     ACC_ABSTRACT, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
@@ -116,132 +116,6 @@ pub(crate) fn strip_sentinel(s: &str) -> String {
     s.replace(SENTINEL, "")
 }
 
-/// Remove any remaining SENTINEL from CursorLocation
-pub(crate) fn strip_sentinel_from_location(loc: CursorLocation) -> CursorLocation {
-    match loc {
-        CursorLocation::MemberAccess {
-            receiver_semantic_type,
-            receiver_type,
-            member_prefix,
-            receiver_expr,
-            arguments,
-        } => CursorLocation::MemberAccess {
-            receiver_semantic_type,
-            receiver_type,
-            member_prefix: strip_sentinel(&member_prefix),
-            receiver_expr: strip_sentinel(&receiver_expr),
-            arguments: arguments.map(|a| strip_sentinel(&a)),
-        },
-        CursorLocation::ConstructorCall {
-            class_prefix,
-            expected_type,
-        } => CursorLocation::ConstructorCall {
-            class_prefix: strip_sentinel(&class_prefix),
-            expected_type,
-        },
-        CursorLocation::Expression { prefix } => CursorLocation::Expression {
-            prefix: strip_sentinel(&prefix),
-        },
-        CursorLocation::MethodArgument { prefix } => CursorLocation::MethodArgument {
-            prefix: strip_sentinel(&prefix),
-        },
-        CursorLocation::Annotation {
-            prefix,
-            target_element_type,
-        } => CursorLocation::Annotation {
-            prefix: strip_sentinel(&prefix),
-            target_element_type,
-        },
-        CursorLocation::TypeAnnotation { prefix } => CursorLocation::TypeAnnotation {
-            prefix: strip_sentinel(&prefix),
-        },
-        CursorLocation::MethodReference {
-            qualifier_expr,
-            member_prefix,
-            is_constructor,
-        } => CursorLocation::MethodReference {
-            qualifier_expr: strip_sentinel(&qualifier_expr),
-            member_prefix: strip_sentinel(&member_prefix),
-            is_constructor,
-        },
-        CursorLocation::StringLiteral { prefix } => CursorLocation::StringLiteral {
-            prefix: strip_sentinel(&prefix),
-        },
-        CursorLocation::StatementLabel { kind, prefix } => CursorLocation::StatementLabel {
-            kind,
-            prefix: strip_sentinel(&prefix),
-        },
-        CursorLocation::VariableName { type_name } => CursorLocation::VariableName { type_name },
-        CursorLocation::Import { prefix } => CursorLocation::Import {
-            prefix: strip_sentinel(&prefix),
-        },
-        other => other,
-    }
-}
-
-/// Count unmatched `{` and `(` in src, return closing string to append.
-pub(crate) fn close_open_brackets(src: &str) -> String {
-    let mut braces: i32 = 0;
-    let mut parens: i32 = 0;
-    let mut in_string = false;
-    let mut in_char = false;
-    let mut escaped = false;
-    let mut it = src.chars().peekable();
-    while let Some(c) = it.next() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' => escaped = true,
-            '"' if !in_char => in_string = !in_string,
-            '\'' if !in_string => in_char = !in_char,
-            _ if in_string || in_char => {}
-            '/' if it.peek() == Some(&'/') => {
-                // skip to end of line
-                for nc in it.by_ref() {
-                    if nc == '\n' {
-                        break;
-                    }
-                }
-            }
-            '/' if it.peek() == Some(&'*') => {
-                // skip block comment
-                it.next(); // consume '*'
-                let mut prev = ' ';
-                for nc in it.by_ref() {
-                    if prev == '*' && nc == '/' {
-                        break;
-                    }
-                    prev = nc;
-                }
-            }
-            '{' => braces += 1,
-            '}' => {
-                if braces > 0 {
-                    braces -= 1;
-                }
-            }
-            '(' => parens += 1,
-            ')' => {
-                if parens > 0 {
-                    parens -= 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut tail = String::new();
-    for _ in 0..parens {
-        tail.push(')');
-    }
-    tail.push(';');
-    for _ in 0..braces {
-        tail.push('}');
-    }
-    tail
-}
-
 pub(crate) fn get_initializer_text(type_node: Node, bytes: &[u8]) -> Option<String> {
     let decl = type_node.parent()?;
     if decl.kind() != "local_variable_declaration" {
@@ -342,8 +216,9 @@ pub fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<Stri
     None
 }
 
-pub fn is_cursor_in_comment_with_rope(source: &str, rope: &Rope, offset: usize) -> bool {
+pub fn is_cursor_in_comment_with_rope(source: &str, _rope: &Rope, offset: usize) -> bool {
     let before = &source[..offset];
+
     let last_open = before.rfind("/*");
     let last_close = before.rfind("*/");
     if let Some(open) = last_open {
@@ -353,10 +228,9 @@ pub fn is_cursor_in_comment_with_rope(source: &str, rope: &Rope, offset: usize) 
             _ => {}
         }
     }
-    let line_idx = rope.byte_to_line(offset.min(source.len().saturating_sub(1)));
-    let line_byte_start = rope.line_to_byte(line_idx);
-    let safe_offset = offset.max(line_byte_start).min(source.len());
-    is_in_line_comment(&source[line_byte_start..safe_offset])
+
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    is_in_line_comment(&source[line_start..offset])
 }
 
 pub fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
@@ -481,19 +355,5 @@ pub(crate) fn find_string_ancestor<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
             _ => {}
         }
         node = node.parent()?;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::language::java::utils::close_open_brackets;
-
-    #[test]
-    fn test_close_open_brackets_unit() {
-        assert_eq!(close_open_brackets("class A { void f() {"), ";}}");
-        assert_eq!(close_open_brackets("foo(a, b"), ");");
-        assert_eq!(close_open_brackets("class A { void f() { foo("), ");}}");
-        assert_eq!(close_open_brackets("class A {}"), ";");
-        assert_eq!(close_open_brackets("}}}}"), ";");
     }
 }

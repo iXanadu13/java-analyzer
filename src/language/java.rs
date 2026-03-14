@@ -25,7 +25,7 @@ use tower_lsp::lsp_types::{
     InlayHint, InlayHintKind, InlayHintLabel, Position, Range, SemanticTokenModifier,
     SemanticTokenType,
 };
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{Node, Parser};
 
 pub mod class_parser;
 pub mod completion;
@@ -33,7 +33,6 @@ pub mod completion_context;
 pub mod editor_semantics;
 pub mod expression_typing;
 pub mod flow;
-pub mod injection;
 pub mod inlay_hints;
 pub mod intrinsics;
 pub mod locals;
@@ -427,24 +426,9 @@ impl JavaContextExtractor {
 
         let (location, query) = location::determine_location(&self, cursor_node, trigger_char);
 
-        // If AST parsing fails, proceed with the injection path.
-        let (location, query) = if matches!(location, CursorLocation::Unknown)
-            || injection::should_force_injection(&self, cursor_node, &location)
-        {
-            injection::inject_and_determine(&self, cursor_node, trigger_char)
-                .unwrap_or((location, query))
-        } else {
-            (location, query)
-        };
-        let recovered_semantics = self.try_recover_semantic_tree(root, cursor_node);
-        let (semantic_extractor, semantic_root, semantic_cursor_node) =
-            if let Some((extractor, tree)) = recovered_semantics.as_ref() {
-                let semantic_root = tree.root_node();
-                let semantic_cursor_node = extractor.find_cursor_node(semantic_root);
-                (extractor, semantic_root, semantic_cursor_node)
-            } else {
-                (&self, root, cursor_node)
-            };
+        let semantic_extractor = &self;
+        let semantic_root = root;
+        let semantic_cursor_node = cursor_node;
 
         let functional_target_hint =
             location::infer_functional_target_hint(semantic_extractor, semantic_cursor_node);
@@ -474,6 +458,15 @@ impl JavaContextExtractor {
         );
         let active_lambda_param_names =
             locals::extract_active_lambda_param_names(semantic_extractor, semantic_cursor_node);
+        let active_lambda_param_names = if active_lambda_param_names.is_empty() {
+            extract_lambda_params_from_error_arrow(
+                semantic_extractor,
+                semantic_cursor_node,
+                semantic_root,
+            )
+        } else {
+            active_lambda_param_names
+        };
         let statement_labels =
             scope::extract_enclosing_statement_labels(semantic_extractor, semantic_cursor_node);
         let flow_type_overrides = flow::extract_instanceof_true_branch_overrides(
@@ -552,63 +545,31 @@ impl JavaContextExtractor {
             && !utils::is_comment_kind(n.kind())
             && n.end_byte() >= self.offset
         {
+            // If we got a very broad node (inter-node gap), try forward lookup
+            // for a more precise child node at the cursor position.
+            if matches!(n.kind(), "program" | "lambda_expression") {
+                if self.offset < self.source.len()
+                    && self.source.as_bytes()[self.offset] != b'\n'
+                    && let Some(fwd) =
+                        root.named_descendant_for_byte_range(self.offset, self.offset + 1)
+                    && !utils::is_comment_kind(fwd.kind())
+                {
+                    return Some(fwd);
+                }
+                if n.kind() == "program" {
+                    return None;
+                }
+            }
             return Some(n);
         }
         if self.offset < self.source.len()
+            && self.source.as_bytes()[self.offset] != b'\n'
             && let Some(n) = root.named_descendant_for_byte_range(self.offset, self.offset + 1)
             && !utils::is_comment_kind(n.kind())
         {
             return Some(n);
         }
         None
-    }
-
-    fn try_recover_semantic_tree<'tree>(
-        &self,
-        root: Node<'tree>,
-        cursor_node: Option<Node<'tree>>,
-    ) -> Option<(JavaContextExtractor, Tree)> {
-        let in_error_context = cursor_node
-            .map(|n| n.kind() == "ERROR" || utils::find_ancestor(n, "ERROR").is_some())
-            .unwrap_or(false);
-
-        // Also trigger when cursor landed on a block or local_variable_declaration
-        // that contains a lambda-like structure (e.g., `(a) -> ` with no body yet).
-        let cursor_may_contain_lambda = cursor_node
-            .map(|n| matches!(n.kind(), "block" | "local_variable_declaration"))
-            .unwrap_or(false);
-
-        if !in_error_context
-            && !cursor_may_contain_lambda
-            && utils::find_top_error_node(root).is_none()
-        {
-            return None;
-        }
-
-        let injected_source = injection::build_injected_source(self, cursor_node);
-        let sentinel_offset = injected_source.find(SENTINEL)?;
-        let sentinel_end = sentinel_offset + SENTINEL.len();
-        let rope = Rope::from_str(&injected_source);
-        let mut parser = self.make_parser();
-        let tree = parser.parse(&injected_source, None)?;
-        let extractor = JavaContextExtractor::with_rope(
-            injected_source,
-            sentinel_end,
-            rope,
-            self.name_table.clone(),
-        );
-        let recovered_cursor = extractor.find_cursor_node(tree.root_node());
-        let recovered_has_structure = recovered_cursor.is_some_and(|node| {
-            utils::find_ancestor(node, "method_declaration").is_some()
-                || utils::find_ancestor(node, "lambda_expression").is_some()
-                || utils::find_ancestor(node, "variable_declarator").is_some()
-        });
-
-        if !recovered_has_structure {
-            return None;
-        }
-
-        Some((extractor, tree))
     }
 
     fn empty_context(&self) -> SemanticContext {
@@ -632,6 +593,73 @@ impl JavaContextExtractor {
     }
 }
 
+fn extract_lambda_params_from_error_arrow(
+    ctx: &JavaContextExtractor,
+    _cursor_node: Option<Node>,
+    root: Node,
+) -> Vec<Arc<str>> {
+    // 在 root 里找 `->` anonymous node，且 cursor 在 `->` 之后
+    fn find_arrow_before_cursor<'a>(node: Node<'a>, offset: usize, result: &mut Option<Node<'a>>) {
+        if node.kind() == "->" && node.end_byte() <= offset {
+            *result = Some(node);
+        }
+        let mut wc = node.walk();
+        for child in node.children(&mut wc) {
+            find_arrow_before_cursor(child, offset, result);
+        }
+    }
+
+    let mut arrow = None;
+    find_arrow_before_cursor(root, ctx.offset, &mut arrow);
+
+    let Some(arrow) = arrow else {
+        return vec![];
+    };
+
+    // 找 `->` 之前的 identifier 或 inferred_parameters
+    // params 是 `->` 的前一个 sibling
+    let Some(parent) = arrow.parent() else {
+        return vec![];
+    };
+    let mut wc = parent.walk();
+    let children: Vec<Node> = parent.children(&mut wc).collect();
+    let Some(arrow_idx) = children.iter().position(|n| n.id() == arrow.id()) else {
+        return vec![];
+    };
+    if arrow_idx == 0 {
+        return vec![];
+    }
+    let params_node = children[arrow_idx - 1];
+
+    // 从 params_node 提取参数名
+    match params_node.kind() {
+        "identifier" => vec![Arc::from(ctx.node_text(params_node))],
+        "inferred_parameters" => {
+            let mut wc2 = params_node.walk();
+            params_node
+                .named_children(&mut wc2)
+                .filter(|n| n.kind() == "identifier")
+                .map(|n| Arc::from(ctx.node_text(n)))
+                .collect()
+        }
+        "formal_parameters" => {
+            let mut wc2 = params_node.walk();
+            params_node
+                .named_children(&mut wc2)
+                .filter_map(|n| {
+                    if n.kind() == "formal_parameter" || n.kind() == "spread_parameter" {
+                        n.child_by_field_name("name")
+                            .map(|name| Arc::from(ctx.node_text(name)))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,10 +669,7 @@ mod tests {
             ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
             WorkspaceIndex,
         },
-        language::{
-            java::{class_parser::parse_java_source, injection::build_injected_source},
-            rope_utils::line_col_to_offset,
-        },
+        language::{java::class_parser::parse_java_source, rope_utils::line_col_to_offset},
         semantic::{
             LocalVar,
             context::{
@@ -5502,220 +5527,6 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_force_injection_anchor_for_member_tail_with_following_generics() {
-        let src = indoc::indoc! {r#"
-        class Demo {
-            void f() {
-                var a = new HashMap<String, String>();
-                a.p
-                List<Box<? extends Number>> nums = List.of(
-                    new Box<>(1),
-                    new Box<>(2.5)
-                );
-                nums.add();
-            }
-        }
-        "#};
-        let (line, col) = src
-            .lines()
-            .enumerate()
-            .find_map(|(i, l)| {
-                l.find("a.p")
-                    .map(|c| (i as u32, c as u32 + "a.p".len() as u32))
-            })
-            .expect("expected a.p marker");
-        let offset = line_col_to_offset(src, line, col).expect("offset");
-        let mut parser = super::make_java_parser();
-        let tree = parser.parse(src, None).expect("failed to parse java");
-        let extractor = JavaContextExtractor::new(src, offset, None);
-        let cursor_node = extractor.find_cursor_node(tree.root_node());
-        let cursor_info = cursor_node.map(|n| {
-            format!(
-                "{}:[{}..{}]:'{}'",
-                n.kind(),
-                n.start_byte(),
-                n.end_byte(),
-                extractor.node_text(n)
-            )
-        });
-
-        let (raw_loc, raw_query) = location::determine_location(&extractor, cursor_node, None);
-        let predicates = injection::force_injection_predicates(&extractor, cursor_node, &raw_loc);
-        let force = injection::should_force_injection(&extractor, cursor_node, &raw_loc);
-        let injected = build_injected_source(&extractor, cursor_node);
-        let inject_result = injection::inject_and_determine(&extractor, cursor_node, None);
-
-        let out = format!(
-            "offset={offset}\ncursor_node={cursor_info:?}\nraw_location={raw_loc:?}\nraw_query={raw_query:?}\npredicates={predicates:?}\nforce_injection={force}\ninjected_source=\n{injected}\ninject_result={inject_result:?}\n"
-        );
-        insta::assert_snapshot!(
-            "force_injection_anchor_member_tail_with_following_generics",
-            out
-        );
-    }
-
-    #[test]
-    fn test_snapshot_force_injection_predicates_member_tail_vs_generic_type_arg() {
-        let src_member = indoc::indoc! {r#"
-        class Demo {
-            void f() {
-                var a = new HashMap<String, String>();
-                a.p
-                List<Box<? extends Number>> nums = List.of(
-                    new Box<>(1),
-                    new Box<>(2.5)
-                );
-                nums.add();
-            }
-        }
-        "#};
-        let (m_line, m_col) = src_member
-            .lines()
-            .enumerate()
-            .find_map(|(i, l)| {
-                l.find("a.p")
-                    .map(|c| (i as u32, c as u32 + "a.p".len() as u32))
-            })
-            .expect("member marker");
-        let m_off = line_col_to_offset(src_member, m_line, m_col).expect("member offset");
-        let mut parser = super::make_java_parser();
-        let m_tree = parser.parse(src_member, None).expect("member parse");
-        let m_extractor = JavaContextExtractor::new(src_member, m_off, None);
-        let m_cursor = m_extractor.find_cursor_node(m_tree.root_node());
-        let (m_loc, _) = location::determine_location(&m_extractor, m_cursor, None);
-        let m_pred = injection::force_injection_predicates(&m_extractor, m_cursor, &m_loc);
-        let m_force = injection::should_force_injection(&m_extractor, m_cursor, &m_loc);
-
-        let src_member_alt = indoc::indoc! {r#"
-        class Demo {
-            void f() {
-                var a = new HashMap<String, String>();
-                a.a
-                List<Box<? extends Number>> nums = List.of(
-                    new Box<>(1),
-                    new Box<>(2.5)
-                );
-                nums.add();
-            }
-        }
-        "#};
-        let (ma_line, ma_col) = src_member_alt
-            .lines()
-            .enumerate()
-            .find_map(|(i, l)| {
-                l.find("a.a")
-                    .map(|c| (i as u32, c as u32 + "a.a".len() as u32))
-            })
-            .expect("member-alt marker");
-        let ma_off =
-            line_col_to_offset(src_member_alt, ma_line, ma_col).expect("member-alt offset");
-        let ma_tree = parser
-            .parse(src_member_alt, None)
-            .expect("member-alt parse");
-        let ma_extractor = JavaContextExtractor::new(src_member_alt, ma_off, None);
-        let ma_cursor = ma_extractor.find_cursor_node(ma_tree.root_node());
-        let (ma_loc, _) = location::determine_location(&ma_extractor, ma_cursor, None);
-        let ma_pred = injection::force_injection_predicates(&ma_extractor, ma_cursor, &ma_loc);
-        let ma_force = injection::should_force_injection(&ma_extractor, ma_cursor, &ma_loc);
-
-        let src_generic = indoc::indoc! {r#"
-        class A {
-            void f() {
-                List<Bo> nums = new ArrayList<>();
-            }
-        }
-        "#};
-        let (g_line, g_col) = src_generic
-            .lines()
-            .enumerate()
-            .find_map(|(i, l)| l.find("Bo").map(|c| (i as u32, c as u32 + 2)))
-            .expect("generic marker");
-        let g_off = line_col_to_offset(src_generic, g_line, g_col).expect("generic offset");
-        let g_tree = parser.parse(src_generic, None).expect("generic parse");
-        let g_extractor = JavaContextExtractor::new(src_generic, g_off, None);
-        let g_cursor = g_extractor.find_cursor_node(g_tree.root_node());
-        let (g_loc, _) = location::determine_location(&g_extractor, g_cursor, None);
-        let g_pred = injection::force_injection_predicates(&g_extractor, g_cursor, &g_loc);
-        let g_force = injection::should_force_injection(&g_extractor, g_cursor, &g_loc);
-
-        let src_ctor_generic = indoc::indoc! {r#"
-        class A {
-            void f() {
-                new Box<In>(1);
-            }
-        }
-        "#};
-        let (c_line, c_col) = src_ctor_generic
-            .lines()
-            .enumerate()
-            .find_map(|(i, l)| l.find("In").map(|c| (i as u32, c as u32 + 2)))
-            .expect("ctor-generic marker");
-        let c_off = line_col_to_offset(src_ctor_generic, c_line, c_col).expect("ctor offset");
-        let c_tree = parser.parse(src_ctor_generic, None).expect("ctor parse");
-        let c_extractor = JavaContextExtractor::new(src_ctor_generic, c_off, None);
-        let c_cursor = c_extractor.find_cursor_node(c_tree.root_node());
-        let (c_loc, _) = location::determine_location(&c_extractor, c_cursor, None);
-        let c_pred = injection::force_injection_predicates(&c_extractor, c_cursor, &c_loc);
-        let c_force = injection::should_force_injection(&c_extractor, c_cursor, &c_loc);
-
-        let m_cursor_info = m_cursor.map(|n| {
-            format!(
-                "{}:[{}..{}]:'{}'",
-                n.kind(),
-                n.start_byte(),
-                n.end_byte(),
-                m_extractor.node_text(n)
-            )
-        });
-        let g_cursor_info = g_cursor.map(|n| {
-            format!(
-                "{}:[{}..{}]:'{}'",
-                n.kind(),
-                n.start_byte(),
-                n.end_byte(),
-                g_extractor.node_text(n)
-            )
-        });
-        let ma_cursor_info = ma_cursor.map(|n| {
-            format!(
-                "{}:[{}..{}]:'{}'",
-                n.kind(),
-                n.start_byte(),
-                n.end_byte(),
-                ma_extractor.node_text(n)
-            )
-        });
-        let c_cursor_info = c_cursor.map(|n| {
-            format!(
-                "{}:[{}..{}]:'{}'",
-                n.kind(),
-                n.start_byte(),
-                n.end_byte(),
-                c_extractor.node_text(n)
-            )
-        });
-
-        assert!(
-            m_force,
-            "a.p should force injection in misread member-tail case"
-        );
-        assert!(
-            ma_force,
-            "a.a should force injection in misread member-tail case"
-        );
-        assert!(!g_force, "List<Bo> should not force injection");
-        assert!(!c_force, "new Box<In>(1) should not force injection");
-
-        let out = format!(
-            "member_case:\noffset={m_off}\ncursor={m_cursor_info:?}\nlocation={m_loc:?}\npredicates={m_pred:?}\nforce={m_force}\n\nmember_alt_case:\noffset={ma_off}\ncursor={ma_cursor_info:?}\nlocation={ma_loc:?}\npredicates={ma_pred:?}\nforce={ma_force}\n\ngeneric_case:\noffset={g_off}\ncursor={g_cursor_info:?}\nlocation={g_loc:?}\npredicates={g_pred:?}\nforce={g_force}\n\nctor_generic_case:\noffset={c_off}\ncursor={c_cursor_info:?}\nlocation={c_loc:?}\npredicates={c_pred:?}\nforce={c_force}\n"
-        );
-        insta::assert_snapshot!(
-            "force_injection_predicates_member_tail_vs_generic_type_arg",
-            out
-        );
-    }
-
-    #[test]
     fn test_snapshot_inner_class_box_visibility_pipeline_provenance() {
         let src_base = indoc::indoc! {r#"
         package org.cubewhy;
@@ -8106,83 +7917,6 @@ mod tests {
             "java.util.A should give Import or MemberAccess with java.util receiver, got {:?}",
             ctx.location
         );
-    }
-
-    #[test]
-    fn test_snapshot_fqn_type_injection() {
-        let src = indoc::indoc! {r#"
-    class A {
-        void f() {
-            java.util.A
-        }
-    }
-    "#};
-        let offset = src.find("java.util.A").unwrap() + 11;
-        let extractor = JavaContextExtractor::new(src, offset, None);
-
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_java::LANGUAGE.into())
-            .unwrap();
-        let tree = parser.parse(src, None).unwrap();
-        let cursor_node = extractor.find_cursor_node(tree.root_node());
-
-        let injected = build_injected_source(&extractor, cursor_node);
-        insta::assert_snapshot!(injected);
-    }
-
-    #[test]
-    fn test_snapshot_fqn_type_injection_v2() {
-        let src = indoc::indoc! {r#"
-    class A {
-        void f() {
-            java.util.A
-        }
-    }
-    "#};
-        let offset = src.find("java.util.A").unwrap() + 11;
-        let extractor = JavaContextExtractor::new(src, offset, None);
-
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_java::LANGUAGE.into())
-            .unwrap();
-        let tree = parser.parse(src, None).unwrap();
-        let cursor_node = extractor.find_cursor_node(tree.root_node());
-
-        let injected = build_injected_source(&extractor, cursor_node);
-        insta::assert_snapshot!("injected_v2", injected);
-
-        // 同时 snapshot 注入后的 AST
-        let mut parser2 = tree_sitter::Parser::new();
-        parser2
-            .set_language(&tree_sitter_java::LANGUAGE.into())
-            .unwrap();
-        let tree2 = parser2.parse(&injected, None).unwrap();
-
-        fn dump(node: tree_sitter::Node, src: &str, indent: usize, out: &mut String) {
-            let pad = "  ".repeat(indent);
-            let text: String = src[node.start_byte()..node.end_byte()]
-                .chars()
-                .take(40)
-                .collect();
-            out.push_str(&format!(
-                "{}{} [{}-{}] {:?}\n",
-                pad,
-                node.kind(),
-                node.start_byte(),
-                node.end_byte(),
-                text
-            ));
-            let mut c = node.walk();
-            for child in node.children(&mut c) {
-                dump(child, src, indent + 1, out);
-            }
-        }
-
-        let mut ast = String::new();
-        dump(tree2.root_node(), &injected, 0, &mut ast);
-        insta::assert_snapshot!("injected_v2_ast", ast);
     }
 
     #[test]

@@ -23,6 +23,11 @@ Extreme fast Java LSP, built in Rust
 - Is this production ready?
   Probably yes, but not everything in JLS implemented perfectly yet.
 
+## Development
+
+- [The Treesitter inspector script](https://gist.github.com/cubewhy/7a43196d323488db4c4053f1c5126f9f)
+- [Treesitter playground](https://tree-sitter.github.io/tree-sitter/7-playground.html)
+
 ## License
 
 This work is licensed under GPL-3.0 license.
