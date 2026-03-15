@@ -4,6 +4,8 @@ Extreme fast Java LSP, built in Rust
 
 ## Feature Matrix
 
+[JLS Implement Status (AI generated)](docs/jls-implementation-status.md)
+
 - Analyze Jar, Codebase and JDK builtins
 - Code completion
 - Symbols List (Outline)
