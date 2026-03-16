@@ -1,7 +1,12 @@
 use rust_asm::constants::{ACC_ANNOTATION, ACC_ENUM, ACC_INTERFACE, ACC_PUBLIC, ACC_SUPER};
 use std::sync::Arc;
 use tree_sitter::{Node, Query};
-use tree_sitter_utils::{Handler, Input, constructors::Always, dispatch_on_kind};
+use tree_sitter_utils::{
+    Handler, Input, NodePredicate,
+    constructors::Always,
+    dispatch_on_kind, kind_is,
+    traversal::{any_child_of_kind, first_child_of_kind},
+};
 
 use crate::index::{ClassMetadata, ClassOrigin};
 use crate::jvm::descriptor::consume_one_descriptor_type;
@@ -325,6 +330,15 @@ pub fn find_symbol_range(
     })
 }
 
+/// Node kinds that represent a Java type declaration.
+const CLASS_DECL_KINDS: &[&str] = &[
+    "class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "annotation_type_declaration",
+    "record_declaration",
+];
+
 fn collect_java_classes(
     ctx: &JavaContextExtractor,
     root_node: Node,
@@ -335,55 +349,41 @@ fn collect_java_classes(
     type_ctx: &Arc<SourceTypeCtx>,
     out: &mut Vec<ClassMetadata>,
 ) {
+    let is_class_decl = kind_is(CLASS_DECL_KINDS);
     let mut stack = vec![(root_node, initial_outer_internal, initial_outer_simple)];
 
     while let Some((node, outer_internal, outer_simple)) = stack.pop() {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            match child.kind() {
-                "class_declaration"
-                | "interface_declaration"
-                | "enum_declaration"
-                | "annotation_type_declaration"
-                | "record_declaration" => {
-                    if let Some(meta) = parse_java_class(
-                        ctx,
-                        child,
-                        package,
-                        outer_internal.clone(),
-                        outer_simple.clone(),
-                        origin,
-                        type_ctx,
-                    ) {
-                        let inner_outer_internal = Some(Arc::clone(&meta.internal_name));
-                        let inner_outer_simple = Some(Arc::clone(&meta.name));
-                        if let Some(body) = child.child_by_field_name("body") {
-                            stack.push((body, inner_outer_internal, inner_outer_simple));
-                        }
-                        out.push(meta);
+            if is_class_decl.test(Input::new(child, (), None)) {
+                if let Some(meta) = parse_java_class(
+                    ctx,
+                    child,
+                    package,
+                    outer_internal.clone(),
+                    outer_simple.clone(),
+                    origin,
+                    type_ctx,
+                ) {
+                    let inner_outer_internal = Some(Arc::clone(&meta.internal_name));
+                    let inner_outer_simple = Some(Arc::clone(&meta.name));
+                    if let Some(body) = child.child_by_field_name("body") {
+                        stack.push((body, inner_outer_internal, inner_outer_simple));
                     }
+                    out.push(meta);
                 }
-                _ => {
-                    // Continue searching downwards
-                    stack.push((child, outer_internal.clone(), outer_simple.clone()));
-                }
+            } else {
+                // Continue searching downwards
+                stack.push((child, outer_internal.clone(), outer_simple.clone()));
             }
         }
     }
 }
 
 fn extract_java_access_flags(ctx: &JavaContextExtractor, node: Node) -> u16 {
-    let mut flags: u16 = 0;
-    let mut walker = node.walk();
-    for child in node.children(&mut walker) {
-        if child.kind() == "modifiers" {
-            flags = parse_java_modifiers(ctx.node_text(child));
-            break;
-        }
-    }
-    if flags == 0 {
-        flags = ACC_PUBLIC;
-    }
+    let mut flags = any_child_of_kind(node, "modifiers")
+        .map(|m| parse_java_modifiers(ctx.node_text(m)))
+        .unwrap_or(ACC_PUBLIC);
 
     // Map declaration kind to the extra JVM access flags it always carries.
     // `dispatch_on_kind` returns `None` for unrecognised kinds, which maps
@@ -421,63 +421,50 @@ pub fn discover_java_names(source: &str) -> Vec<Arc<str>> {
     while let Some((node, outer)) = stack.pop() {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            match child.kind() {
-                "class_declaration"
-                | "interface_declaration"
-                | "enum_declaration"
-                | "annotation_type_declaration"
-                | "record_declaration" => {
-                    if let Some(name_node) = child.child_by_field_name("name") {
-                        let class_name = ctx.node_text(name_node);
-                        if !class_name.is_empty() {
-                            // 构建内部名称
-                            let internal_name = match (&package, &outer) {
-                                (Some(pkg), Some(out)) => format!("{}/{}${}", pkg, out, class_name),
-                                (Some(pkg), None) => format!("{}/{}", pkg, class_name),
-                                (None, Some(out)) => format!("{}${}", out, class_name),
-                                (None, None) => class_name.to_string(),
+            if matches!(child.kind(), "package_declaration" | "import_declaration") {
+                continue;
+            }
+            if kind_is(CLASS_DECL_KINDS).test(Input::new(child, (), None)) {
+                if let Some(name_node) = first_child_of_kind(child, "identifier") {
+                    let class_name = ctx.node_text(name_node);
+                    if !class_name.is_empty() {
+                        let internal_name = match (&package, &outer) {
+                            (Some(pkg), Some(out)) => format!("{}/{}${}", pkg, out, class_name),
+                            (Some(pkg), None) => format!("{}/{}", pkg, class_name),
+                            (None, Some(out)) => format!("{}${}", out, class_name),
+                            (None, None) => class_name.to_string(),
+                        };
+                        let internal_name_arc: Arc<str> = Arc::from(internal_name.as_str());
+                        results.push(internal_name_arc.clone());
+                        if let Some(body) = child.child_by_field_name("body") {
+                            let next_outer = match outer {
+                                Some(ref o) => format!("{}${}", o, class_name),
+                                None => class_name.to_string(),
                             };
-                            let internal_name_arc: Arc<str> = Arc::from(internal_name.as_str());
-                            results.push(internal_name_arc.clone());
-
-                            // 处理嵌套类：递归入 body
-                            if let Some(body) = child.child_by_field_name("body") {
-                                // 嵌套类的 outer 名字是 "Outer$Inner" 这种形式中的当前级
-                                let next_outer = match outer {
-                                    Some(ref o) => format!("{}${}", o, class_name),
-                                    None => class_name.to_string(),
-                                };
-                                stack.push((body, Some(Arc::from(next_outer.as_str()))));
-                            }
+                            stack.push((body, Some(Arc::from(next_outer.as_str()))));
                         }
                     }
                 }
-                "package_declaration" | "import_declaration" => continue,
-                _ => {
-                    // 对于层级较深的情况（如块定义里的类，虽然Java少见但合法）继续向下找
-                    stack.push((child, outer.clone()));
-                }
+            } else {
+                // Descend into non-declaration nodes (anonymous classes, blocks, etc.)
+                stack.push((child, outer.clone()));
             }
         }
     }
     results
 }
 
-fn find_class_node<'a>(node: Node<'a>, target_name: &str, bytes: &[u8]) -> Option<Node<'a>> {
+fn find_class_node<'a>(node: Node<'a>, target_name: &str, _bytes: &[u8]) -> Option<Node<'a>> {
+    let is_class_decl = kind_is(CLASS_DECL_KINDS);
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
-        if matches!(
-            n.kind(),
-            "class_declaration"
-                | "interface_declaration"
-                | "enum_declaration"
-                | "record_declaration"
-        ) && let Some(name_node) = n.child_by_field_name("name")
-            && name_node.utf8_text(bytes).unwrap_or("") == target_name
-        {
-            return Some(n);
+        if is_class_decl.test(Input::new(n, (), None)) {
+            if first_child_of_kind(n, "identifier")
+                .is_some_and(|name_node| name_node.utf8_text(_bytes).unwrap_or("") == target_name)
+            {
+                return Some(n);
+            }
         }
-
         let mut cursor = n.walk();
         for child in n.children(&mut cursor) {
             stack.push(child);
