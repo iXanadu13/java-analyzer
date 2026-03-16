@@ -8,12 +8,14 @@ use crate::language::java::location::heuristics::{
 use crate::language::java::utils::strip_sentinel;
 use crate::language::java::{
     completion_context::normalize_top_level_generic_base,
-    utils::{find_ancestor, is_comment_kind, is_in_name_position, is_in_type_position},
+    utils::{is_comment_kind, is_in_name_position, is_in_type_position},
 };
 use crate::semantic::CursorLocation;
 use std::sync::Arc;
 use tree_sitter::Node;
-use tree_sitter_utils::{Handler, HandlerExt, Input, handler_fn, has_parent_kind};
+use tree_sitter_utils::{
+    Handler, HandlerExt, Input, handler_fn, has_parent_kind, traversal::ancestor_of_kind,
+};
 
 use super::utils::{cursor_truncated_text, is_descendant_of};
 
@@ -400,7 +402,7 @@ pub(super) fn handle_constructor(
 }
 
 fn infer_expected_type_from_lhs(ctx: &JavaContextExtractor, node: Node) -> Option<String> {
-    let decl = find_ancestor(node, "local_variable_declaration")?;
+    let decl = ancestor_of_kind(node, "local_variable_declaration")?;
     let mut walker = decl.walk();
     for child in decl.named_children(&mut walker) {
         if child.kind() == "modifiers" {
@@ -655,191 +657,10 @@ pub(super) fn handle_identifier(
     }
     // Heuristic: an ERROR node that only contains a type with trailing whitespace
     // indicates we're waiting for a variable name.
-    if let Some(err) = find_ancestor(node, "ERROR")
+    if let Some(err) = ancestor_of_kind(node, "ERROR")
         && let Some(type_name) = detect_variable_name_position_in_error(ctx, err)
     {
         return (CursorLocation::VariableName { type_name }, String::new());
-    }
-    let mut ancestor = node;
-    loop {
-        ancestor = match ancestor.parent() {
-            Some(p) => p,
-            None => break,
-        };
-        match ancestor.kind() {
-            "marker_annotation" | "annotation" => {
-                return handle_annotation(ctx, ancestor);
-            }
-            "field_access" | "method_invocation" => {
-                return handle_member_access(ctx, ancestor);
-            }
-            "method_reference" => {
-                return handle_method_reference(ctx, ancestor);
-            }
-            "import_declaration" => return handle_import(ctx, ancestor),
-            "object_creation_expression" => {
-                if is_in_constructor_type_arguments(node, ancestor) {
-                    let text = cursor_truncated_text(ctx, node);
-                    return (
-                        CursorLocation::TypeAnnotation {
-                            prefix: text.clone(),
-                        },
-                        text,
-                    );
-                }
-                return handle_constructor(ctx, ancestor);
-            }
-
-            "local_variable_declaration" => {
-                // Heuristic: Misread expression (e.g., `str\nfunc(...)`)
-                if is_misread_expression_in_local_decl(node, ancestor, ctx) {
-                    let text = cursor_truncated_text(ctx, node);
-                    let clean = strip_sentinel(&text);
-                    return (
-                        CursorLocation::Expression {
-                            prefix: clean.clone(),
-                        },
-                        clean,
-                    );
-                }
-
-                // Heuristic: Variable name after complete type with whitespace
-                // Handles: `String |`, `List<String> |`, `int[] |`
-                if is_variable_name_after_complete_type(node, ancestor, ctx) {
-                    let type_name = extract_type_from_decl(ctx, ancestor);
-                    return (CursorLocation::VariableName { type_name }, String::new());
-                }
-
-                // Heuristic: Member tail misread as local declaration
-                if let Some((receiver_expr, member_prefix)) =
-                    detect_member_tail_in_misread_local_decl(ctx, node, ancestor)
-                {
-                    return (
-                        CursorLocation::MemberAccess {
-                            receiver_semantic_type: None,
-                            receiver_type: None,
-                            member_prefix: member_prefix.clone(),
-                            receiver_expr,
-                            arguments: None,
-                        },
-                        member_prefix,
-                    );
-                }
-
-                // Standard type/name position detection
-                if is_in_type_position(node, ancestor) {
-                    let text = cursor_truncated_text(ctx, node);
-                    return (
-                        CursorLocation::TypeAnnotation {
-                            prefix: text.clone(),
-                        },
-                        text,
-                    );
-                }
-
-                if is_in_name_position(node, ancestor) {
-                    let type_name = extract_type_from_decl(ctx, ancestor);
-                    return (CursorLocation::VariableName { type_name }, String::new());
-                }
-
-                if is_in_type_subtree(node, ancestor) {
-                    let text = cursor_truncated_text(ctx, node);
-                    return (
-                        CursorLocation::TypeAnnotation {
-                            prefix: text.clone(),
-                        },
-                        text,
-                    );
-                }
-
-                let text = cursor_truncated_text(ctx, node);
-                let clean = strip_sentinel(&text);
-                return (
-                    CursorLocation::Expression {
-                        prefix: clean.clone(),
-                    },
-                    clean,
-                );
-            }
-
-            "formal_parameter" | "spread_parameter" => {
-                if is_in_formal_param_name_position(node, ancestor) {
-                    let type_name = ancestor
-                        .child_by_field_name("type")
-                        .map(|n| ctx.node_text(n).trim().to_string())
-                        .unwrap_or_default();
-                    return (CursorLocation::VariableName { type_name }, String::new());
-                }
-                let text = cursor_truncated_text(ctx, node);
-                return (
-                    CursorLocation::TypeAnnotation {
-                        prefix: text.clone(),
-                    },
-                    text,
-                );
-            }
-            "argument_list" => {
-                if let Some(parent) = node.parent()
-                    && parent.kind() == "method_invocation"
-                    && ctx.offset <= ancestor.start_byte()
-                {
-                    return handle_member_access(ctx, parent);
-                }
-                return handle_argument_list(ctx, ancestor);
-            }
-            "ERROR" => {
-                let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
-                if is_import_context(before) {
-                    return handle_import_from_text(ctx, before);
-                }
-                if let Some((receiver_expr, member_prefix)) = detect_trailing_dot_in_text(before) {
-                    return (
-                        CursorLocation::MemberAccess {
-                            receiver_semantic_type: None,
-                            receiver_type: None,
-                            member_prefix: member_prefix.clone(),
-                            receiver_expr,
-                            arguments: None,
-                        },
-                        member_prefix,
-                    );
-                }
-                if let Some((class_prefix, expected_type)) =
-                    detect_new_keyword_before_cursor(before)
-                {
-                    return (
-                        CursorLocation::ConstructorCall {
-                            class_prefix: class_prefix.clone(),
-                            expected_type,
-                        },
-                        class_prefix,
-                    );
-                }
-                let text = cursor_truncated_text(ctx, node);
-                let clean = strip_sentinel(&text);
-                return (
-                    CursorLocation::Expression {
-                        prefix: clean.clone(),
-                    },
-                    clean,
-                );
-            }
-            "block" | "class_body" | "program" => {
-                if ancestor.kind() == "class_body" {
-                    // identifier in class body → member prefix
-                    let text = cursor_truncated_text(ctx, node);
-                    let clean = strip_sentinel(&text);
-                    return (
-                        CursorLocation::Expression {
-                            prefix: clean.clone(),
-                        },
-                        clean,
-                    );
-                }
-                break;
-            }
-            _ => {}
-        }
     }
     // Dispatch each ancestor kind to its handler using a combinator chain.
     // Context carries (extractor, original_identifier_node).
@@ -1044,7 +865,7 @@ fn is_in_constructor_type_arguments(id_node: Node, ctor_node: Node) -> bool {
     let Some(ty) = ctor_node.child_by_field_name("type") else {
         return false;
     };
-    let Some(type_args) = find_ancestor(id_node, "type_arguments") else {
+    let Some(type_args) = ancestor_of_kind(id_node, "type_arguments") else {
         return false;
     };
     is_descendant_of(type_args, ty) && is_descendant_of(id_node, type_args)
