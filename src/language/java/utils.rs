@@ -6,6 +6,7 @@ use rust_asm::constants::{
 };
 use std::sync::Arc;
 use tree_sitter::Node;
+use tree_sitter_utils::traversal;
 
 pub(crate) fn find_top_error_node(root: Node) -> Option<Node> {
     let mut cursor = root.walk();
@@ -102,7 +103,7 @@ pub(crate) fn is_comment_kind(kind: &str) -> bool {
     kind == "line_comment" || kind == "block_comment"
 }
 
-pub(crate) fn find_ancestor<'a>(mut node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+pub(crate) fn find_ancestor<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     traversal::ancestor_of_kind(node, kind)
 }
 
@@ -261,7 +262,7 @@ pub fn java_type_to_internal(ty: &str) -> String {
     ty.trim().replace('.', "/")
 }
 
-pub fn find_error_ancestor(mut node: Node) -> Option<Node> {
+pub fn find_error_ancestor(node: Node) -> Option<Node> {
     // Includes the node itself (non-strict), then climbs.
     if node.kind() == "ERROR" {
         return Some(node);
@@ -341,11 +342,10 @@ pub fn is_in_name_position(id_node: Node, decl_node: Node) -> bool {
     false
 }
 
-pub(crate) fn find_string_ancestor<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
+pub(crate) fn find_string_ancestor<'a>(node: Node<'a>) -> Option<Node<'a>> {
     // Includes the node itself (non-strict), then climbs.
     if matches!(node.kind(), "string_literal" | "text_block") {
         return Some(node);
     }
     traversal::ancestor_of_kinds(node, &["string_literal", "text_block"])
 }
-use tree_sitter_utils::traversal;
