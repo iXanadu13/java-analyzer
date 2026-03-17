@@ -18,6 +18,55 @@ mod getter_tests {
     use super::*;
 
     #[test]
+    fn test_exact_user_example() {
+        let src = r#"
+            import lombok.Getter;
+            import lombok.Setter;
+            
+            @Getter
+            @Setter
+            public class MyConfig {
+                private String randomStringField = "Hello";
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        println!("Class: {}", class.internal_name);
+        println!(
+            "Fields: {:?}",
+            class
+                .fields
+                .iter()
+                .map(|f| f.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "Methods: {:?}",
+            class
+                .methods
+                .iter()
+                .map(|m| m.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "getRandomStringField"),
+            "Should generate getRandomStringField() method"
+        );
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "setRandomStringField"),
+            "Should generate setRandomStringField(String) method"
+        );
+    }
+
+    #[test]
     fn field_level_getter_generates_method() {
         let src = r#"
             package org.example;
@@ -271,10 +320,140 @@ mod getter_tests {
             "Getter should have a return type"
         );
     }
+
+    #[test]
+    fn class_level_getter_with_multiple_field_types() {
+        let src = r#"
+            import lombok.Getter;
+            
+            @Getter
+            public class ComplexClass {
+                private String name;
+                private int age;
+                private boolean active;
+                private double salary;
+                private long timestamp;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Verify all getters are generated
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "getName"),
+            "Should generate getName()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "getAge"),
+            "Should generate getAge()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "isActive"),
+            "Should generate isActive() for boolean"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "getSalary"),
+            "Should generate getSalary()"
+        );
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "getTimestamp"),
+            "Should generate getTimestamp()"
+        );
+    }
+
+    #[test]
+    fn class_level_getter_setter_combined() {
+        let src = r#"
+            import lombok.Getter;
+            import lombok.Setter;
+            
+            @Getter
+            @Setter
+            public class Person {
+                private String firstName;
+                private String lastName;
+                private int age;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Verify all getters
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "getFirstName"),
+            "Should generate getFirstName()"
+        );
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "getLastName"),
+            "Should generate getLastName()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "getAge"),
+            "Should generate getAge()"
+        );
+
+        // Verify all setters
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "setFirstName"),
+            "Should generate setFirstName()"
+        );
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "setLastName"),
+            "Should generate setLastName()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "setAge"),
+            "Should generate setAge()"
+        );
+    }
 }
 
 mod setter_tests {
     use super::*;
+
+    #[test]
+    fn class_level_setter_generates_methods_for_all_fields() {
+        let src = r#"
+            import lombok.Setter;
+            
+            @Setter
+            public class Person {
+                private String name;
+                private int age;
+                private boolean active;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "setName"),
+            "Should generate setName() method"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "setAge"),
+            "Should generate setAge() method"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "setActive"),
+            "Should generate setActive() method"
+        );
+    }
 
     #[test]
     fn field_level_setter_generates_method() {
