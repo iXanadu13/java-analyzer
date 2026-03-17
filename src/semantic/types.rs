@@ -308,6 +308,31 @@ impl<'idx> TypeResolver<'idx> {
             ?arg_texts,
             "resolve_method_return"
         );
+
+        // Special handling for Object.getClass() - should return Class<? extends T> where T is the receiver type
+        if method_name == "getClass" && arg_count == 0 {
+            // Parse the receiver type to preserve generic arguments
+            let (base_receiver, receiver_type_args) = split_internal_name(receiver_internal);
+            let receiver_type = if receiver_type_args.is_empty() {
+                TypeName::new(base_receiver)
+            } else {
+                // Convert JvmType args to TypeName args
+                let type_args: Vec<TypeName> = receiver_type_args
+                    .iter()
+                    .map(|jvm_ty| jvm_ty.to_type_name())
+                    .collect();
+                TypeName::with_args(base_receiver, type_args)
+            };
+
+            // Create a wildcard type with upper bound of the receiver type
+            let wildcard = TypeName {
+                base_internal: Arc::from("+"),
+                args: vec![receiver_type],
+                array_dims: 0,
+            };
+            return Some(TypeName::with_args("java/lang/Class", vec![wildcard]));
+        }
+
         let (base_receiver, _receiver_type_args) = split_internal_name(receiver_internal);
 
         // Use base_receiver to find MRO in the index
@@ -4347,5 +4372,267 @@ mod tests {
             Some("java/lang/Integer"),
             "List::size returns int, should be boxed to Integer in generic position"
         );
+    }
+
+    #[test]
+    fn test_get_class_returns_wildcard_extends_for_string() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getClass"),
+                    params: MethodParams::empty(),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Ljava/lang/Class;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
+
+        let result = resolver.resolve_method_return("java/lang/String", "getClass", 0, &[]);
+
+        assert!(result.is_some(), "getClass should return a type");
+        let ty = result.unwrap();
+
+        // Should return Class<? extends String>
+        assert_eq!(ty.erased_internal(), "java/lang/Class");
+        assert_eq!(ty.args.len(), 1, "Class should have one type argument");
+
+        let wildcard = &ty.args[0];
+        assert_eq!(
+            wildcard.base_internal.as_ref(),
+            "+",
+            "Should be a wildcard with upper bound"
+        );
+        assert_eq!(wildcard.args.len(), 1, "Wildcard should have one bound");
+        assert_eq!(wildcard.args[0].erased_internal(), "java/lang/String");
+    }
+
+    #[test]
+    fn test_get_class_returns_wildcard_extends_for_custom_type() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getClass"),
+                    params: MethodParams::empty(),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Ljava/lang/Class;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("com/example")),
+                name: Arc::from("MyClass"),
+                internal_name: Arc::from("com/example/MyClass"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
+
+        let result = resolver.resolve_method_return("com/example/MyClass", "getClass", 0, &[]);
+
+        assert!(result.is_some(), "getClass should return a type");
+        let ty = result.unwrap();
+
+        // Should return Class<? extends MyClass>
+        assert_eq!(ty.erased_internal(), "java/lang/Class");
+        assert_eq!(ty.args.len(), 1, "Class should have one type argument");
+
+        let wildcard = &ty.args[0];
+        assert_eq!(
+            wildcard.base_internal.as_ref(),
+            "+",
+            "Should be a wildcard with upper bound"
+        );
+        assert_eq!(wildcard.args.len(), 1, "Wildcard should have one bound");
+        assert_eq!(wildcard.args[0].erased_internal(), "com/example/MyClass");
+    }
+
+    #[test]
+    fn test_get_class_preserves_generic_type_arguments() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getClass"),
+                    params: MethodParams::empty(),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Ljava/lang/Class;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util")),
+                name: Arc::from("List"),
+                internal_name: Arc::from("java/util/List"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
+
+        // Test with List<String>
+        let list_of_string = "java/util/List<Ljava/lang/String;>";
+        let result = resolver.resolve_method_return(list_of_string, "getClass", 0, &[]);
+
+        assert!(result.is_some(), "getClass should return a type");
+        let ty = result.unwrap();
+
+        // Should return Class<? extends List<String>>
+        assert_eq!(ty.erased_internal(), "java/lang/Class");
+        assert_eq!(ty.args.len(), 1, "Class should have one type argument");
+
+        let wildcard = &ty.args[0];
+        assert_eq!(
+            wildcard.base_internal.as_ref(),
+            "+",
+            "Should be a wildcard with upper bound"
+        );
+        assert_eq!(wildcard.args.len(), 1, "Wildcard should have one bound");
+
+        let list_type = &wildcard.args[0];
+        assert_eq!(list_type.erased_internal(), "java/util/List");
+        assert_eq!(
+            list_type.args.len(),
+            1,
+            "List should preserve its type argument"
+        );
+        assert_eq!(list_type.args[0].erased_internal(), "java/lang/String");
+    }
+
+    #[test]
+    fn test_get_class_on_object_returns_wildcard_extends_object() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/lang")),
+            name: Arc::from("Object"),
+            internal_name: Arc::from("java/lang/Object"),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("getClass"),
+                params: MethodParams::empty(),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                annotations: vec![],
+                generic_signature: None,
+                return_type: Some(Arc::from("Ljava/lang/Class;")),
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
+
+        let result = resolver.resolve_method_return("java/lang/Object", "getClass", 0, &[]);
+
+        assert!(result.is_some(), "getClass should return a type");
+        let ty = result.unwrap();
+
+        // Should return Class<? extends Object>
+        assert_eq!(ty.erased_internal(), "java/lang/Class");
+        assert_eq!(ty.args.len(), 1, "Class should have one type argument");
+
+        let wildcard = &ty.args[0];
+        assert_eq!(
+            wildcard.base_internal.as_ref(),
+            "+",
+            "Should be a wildcard with upper bound"
+        );
+        assert_eq!(wildcard.args.len(), 1, "Wildcard should have one bound");
+        assert_eq!(wildcard.args[0].erased_internal(), "java/lang/Object");
     }
 }

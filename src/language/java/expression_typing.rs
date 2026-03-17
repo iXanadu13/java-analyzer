@@ -391,11 +391,23 @@ fn intrinsic_method_return_type(
     method_name: &str,
     arg_count: usize,
 ) -> Option<TypeName> {
-    if receiver.is_array() && method_name == "getClass" && arg_count == 0 {
-        return Some(TypeName::with_args(
-            "java/lang/Class",
-            vec![receiver.clone()],
-        ));
+    if method_name == "getClass" && arg_count == 0 {
+        // For arrays, return Class<T[]> where T[] is the array type
+        // For regular types, return Class<? extends T> where T is the receiver type
+        if receiver.is_array() {
+            return Some(TypeName::with_args(
+                "java/lang/Class",
+                vec![receiver.clone()],
+            ));
+        } else {
+            // Create a wildcard type with upper bound of the receiver type
+            let wildcard = TypeName {
+                base_internal: Arc::from("+"),
+                args: vec![receiver.clone()],
+                array_dims: 0,
+            };
+            return Some(TypeName::with_args("java/lang/Class", vec![wildcard]));
+        }
     }
     None
 }
@@ -1773,6 +1785,212 @@ mod tests {
         assert_eq!(
             ty,
             TypeName::with_args("java/lang/Class", vec![TypeName::new("java/lang/String")])
+        );
+    }
+
+    #[test]
+    fn test_get_class_returns_class_with_wildcard_extends_for_string() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("str"),
+            type_internal: TypeName::new("java/lang/String"),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "str.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("getClass type for String");
+
+        // Should return Class<? extends String>
+        let expected_wildcard = TypeName {
+            base_internal: Arc::from("+"),
+            args: vec![TypeName::new("java/lang/String")],
+            array_dims: 0,
+        };
+        assert_eq!(
+            ty,
+            TypeName::with_args("java/lang/Class", vec![expected_wildcard])
+        );
+    }
+
+    #[test]
+    fn test_get_class_returns_class_with_wildcard_extends_for_custom_type() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("obj"),
+            type_internal: TypeName::new("org/cubewhy/MyClass"),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "obj.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("getClass type for custom type");
+
+        // Should return Class<? extends MyClass>
+        let expected_wildcard = TypeName {
+            base_internal: Arc::from("+"),
+            args: vec![TypeName::new("org/cubewhy/MyClass")],
+            array_dims: 0,
+        };
+        assert_eq!(
+            ty,
+            TypeName::with_args("java/lang/Class", vec![expected_wildcard])
+        );
+    }
+
+    #[test]
+    fn test_get_class_returns_class_with_wildcard_extends_for_generic_type() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+
+        // Test with a generic type like List<String>
+        let list_of_string =
+            TypeName::with_args("java/util/List", vec![TypeName::new("java/lang/String")]);
+        let locals = vec![LocalVar {
+            name: Arc::from("list"),
+            type_internal: list_of_string.clone(),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "list.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("getClass type for generic type");
+
+        // Should return Class<? extends List<String>>
+        let expected_wildcard = TypeName {
+            base_internal: Arc::from("+"),
+            args: vec![list_of_string],
+            array_dims: 0,
+        };
+        assert_eq!(
+            ty,
+            TypeName::with_args("java/lang/Class", vec![expected_wildcard])
+        );
+    }
+
+    #[test]
+    fn test_get_class_on_object_type_returns_class_with_wildcard_extends() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("obj"),
+            type_internal: TypeName::new("java/lang/Object"),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "obj.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("getClass type for Object");
+
+        // Should return Class<? extends Object>
+        let expected_wildcard = TypeName {
+            base_internal: Arc::from("+"),
+            args: vec![TypeName::new("java/lang/Object")],
+            array_dims: 0,
+        };
+        assert_eq!(
+            ty,
+            TypeName::with_args("java/lang/Class", vec![expected_wildcard])
+        );
+    }
+
+    #[test]
+    fn test_get_class_preserves_array_type_without_wildcard() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("arr"),
+            type_internal: TypeName::new("java/lang/String").with_array_dims(1),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "arr.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("getClass type for array");
+
+        // Arrays should return Class<String[]> not Class<? extends String[]>
+        assert_eq!(
+            ty,
+            TypeName::with_args(
+                "java/lang/Class",
+                vec![TypeName::new("java/lang/String").with_array_dims(1)]
+            )
+        );
+    }
+
+    #[test]
+    fn test_get_class_in_constructor_parameter() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("str"),
+            type_internal: TypeName::new("java/lang/String"),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "str.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("getClass type in constructor");
+
+        // Should return Class<? extends String>
+        let expected_wildcard = TypeName {
+            base_internal: Arc::from("+"),
+            args: vec![TypeName::new("java/lang/String")],
+            array_dims: 0,
+        };
+        assert_eq!(
+            ty,
+            TypeName::with_args("java/lang/Class", vec![expected_wildcard])
         );
     }
 }
