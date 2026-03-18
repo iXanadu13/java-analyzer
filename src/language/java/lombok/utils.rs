@@ -292,7 +292,6 @@ pub fn get_string_array_param(anno: &AnnotationSummary, key: &str) -> Vec<Arc<st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustc_hash::FxHashMap;
 
     fn make_annotation(
         internal_name: &str,

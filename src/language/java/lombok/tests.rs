@@ -1112,3 +1112,433 @@ mod to_string_tests {
         );
     }
 }
+
+mod equals_hash_code_tests {
+    use super::*;
+
+    #[test]
+    fn class_level_equals_and_hash_code_generates_methods() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode
+            public class Person {
+                private String name;
+                private int age;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should generate equals()
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "equals"),
+            "Should generate equals() method"
+        );
+
+        // Should generate hashCode()
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "hashCode"),
+            "Should generate hashCode() method"
+        );
+
+        // Should generate canEqual()
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "canEqual"),
+            "Should generate canEqual() method"
+        );
+    }
+
+    #[test]
+    fn equals_method_has_correct_signature() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode
+            public class Person {
+                private String name;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        let equals = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "equals")
+            .expect("equals() should be generated");
+
+        // Check return type
+        assert_eq!(
+            equals.return_type.as_ref().map(|t| t.as_ref()),
+            Some("Z"),
+            "equals() should return boolean"
+        );
+
+        // Check parameters
+        assert_eq!(equals.params.len(), 1, "equals() should have one parameter");
+        assert_eq!(
+            equals.params.items[0].descriptor.as_ref(),
+            "Ljava/lang/Object;",
+            "equals() parameter should be Object"
+        );
+
+        // Check access flags
+        assert_eq!(
+            equals.access_flags & ACC_PUBLIC,
+            ACC_PUBLIC,
+            "equals() should be public"
+        );
+    }
+
+    #[test]
+    fn hash_code_method_has_correct_signature() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode
+            public class Person {
+                private String name;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        let hash_code = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "hashCode")
+            .expect("hashCode() should be generated");
+
+        // Check return type
+        assert_eq!(
+            hash_code.return_type.as_ref().map(|t| t.as_ref()),
+            Some("I"),
+            "hashCode() should return int"
+        );
+
+        // Check parameters
+        assert!(
+            hash_code.params.is_empty(),
+            "hashCode() should have no parameters"
+        );
+
+        // Check access flags
+        assert_eq!(
+            hash_code.access_flags & ACC_PUBLIC,
+            ACC_PUBLIC,
+            "hashCode() should be public"
+        );
+    }
+
+    #[test]
+    fn can_equal_method_has_correct_signature() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode
+            public class Person {
+                private String name;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        let can_equal = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "canEqual")
+            .expect("canEqual() should be generated");
+
+        // Check return type
+        assert_eq!(
+            can_equal.return_type.as_ref().map(|t| t.as_ref()),
+            Some("Z"),
+            "canEqual() should return boolean"
+        );
+
+        // Check parameters
+        assert_eq!(
+            can_equal.params.len(),
+            1,
+            "canEqual() should have one parameter"
+        );
+
+        // Check access flags (should be protected)
+        assert_eq!(
+            can_equal.access_flags & rust_asm::constants::ACC_PROTECTED,
+            rust_asm::constants::ACC_PROTECTED,
+            "canEqual() should be protected"
+        );
+    }
+
+    #[test]
+    fn equals_and_hash_code_with_exclude() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode(exclude = {"password", "internalId"})
+            public class User {
+                private String username;
+                private String password;
+                private long internalId;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should still generate all three methods
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "equals"),
+            "Should generate equals() method"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "hashCode"),
+            "Should generate hashCode() method"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "canEqual"),
+            "Should generate canEqual() method"
+        );
+    }
+
+    #[test]
+    fn equals_and_hash_code_with_of() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode(of = {"id", "email"})
+            public class User {
+                private long id;
+                private String email;
+                private String name;
+                private String password;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should generate all three methods
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "equals"),
+            "Should generate equals() method"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "hashCode"),
+            "Should generate hashCode() method"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "canEqual"),
+            "Should generate canEqual() method"
+        );
+    }
+
+    #[test]
+    fn equals_and_hash_code_skips_static_fields() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode
+            public class Config {
+                private String instanceField;
+                private static String staticField = "default";
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should generate methods (static fields are automatically excluded)
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "equals"),
+            "Should generate equals() method"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "hashCode"),
+            "Should generate hashCode() method"
+        );
+    }
+
+    #[test]
+    fn equals_and_hash_code_skips_transient_fields() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode
+            public class CachedObject {
+                private String data;
+                private transient String cachedValue;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should generate methods (transient fields are automatically excluded)
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "equals"),
+            "Should generate equals() method"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "hashCode"),
+            "Should generate hashCode() method"
+        );
+    }
+
+    #[test]
+    fn equals_and_hash_code_with_call_super() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode(callSuper = true)
+            public class Employee extends Person {
+                private String employeeId;
+                private String department;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should generate all methods even with callSuper=true
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "equals"),
+            "Should generate equals() method with callSuper"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "hashCode"),
+            "Should generate hashCode() method with callSuper"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "canEqual"),
+            "Should generate canEqual() method with callSuper"
+        );
+    }
+
+    #[test]
+    fn equals_and_hash_code_does_not_override_existing_equals() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode
+            public class Person {
+                private String name;
+                
+                @Override
+                public boolean equals(Object other) {
+                    return false;
+                }
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should have exactly one equals() method (the explicit one)
+        let equals_count = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "equals")
+            .count();
+        assert_eq!(
+            equals_count, 1,
+            "Should not generate equals() when it already exists"
+        );
+
+        // Should not generate hashCode() either (they must be in sync)
+        assert!(
+            !class.methods.iter().any(|m| m.name.as_ref() == "hashCode"),
+            "Should not generate hashCode() when equals() already exists"
+        );
+    }
+
+    #[test]
+    fn equals_and_hash_code_does_not_override_existing_hash_code() {
+        let src = r#"
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode
+            public class Person {
+                private String name;
+                
+                @Override
+                public int hashCode() {
+                    return 42;
+                }
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should have exactly one hashCode() method (the explicit one)
+        let hash_code_count = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "hashCode")
+            .count();
+        assert_eq!(
+            hash_code_count, 1,
+            "Should not generate hashCode() when it already exists"
+        );
+
+        // Should not generate equals() either (they must be in sync)
+        assert!(
+            !class.methods.iter().any(|m| m.name.as_ref() == "equals"),
+            "Should not generate equals() when hashCode() already exists"
+        );
+    }
+
+    #[test]
+    fn equals_and_hash_code_comprehensive_example() {
+        let src = r#"
+            package com.example;
+            
+            import lombok.EqualsAndHashCode;
+            
+            @EqualsAndHashCode(exclude = {"password", "lastLogin"})
+            public class User {
+                private long id;
+                private String username;
+                private String email;
+                private String password;
+                private java.util.Date lastLogin;
+                private boolean active;
+                private static String DEFAULT_ROLE = "user";
+                private transient String sessionToken;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should generate equals()
+        let equals = class.methods.iter().find(|m| m.name.as_ref() == "equals");
+        assert!(equals.is_some(), "Should generate equals() method");
+
+        let equals_method = equals.unwrap();
+        assert_eq!(
+            equals_method.return_type.as_ref().map(|t| t.as_ref()),
+            Some("Z"),
+            "equals() should return boolean"
+        );
+        assert_eq!(
+            equals_method.params.len(),
+            1,
+            "equals() should have one parameter"
+        );
+
+        // Should generate hashCode()
+        let hash_code = class.methods.iter().find(|m| m.name.as_ref() == "hashCode");
+        assert!(hash_code.is_some(), "Should generate hashCode() method");
+
+        let hash_code_method = hash_code.unwrap();
+        assert_eq!(
+            hash_code_method.return_type.as_ref().map(|t| t.as_ref()),
+            Some("I"),
+            "hashCode() should return int"
+        );
+        assert!(
+            hash_code_method.params.is_empty(),
+            "hashCode() should have no parameters"
+        );
+
+        // Should generate canEqual()
+        let can_equal = class.methods.iter().find(|m| m.name.as_ref() == "canEqual");
+        assert!(can_equal.is_some(), "Should generate canEqual() method");
+    }
+}
