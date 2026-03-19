@@ -47,8 +47,6 @@ pub mod synthetic;
 pub mod type_ctx;
 pub mod utils;
 
-const SENTINEL: &str = "__KIRO__";
-
 static JAVA_COMPLETION_PROVIDERS: [&dyn CompletionProvider; 17] = [
     &LocalVarProvider,
     &StatementLabelProvider,
@@ -7953,7 +7951,6 @@ mod tests {
         import java.l
         class A {}
         "#};
-        // 模拟光标在 'java.l' 后面
         let line = 0u32;
         let col = 13u32;
         let ctx = at(src, line, col);
@@ -7963,7 +7960,7 @@ mod tests {
                 &ctx.location,
                 CursorLocation::Import { prefix } if prefix == "java.l"
             ),
-            "__KIRO__ should be stripped from import prefix, got {:?}",
+            "import prefix should be 'java.l', got {:?}",
             ctx.location
         );
     }
@@ -8081,13 +8078,13 @@ mod tests {
 
         let ctx = at(src, line, col);
 
-        // The fix should cause handle_constructor to return Unknown,
-        // triggering injection of "new __KIRO__()", which results in an empty prefix.
+        // The fix should cause handle_constructor to return ConstructorCall
+        // with empty class_prefix since injection is no longer used.
         match &ctx.location {
             CursorLocation::ConstructorCall { class_prefix, .. } => {
                 assert!(
                     class_prefix.is_empty(),
-                    "Expected empty class_prefix (from injection), but got '{}'",
+                    "Expected empty class_prefix, but got '{}'",
                     class_prefix
                 );
             }

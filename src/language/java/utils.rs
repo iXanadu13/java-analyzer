@@ -1,4 +1,3 @@
-use crate::language::java::SENTINEL;
 use crate::semantic::context::StatementLabelTargetKind;
 use ropey::Rope;
 use rust_asm::constants::{
@@ -103,9 +102,8 @@ pub(crate) fn find_ancestor<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> 
     traversal::ancestor_of_kind(node, kind)
 }
 
-/// Remove SENTINEL from the string (the prefix in the injection path may contain it).
 pub(crate) fn strip_sentinel(s: &str) -> String {
-    s.replace(SENTINEL, "")
+    s.to_string()
 }
 
 pub(crate) fn get_initializer_text(type_node: Node, bytes: &[u8]) -> Option<String> {

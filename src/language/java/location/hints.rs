@@ -1,5 +1,4 @@
 use crate::language::java::JavaContextExtractor;
-use crate::language::java::utils::strip_sentinel;
 use crate::semantic::CursorLocation;
 use crate::semantic::context::{
     ExpectedTypeSource, FunctionalExprShape, FunctionalMethodCallHint, FunctionalTargetHint,
@@ -342,7 +341,7 @@ fn infer_method_reference_shape(
     ctx: &JavaContextExtractor,
     method_ref: Node,
 ) -> Option<FunctionalExprShape> {
-    let raw = strip_sentinel(ctx.node_text(method_ref).trim());
+    let raw = ctx.node_text(method_ref).trim().to_string();
     let sep_idx = raw.find("::")?;
     let qualifier_expr = raw[..sep_idx].trim().to_string();
     if qualifier_expr.is_empty() {
@@ -350,7 +349,7 @@ fn infer_method_reference_shape(
     }
     let rhs_raw = raw[sep_idx + 2..].trim_start();
     let rhs_no_type_args = strip_leading_type_arguments(rhs_raw);
-    let member_name = strip_sentinel(rhs_no_type_args.trim()).to_string();
+    let member_name = rhs_no_type_args.trim().to_string();
     if member_name.is_empty() {
         return None;
     }
@@ -401,7 +400,7 @@ fn infer_method_ref_qualifier_kind(qualifier_expr: &str) -> MethodRefQualifierKi
 }
 
 fn infer_lambda_shape(ctx: &JavaContextExtractor, lambda: Node) -> Option<FunctionalExprShape> {
-    let raw = strip_sentinel(ctx.node_text(lambda).trim());
+    let raw = ctx.node_text(lambda).trim().to_string();
     let arrow = raw.find("->")?;
     let params_raw = raw[..arrow].trim();
     let body_raw = raw[arrow + 2..].trim();
@@ -482,7 +481,6 @@ fn jump_statement_location(
     let prefix = first_child_of_kind(stmt, "identifier")
         .map(|ident| cursor_truncated_text(ctx, ident))
         .unwrap_or_else(|| extract_jump_label_prefix_from_text(ctx, stmt.start_byte()));
-    let prefix = strip_sentinel(&prefix);
     Some((
         CursorLocation::StatementLabel {
             kind,
@@ -493,7 +491,7 @@ fn jump_statement_location(
 }
 
 fn extract_jump_label_prefix_from_text(ctx: &JavaContextExtractor, stmt_start: usize) -> String {
-    let raw = strip_sentinel(ctx.byte_slice(stmt_start, ctx.offset));
+    let raw = ctx.byte_slice(stmt_start, ctx.offset).to_string();
     let trimmed = raw.trim_end();
     if let Some(rest) = trimmed.strip_prefix("break") {
         return rest.trim().to_string();
@@ -537,7 +535,7 @@ fn detect_partial_jump_label_location(
         .climb(&[])
         .handle(Input::new(node, ctx, None))
         .unwrap_or(0);
-    let before = strip_sentinel(ctx.byte_slice(lower_bound, ctx.offset));
+    let before = ctx.byte_slice(lower_bound, ctx.offset).to_string();
     let trimmed = before.trim_end();
 
     let (kind, prefix) = if let Some(rest) = trimmed.strip_suffix("break") {
@@ -564,7 +562,10 @@ fn detect_partial_jump_label_location(
             return None;
         }
         let ident_start = ctx.offset.saturating_sub(prefix.len());
-        let head = strip_sentinel(ctx.byte_slice(lower_bound, ident_start));
+        let head = ctx
+            .byte_slice(lower_bound, ident_start)
+            .trim_end()
+            .to_string();
         let trimmed_head = head.trim_end();
         if let Some(rest) = trimmed_head.strip_suffix("break") {
             if rest
@@ -610,7 +611,7 @@ fn extract_identifier_prefix_near_cursor(ctx: &JavaContextExtractor, lower_bound
     if i >= ctx.offset {
         return String::new();
     }
-    strip_sentinel(&ctx.source[i..ctx.offset])
+    ctx.source[i..ctx.offset].to_string()
 }
 
 #[cfg(test)]

@@ -1,5 +1,4 @@
 use crate::language::java::JavaContextExtractor;
-use crate::language::java::utils::strip_sentinel;
 use crate::semantic::CursorLocation;
 use tree_sitter::Node;
 use tree_sitter_utils::traversal;
@@ -122,12 +121,11 @@ pub(super) fn handle_error_in_class_body(
 
     if let Some(id) = ident {
         let text = cursor_truncated_text(ctx, id);
-        let clean = strip_sentinel(&text);
         return (
             CursorLocation::Expression {
-                prefix: clean.clone(),
+                prefix: text.clone(),
             },
-            clean,
+            text,
         );
     }
 
