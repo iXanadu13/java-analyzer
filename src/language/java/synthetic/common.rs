@@ -134,6 +134,15 @@ pub fn extract_type_members_with_synthetics(
     type_ctx: &SourceTypeCtx,
     owner_internal: Option<&str>,
 ) -> Vec<CurrentClassMember> {
+    // Guard: Don't process ERROR nodes for synthetic generation
+    if decl.kind() == "ERROR" {
+        return Vec::new();
+    }
+
+    // TWO-PHASE APPROACH:
+    // Phase 1: Extract valid members only (no ERROR recovery)
+    // Phase 2: Error recovery happens in extract_class_members_from_body
+
     let explicit_members = decl
         .child_by_field_name("body")
         .map(|body| extract_class_members_from_body(ctx, body, type_ctx))
@@ -154,6 +163,7 @@ pub fn extract_type_members_with_synthetics(
         })
         .collect();
 
+    // Generate synthetic members from VALID structure only
     let synthetic = synthesize_for_type(
         ctx,
         decl,
@@ -163,6 +173,7 @@ pub fn extract_type_members_with_synthetics(
         &explicit_fields,
     );
 
+    // Merge synthetic + explicit members
     let mut merged: Vec<CurrentClassMember> = synthetic
         .methods
         .into_iter()

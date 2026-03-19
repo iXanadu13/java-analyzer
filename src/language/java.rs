@@ -490,6 +490,7 @@ impl JavaContextExtractor {
             })
             .or_else(|| {
                 // Fallback: find top-level ERROR node anywhere under program
+                // Use two-phase approach: valid members + error recovery
                 let error_node = utils::find_top_error_node(semantic_root)?;
                 let mut members = Vec::new();
                 members::collect_members_from_node(
@@ -498,13 +499,6 @@ impl JavaContextExtractor {
                     &type_ctx,
                     &mut members,
                 );
-                let snapshot = members.clone();
-                members.extend(members::parse_partial_methods_from_error(
-                    semantic_extractor,
-                    &type_ctx,
-                    error_node,
-                    &snapshot,
-                ));
                 Some(members)
             })
             .unwrap_or_default();

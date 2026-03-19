@@ -9,12 +9,25 @@ use tower_lsp::lsp_types::Url;
 use tracing::info;
 
 use crate::build_integration::{SourceRootId, WorkspaceModelSnapshot, WorkspaceRootKind};
-use crate::index::codebase::{index_codebase, index_codebase_paths, index_source_text};
+use crate::index::codebase::{index_codebase, index_codebase_paths};
 use crate::index::{ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex};
 use crate::salsa_db::{Database as SalsaDatabase, FileId};
+use crate::semantic::{LocalVar, context::CurrentClassMember};
 use document::DocumentStore;
 
 pub mod document;
+
+/// Cache for parsed semantic data (IntelliJ-style PSI cache)
+///
+/// This stores parsed locals and class members keyed by content hash.
+/// When file content changes, the hash changes and cache is automatically invalidated.
+#[derive(Default)]
+struct SemanticCache {
+    /// Cached local variables per method, keyed by content hash
+    method_locals: HashMap<u64, Vec<LocalVar>>,
+    /// Cached class members per class, keyed by content hash
+    class_members: HashMap<u64, HashMap<Arc<str>, CurrentClassMember>>,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisContext {
@@ -41,6 +54,9 @@ pub struct Workspace {
     pub salsa_db: Arc<parking_lot::Mutex<SalsaDatabase>>,
     /// Mapping from URI to Salsa SourceFile input
     salsa_files: Arc<parking_lot::RwLock<HashMap<Url, crate::salsa_db::SourceFile>>>,
+    /// IntelliJ-style semantic cache for parsed locals and members
+    /// Keyed by content hash, automatically invalidated when content changes
+    semantic_cache: Arc<parking_lot::RwLock<SemanticCache>>,
     model: ParkingRwLock<Option<WorkspaceModelSnapshot>>,
     jdk_classes: RwLock<Vec<ClassMetadata>>,
 }
@@ -59,9 +75,51 @@ impl Workspace {
             index,
             salsa_db: Arc::new(parking_lot::Mutex::new(salsa_db)),
             salsa_files: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            semantic_cache: Arc::new(parking_lot::RwLock::new(SemanticCache::default())),
             model: ParkingRwLock::new(None),
             jdk_classes: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Get cached method locals by content hash (IntelliJ-style PSI cache)
+    pub fn get_cached_method_locals(&self, content_hash: u64) -> Option<Vec<LocalVar>> {
+        self.semantic_cache
+            .read()
+            .method_locals
+            .get(&content_hash)
+            .cloned()
+    }
+
+    /// Cache method locals by content hash
+    pub fn cache_method_locals(&self, content_hash: u64, locals: Vec<LocalVar>) {
+        self.semantic_cache
+            .write()
+            .method_locals
+            .insert(content_hash, locals);
+    }
+
+    /// Get cached class members by content hash (IntelliJ-style PSI cache)
+    pub fn get_cached_class_members(
+        &self,
+        content_hash: u64,
+    ) -> Option<HashMap<Arc<str>, CurrentClassMember>> {
+        self.semantic_cache
+            .read()
+            .class_members
+            .get(&content_hash)
+            .cloned()
+    }
+
+    /// Cache class members by content hash
+    pub fn cache_class_members(
+        &self,
+        content_hash: u64,
+        members: HashMap<Arc<str>, CurrentClassMember>,
+    ) {
+        self.semantic_cache
+            .write()
+            .class_members
+            .insert(content_hash, members);
     }
 
     pub fn scope_for_uri(&self, uri: &Url) -> IndexScope {

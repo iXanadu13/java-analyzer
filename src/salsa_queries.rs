@@ -9,6 +9,7 @@ pub mod java;
 pub mod kotlin;
 pub mod parse;
 pub mod resolve;
+pub mod semantic;
 
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -35,3 +36,8 @@ pub use index::{
 /// Re-export commonly used query functions
 pub use parse::{extract_imports, extract_package, parse_file};
 pub use resolve::resolve_type_in_context;
+pub use semantic::{
+    ClassMembersMetadata, FileStructureMetadata, MethodLocalsMetadata,
+    extract_class_members_metadata, extract_file_structure, extract_method_locals_incremental,
+    extract_method_locals_metadata, find_enclosing_class_bounds, find_enclosing_method_bounds,
+};

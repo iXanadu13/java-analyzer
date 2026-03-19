@@ -49,146 +49,229 @@ fn is_method_return_type_kind(kind: &str) -> bool {
     )
 }
 
+/// Extract members from a class body using two-phase approach:
+/// Phase 1: Extract valid members only (no ERROR nodes)
+/// Phase 2: Perform shallow error recovery on ERROR nodes
 pub fn extract_class_members_from_body(
     ctx: &JavaContextExtractor,
     body: Node,
     type_ctx: &SourceTypeCtx,
 ) -> Vec<CurrentClassMember> {
-    let mut members = Vec::new();
-    collect_members_from_node_impl(ctx, body, type_ctx, &mut members, false);
+    // PHASE 1: Extract valid members only (no ERROR recovery)
+    let mut members = extract_valid_members_only(ctx, body, type_ctx);
+
+    // PHASE 2: Shallow error recovery from ERROR nodes
+    let error_members = extract_error_recovery_members_from_body(ctx, body, type_ctx, &members);
+    members.extend(error_members);
 
     members
 }
 
-pub fn collect_members_from_node(
+/// Extract members from valid AST structure only.
+/// ERROR nodes are completely skipped - no error recovery is performed.
+/// This ensures accurate extraction without risk of infinite recursion.
+pub fn extract_valid_members_only(
     ctx: &JavaContextExtractor,
     node: Node,
     type_ctx: &SourceTypeCtx,
-    members: &mut Vec<CurrentClassMember>,
-) {
-    collect_members_from_node_impl(ctx, node, type_ctx, members, true);
+) -> Vec<CurrentClassMember> {
+    let mut members = Vec::new();
+    collect_valid_members_impl(ctx, node, type_ctx, &mut members, false);
+    members
 }
 
-fn collect_members_from_node_impl(
+/// Scan a class body for ERROR nodes and perform shallow error recovery.
+/// Only processes direct ERROR children - no recursive traversal.
+fn extract_error_recovery_members_from_body(
+    ctx: &JavaContextExtractor,
+    body: Node,
+    type_ctx: &SourceTypeCtx,
+    already_found: &[CurrentClassMember],
+) -> Vec<CurrentClassMember> {
+    let mut result = Vec::new();
+    let mut cursor = body.walk();
+
+    for child in body.children(&mut cursor) {
+        if child.kind() == "ERROR" {
+            result.extend(extract_error_recovery_members(
+                ctx,
+                child,
+                type_ctx,
+                already_found,
+            ));
+        }
+    }
+
+    result
+}
+
+/// Perform shallow error recovery on ERROR nodes.
+/// Only scans direct children of ERROR nodes - no recursive traversal.
+/// This is a best-effort extraction that supplements valid member extraction.
+pub fn extract_error_recovery_members(
+    ctx: &JavaContextExtractor,
+    node: Node,
+    type_ctx: &SourceTypeCtx,
+    already_found: &[CurrentClassMember],
+) -> Vec<CurrentClassMember> {
+    let mut result = Vec::new();
+
+    // Only process if this is an ERROR node
+    if node.kind() != "ERROR" {
+        return result;
+    }
+
+    // Shallow scan: only look at direct children using parse_partial_methods_from_error
+    result.extend(parse_partial_methods_from_error(
+        ctx,
+        type_ctx,
+        node,
+        already_found,
+    ));
+
+    // Optionally: scan direct children for nested ERROR nodes
+    // But DO NOT recurse into their children
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "ERROR" {
+            result.extend(parse_partial_methods_from_error(
+                ctx,
+                type_ctx,
+                child,
+                already_found,
+            ));
+        }
+    }
+
+    result
+}
+
+/// Extract valid members only - no ERROR node processing.
+/// This is the core structural traversal that processes well-formed AST nodes.
+fn collect_valid_members_impl(
     ctx: &JavaContextExtractor,
     node: Node,
     type_ctx: &SourceTypeCtx,
     members: &mut Vec<CurrentClassMember>,
     allow_nested_types: bool,
 ) {
+    use tree_sitter_utils::handler_fn;
+
     type MemberCtx<'a> = (&'a JavaContextExtractor, &'a SourceTypeCtx, bool);
 
     // Build a handler chain that returns Vec<CurrentClassMember> for each child
-    let member_handler = (|inp: Input<MemberCtx>| -> Option<Vec<CurrentClassMember>> {
+    // Key difference from old implementation: NO ERROR handler
+    let member_handler = handler_fn(|inp: Input<MemberCtx>| -> Vec<CurrentClassMember> {
         let (ctx, type_ctx, allow_nested_types) = inp.ctx;
+        // Only extract constructors when NOT allowing nested types (i.e., in class body context)
         if !allow_nested_types && let Some(m) = parse_constructor_node(ctx, type_ctx, inp.node) {
-            return Some(vec![m]);
+            return vec![m];
         }
-        Some(vec![])
+        vec![]
     })
     .for_kinds(&["constructor_declaration", "compact_constructor_declaration"])
     .or(
-        // Method declarations
-        (|inp: Input<MemberCtx>| -> Option<Vec<CurrentClassMember>> {
-            let (ctx, type_ctx, allow_nested_types) = inp.ctx;
+        // Method declarations - with safe ERROR recovery in body
+        handler_fn(|inp: Input<MemberCtx>| -> Vec<CurrentClassMember> {
+            let (ctx, type_ctx, _allow_nested_types) = inp.ctx;
             let mut result = Vec::new();
 
+            // Always extract the method itself
             if let Some(m) = parse_method_node(ctx, type_ctx, inp.node) {
                 result.push(m);
             }
 
-            // Process method body for nested members
-            if let Some(block) = inp.node.child_by_field_name("body") {
-                let block_children: Vec<Node> = {
-                    let mut bc = block.walk();
-                    block.children(&mut bc).collect()
+            // Safe error recovery: scan method body for ERROR nodes and misread methods
+            // This handles cases where tree-sitter puts methods inside ERROR nodes in method bodies
+            if let Some(body) = inp.node.child_by_field_name("body") {
+                let body_children: Vec<Node> = {
+                    let mut body_cursor = body.walk();
+                    body.children(&mut body_cursor).collect()
                 };
+
                 let mut i = 0;
-                while i < block_children.len() {
-                    let bc = block_children[i];
-                    if bc.kind() == "ERROR" {
-                        if let Some(m) = parse_method_node(ctx, type_ctx, bc) {
-                            result.push(m);
-                        }
-                        result.extend(parse_field_node(ctx, type_ctx, bc));
-                        collect_members_from_node_impl(
-                            ctx,
-                            bc,
-                            type_ctx,
-                            &mut result,
-                            allow_nested_types,
-                        );
-                        let snapshot = result.clone();
-                        result.extend(parse_partial_methods_from_error(
-                            ctx, type_ctx, bc, &snapshot,
-                        ));
-                    } else if bc.kind() == "local_variable_declaration" {
-                        let next = block_children.get(i + 1);
-                        if let Some(next_node) = next
-                            && next_node.kind() == "ERROR"
-                            && ctx.source[next_node.start_byte()..next_node.end_byte()]
-                                .trim_start()
-                                .starts_with('(')
-                            && let Some(m) = parse_misread_method(ctx, type_ctx, bc, *next_node)
-                        {
-                            result.push(m);
-                            i += 1;
-                        }
-                    } else if bc.kind() == "method_declaration" {
-                        if let Some(mut m) = parse_method_node(ctx, type_ctx, bc) {
-                            let pre_annos: Vec<_> = block_children[..i]
-                                .iter()
-                                .rev()
-                                .take_while(|n| {
-                                    matches!(n.kind(), "marker_annotation" | "annotation")
-                                })
-                                .flat_map(|n| parse_annotations_in_node(ctx, *n, type_ctx))
-                                .collect();
-                            if !pre_annos.is_empty()
-                                && let CurrentClassMember::Method(ref arc) = m
-                            {
-                                let mut ms = (**arc).clone();
-                                let mut merged = pre_annos;
-                                merged.append(&mut ms.annotations);
-                                ms.annotations = merged;
-                                m = CurrentClassMember::Method(Arc::new(ms));
+                while i < body_children.len() {
+                    let child = body_children[i];
+
+                    match child.kind() {
+                        "ERROR" => {
+                            // Shallow error recovery - no recursion
+                            let snapshot = result.clone();
+                            result.extend(parse_partial_methods_from_error(
+                                ctx, type_ctx, child, &snapshot,
+                            ));
+
+                            // Also check for method_declaration nodes inside ERROR (one level only)
+                            let mut error_cursor = child.walk();
+                            for error_child in child.children(&mut error_cursor) {
+                                if error_child.kind() == "method_declaration" {
+                                    if let Some(m) = parse_method_node(ctx, type_ctx, error_child) {
+                                        result.push(m);
+                                    }
+                                } else if error_child.kind() == "field_declaration" {
+                                    result.extend(parse_field_node(ctx, type_ctx, error_child));
+                                }
                             }
-                            result.push(m);
                         }
-                    } else if bc.kind() == "field_declaration" {
-                        result.extend(parse_field_node(ctx, type_ctx, bc));
+                        "local_variable_declaration" => {
+                            // Check for misread method pattern: local_variable_declaration followed by ERROR with '('
+                            if let Some(next_node) = body_children.get(i + 1)
+                                && next_node.kind() == "ERROR"
+                                && ctx.source[next_node.start_byte()..next_node.end_byte()]
+                                    .trim_start()
+                                    .starts_with('(')
+                                && let Some(m) =
+                                    parse_misread_method(ctx, type_ctx, child, *next_node)
+                            {
+                                result.push(m);
+                                i += 1; // Skip the ERROR node we just processed
+                            }
+                        }
+                        "method_declaration" => {
+                            // Method inside method body (from ERROR recovery)
+                            if let Some(m) = parse_method_node(ctx, type_ctx, child) {
+                                result.push(m);
+                            }
+                        }
+                        "field_declaration" => {
+                            // Field inside method body (from ERROR recovery)
+                            result.extend(parse_field_node(ctx, type_ctx, child));
+                        }
+                        _ => {}
                     }
+
                     i += 1;
                 }
             }
-            Some(result)
+
+            result
         })
         .for_kinds(&["method_declaration"]),
     )
     .or(
         // Field declarations
-        (|inp: Input<MemberCtx>| -> Option<Vec<CurrentClassMember>> {
+        handler_fn(|inp: Input<MemberCtx>| -> Vec<CurrentClassMember> {
             let (ctx, type_ctx, _) = inp.ctx;
-            Some(parse_field_node(ctx, type_ctx, inp.node))
+            parse_field_node(ctx, type_ctx, inp.node)
         })
         .for_kinds(&["field_declaration"]),
     )
     .or(
         // Nested type declarations (only when allowing nested types)
-        (|inp: Input<MemberCtx>| -> Option<Vec<CurrentClassMember>> {
+        handler_fn(|inp: Input<MemberCtx>| -> Vec<CurrentClassMember> {
             let (ctx, type_ctx, allow_nested_types) = inp.ctx;
             if allow_nested_types {
                 let mut result = Vec::new();
-                collect_members_from_node_impl(
+                collect_valid_members_impl(
                     ctx,
                     inp.node,
                     type_ctx,
                     &mut result,
                     allow_nested_types,
                 );
-                return Some(result);
+                return result;
             }
-            Some(vec![])
+            vec![]
         })
         .for_kinds(&[
             "class_declaration",
@@ -200,17 +283,11 @@ fn collect_members_from_node_impl(
     )
     .or(
         // Body containers - recurse
-        (|inp: Input<MemberCtx>| -> Option<Vec<CurrentClassMember>> {
+        handler_fn(|inp: Input<MemberCtx>| -> Vec<CurrentClassMember> {
             let (ctx, type_ctx, allow_nested_types) = inp.ctx;
             let mut result = Vec::new();
-            collect_members_from_node_impl(
-                ctx,
-                inp.node,
-                type_ctx,
-                &mut result,
-                allow_nested_types,
-            );
-            Some(result)
+            collect_valid_members_impl(ctx, inp.node, type_ctx, &mut result, allow_nested_types);
+            result
         })
         .for_kinds(&[
             "class_body",
@@ -219,27 +296,8 @@ fn collect_members_from_node_impl(
             "enum_body_declarations",
             "program",
         ]),
-    )
-    .or(
-        // ERROR nodes - recurse and extract partial methods
-        (|inp: Input<MemberCtx>| -> Option<Vec<CurrentClassMember>> {
-            let (ctx, type_ctx, allow_nested_types) = inp.ctx;
-            let mut result = Vec::new();
-            collect_members_from_node_impl(
-                ctx,
-                inp.node,
-                type_ctx,
-                &mut result,
-                allow_nested_types,
-            );
-            let snapshot = result.clone();
-            result.extend(parse_partial_methods_from_error(
-                ctx, type_ctx, inp.node, &snapshot,
-            ));
-            Some(result)
-        })
-        .for_kinds(&["ERROR"]),
     );
+    // NOTE: NO ERROR handler - ERROR nodes are completely skipped
 
     // Apply handler to all children and collect results
     let ctx_tuple = (ctx, type_ctx, allow_nested_types);
@@ -251,14 +309,34 @@ fn collect_members_from_node_impl(
             members.extend(child_vec);
         }
     }
+}
 
-    // Handle ERROR node at current level
-    if node.kind() == "ERROR" {
-        let snapshot = members.clone();
-        members.extend(parse_partial_methods_from_error(
-            ctx, type_ctx, node, &snapshot,
-        ));
-    }
+/// Collect members from a node using two-phase approach.
+/// This is used for fallback error recovery when no type declaration is found.
+pub fn collect_members_from_node(
+    ctx: &JavaContextExtractor,
+    node: Node,
+    type_ctx: &SourceTypeCtx,
+    members: &mut Vec<CurrentClassMember>,
+) {
+    // PHASE 1: Extract valid members only
+    let valid_members = extract_valid_members_only_with_nested(ctx, node, type_ctx);
+    members.extend(valid_members);
+
+    // PHASE 2: Error recovery
+    let error_members = extract_error_recovery_members(ctx, node, type_ctx, members);
+    members.extend(error_members);
+}
+
+/// Extract valid members with nested types allowed.
+fn extract_valid_members_only_with_nested(
+    ctx: &JavaContextExtractor,
+    node: Node,
+    type_ctx: &SourceTypeCtx,
+) -> Vec<CurrentClassMember> {
+    let mut members = Vec::new();
+    collect_valid_members_impl(ctx, node, type_ctx, &mut members, true);
+    members
 }
 
 pub fn parse_partial_methods_from_error(

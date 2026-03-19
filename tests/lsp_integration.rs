@@ -11,8 +11,7 @@ use tower_lsp::lsp_types::*;
 
 /// Helper to create a test workspace with a simple Java file
 fn create_test_workspace() -> Arc<Workspace> {
-    let workspace = Arc::new(Workspace::new());
-    workspace
+    Arc::new(Workspace::new())
 }
 
 /// Helper to open a document in the workspace
@@ -314,7 +313,7 @@ public class User {
     eprintln!("Workspace version: {}", workspace_version);
 
     assert!(
-        name_table.len() > 0,
+        !name_table.is_empty(),
         "NameTable should not be empty after indexing a file. Got {} entries",
         name_table.len()
     );

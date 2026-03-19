@@ -100,12 +100,11 @@ pub fn extract_relevant_scope<'a>(
     cursor_offset: usize,
 ) -> &'a str {
     // If we have a tree, find the enclosing method or class
-    if let Some(root) = tree_root {
-        if let Some(enclosing) = find_enclosing_scope_node(root, cursor_offset) {
-            if let Ok(text) = enclosing.utf8_text(source.as_bytes()) {
-                return text;
-            }
-        }
+    if let Some(root) = tree_root
+        && let Some(enclosing) = find_enclosing_scope_node(root, cursor_offset)
+        && let Ok(text) = enclosing.utf8_text(source.as_bytes())
+    {
+        return text;
     }
 
     // Fallback: return entire file

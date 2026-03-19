@@ -98,7 +98,7 @@ pub fn cached_index_view_metadata(
     module_id: ModuleId,
     classpath: ClasspathId,
     source_root: Option<SourceRootId>,
-    workspace_version: u64,
+    _workspace_version: u64,
 ) -> IndexViewMetadata {
     let workspace_index = db.workspace_index();
     let index = workspace_index.read();
@@ -141,7 +141,7 @@ pub fn cached_name_table(
     module_id: ModuleId,
     classpath: ClasspathId,
     source_root: Option<SourceRootId>,
-    workspace_version: u64,
+    _workspace_version: u64,
 ) -> NameTableMetadata {
     let workspace_index = db.workspace_index();
     let index = workspace_index.read();
