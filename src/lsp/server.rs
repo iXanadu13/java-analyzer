@@ -236,33 +236,34 @@ impl LanguageServer for Backend {
             doc.set_tree(tree);
         });
 
+        // Initialize Salsa database with the opened file
+        let salsa_file =
+            self.workspace
+                .get_or_create_salsa_file(&td.uri, &td.text, &td.language_id);
+
         let uri_str = td.uri.to_string();
         let analysis = self.workspace.analysis_context_for_uri(&td.uri);
-        let name_table = self
-            .workspace
-            .index
-            .read()
-            .await
-            .build_name_table_for_analysis_context(
-                analysis.module,
-                analysis.classpath,
-                analysis.source_root,
-            );
-        let visible_classpath = self
-            .workspace
-            .index
-            .read()
-            .await
-            .module_classpath_jars(analysis.module, analysis.classpath);
-        let classes = index_source_text(&uri_str, &td.text, &td.language_id, Some(name_table));
+
+        // Use Salsa queries for incremental parsing
+        let classes = {
+            let db = self.workspace.salsa_db.lock();
+
+            // Trigger parse query (memoized) - this tracks changes
+            let _result = crate::salsa_queries::index::extract_classes(&*db, salsa_file);
+
+            // Get the actual classes (not memoized, but fast)
+            crate::salsa_queries::index::get_extracted_classes(&*db, salsa_file)
+        };
+
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
         tracing::debug!(
             uri = %td.uri,
             module = analysis.module.0,
             classpath = ?analysis.classpath,
             source_root = ?analysis.source_root.map(|id| id.0),
-            visible_classpath_len = visible_classpath.len(),
-            "did_open indexing with analysis context"
+            class_count = classes.len(),
+            language = lang.id(),
+            "did_open indexing with Salsa (incremental)"
         );
         self.workspace.index.write().await.update_source_in_context(
             analysis.module,
@@ -390,33 +391,35 @@ impl LanguageServer for Backend {
             return;
         };
 
+        // Update Salsa database with the new content
+        let salsa_file = self
+            .workspace
+            .get_or_create_salsa_file(uri, &content, &lang_id);
+
         let uri_str = uri.to_string();
         let analysis = self.workspace.analysis_context_for_uri(uri);
-        let name_table = self
-            .workspace
-            .index
-            .read()
-            .await
-            .build_name_table_for_analysis_context(
-                analysis.module,
-                analysis.classpath,
-                analysis.source_root,
-            );
-        let visible_classpath = self
-            .workspace
-            .index
-            .read()
-            .await
-            .module_classpath_jars(analysis.module, analysis.classpath);
-        let classes = index_source_text(&uri_str, &content, &lang_id, Some(name_table));
+
+        // Use Salsa queries for incremental parsing
+        // Salsa automatically invalidates dependent queries when content changes
+        let classes = {
+            let db = self.workspace.salsa_db.lock();
+
+            // Trigger parse query (will recompute if content changed)
+            let _result = crate::salsa_queries::index::extract_classes(&*db, salsa_file);
+
+            // Get the actual classes
+            crate::salsa_queries::index::get_extracted_classes(&*db, salsa_file)
+        };
+
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
         tracing::debug!(
             uri = %uri,
             module = analysis.module.0,
             classpath = ?analysis.classpath,
             source_root = ?analysis.source_root.map(|id| id.0),
-            visible_classpath_len = visible_classpath.len(),
-            "did_change indexing with analysis context"
+            class_count = classes.len(),
+            language = lang.id(),
+            "did_change indexing with Salsa (incremental)"
         );
         self.workspace.index.write().await.update_source_in_context(
             analysis.module,
@@ -522,6 +525,8 @@ impl LanguageServer for Backend {
         let uri = &params.text_document.uri;
         info!(uri = %uri, "did_close");
         self.workspace.documents.close(uri);
+        // Remove from Salsa database
+        self.workspace.remove_salsa_file(uri);
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {

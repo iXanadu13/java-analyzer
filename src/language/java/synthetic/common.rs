@@ -276,10 +276,10 @@ fn find_field_node<'a>(
                 continue;
             }
 
-            if let Some(name_node) = declarator.child_by_field_name("name") {
-                if ctx.node_text(name_node) == field_name {
-                    return Some(name_node);
-                }
+            if let Some(name_node) = declarator.child_by_field_name("name")
+                && ctx.node_text(name_node) == field_name
+            {
+                return Some(name_node);
             }
         }
     }

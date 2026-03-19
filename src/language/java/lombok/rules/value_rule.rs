@@ -373,16 +373,16 @@ fn generate_all_args_constructor_for_value(
 
     // Generate static factory method if staticConstructor is specified
     let static_name = get_string_param(annotation, "staticConstructor");
-    if let Some(static_name) = static_name {
-        if !static_name.is_empty() {
-            generate_static_factory_method(
-                static_name,
-                &params,
-                explicit_methods,
-                out,
-                LombokConstructorType::AllArgs,
-            );
-        }
+    if let Some(static_name) = static_name
+        && !static_name.is_empty()
+    {
+        generate_static_factory_method(
+            static_name,
+            &params,
+            explicit_methods,
+            out,
+            LombokConstructorType::AllArgs,
+        );
     }
 }
 

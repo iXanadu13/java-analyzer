@@ -221,7 +221,7 @@ mod tests {
     use super::*;
     use crate::index::AnnotationSummary;
     use crate::language::java::{make_java_parser, scope::extract_imports, scope::extract_package};
-    use rust_asm::constants::{ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC};
+    use rust_asm::constants::{ACC_FINAL, ACC_PRIVATE};
     use rustc_hash::FxHashMap;
 
     fn parse_env(src: &str) -> (JavaContextExtractor, tree_sitter::Tree, SourceTypeCtx) {

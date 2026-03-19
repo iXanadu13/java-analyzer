@@ -1,0 +1,31 @@
+pub mod index;
+/// Salsa query infrastructure for incremental computation
+///
+/// This module provides the query layer that sits between the LSP handlers
+/// and the actual parsing/indexing logic. All queries are memoized by Salsa
+/// and automatically invalidated when inputs change.
+pub mod java;
+pub mod kotlin;
+pub mod parse;
+pub mod resolve;
+
+use parking_lot::RwLock;
+use std::sync::Arc;
+
+use crate::index::WorkspaceIndex;
+
+/// Database trait that extends Salsa's Database with workspace-specific accessors
+#[salsa::db]
+pub trait Db: salsa::Database {
+    /// Get reference to the workspace index
+    /// This allows queries to access the global index state
+    fn workspace_index(&self) -> Arc<RwLock<WorkspaceIndex>>;
+}
+
+pub use index::{
+    build_name_table_for_context, extract_classes, get_extracted_classes,
+    visible_classpath_for_context,
+};
+/// Re-export commonly used query functions
+pub use parse::{extract_imports, extract_package, parse_file};
+pub use resolve::resolve_type_in_context;

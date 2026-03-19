@@ -285,12 +285,9 @@ pub fn find_symbol_range(
 
     // For nested classes, we need to look up the class metadata to get the simple name
     // We can't just split by '$' because '$' is a valid character in Java identifiers
-    let target_simple_owned = if let Some(meta) = index.get_class(target_internal) {
-        // Use the name field from ClassMetadata which is the simple name
-        Some(meta.name.to_string())
-    } else {
-        None
-    };
+    let target_simple_owned = index
+        .get_class(target_internal)
+        .map(|meta| meta.name.to_string());
 
     let target_simple = target_simple_owned.as_deref().unwrap_or_else(|| {
         // Fallback: extract from internal name (after last '/')
@@ -1851,4 +1848,29 @@ fn test_nested_class_with_dollar_in_name() {
         range.is_some(),
         "Should find getInnerField method in Inner$Class"
     );
+}
+
+/// Extract package declaration from Java source code
+///
+/// This is a convenience wrapper for Salsa queries.
+pub fn extract_package_from_source(source: &str) -> Option<Arc<str>> {
+    let ctx = JavaContextExtractor::for_indexing(source, None);
+    let mut parser = make_java_parser();
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    extract_package(&ctx, root)
+}
+
+/// Extract import declarations from Java source code
+///
+/// This is a convenience wrapper for Salsa queries.
+pub fn extract_imports_from_source(source: &str) -> Vec<Arc<str>> {
+    let ctx = JavaContextExtractor::for_indexing(source, None);
+    let mut parser = make_java_parser();
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    let root = tree.root_node();
+    crate::language::java::scope::extract_imports(&ctx, root)
 }

@@ -5,5 +5,7 @@ pub mod index;
 pub mod jvm;
 pub mod language;
 pub mod lsp;
+pub mod salsa_db;
+pub mod salsa_queries;
 pub mod semantic;
 pub mod workspace;

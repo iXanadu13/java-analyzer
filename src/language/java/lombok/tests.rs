@@ -3565,7 +3565,7 @@ mod builder_tests {
 
 mod with_tests {
     use super::*;
-    use rust_asm::constants::{ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC};
+    use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC};
 
     #[test]
     fn test_with_generates_method_for_field() {

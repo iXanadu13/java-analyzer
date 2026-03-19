@@ -1,6 +1,6 @@
 use anyhow::Result;
 use parking_lot::RwLock as ParkingRwLock;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use tracing::info;
 use crate::build_integration::{SourceRootId, WorkspaceModelSnapshot, WorkspaceRootKind};
 use crate::index::codebase::{index_codebase, index_codebase_paths, index_source_text};
 use crate::index::{ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex};
+use crate::salsa_db::{Database as SalsaDatabase, FileId};
 use document::DocumentStore;
 
 pub mod document;
@@ -34,15 +35,29 @@ impl AnalysisContext {
 pub struct Workspace {
     pub documents: DocumentStore,
     pub index: Arc<RwLock<WorkspaceIndex>>,
+    /// Salsa database for incremental computation (uses parking_lot for sync access)
+    pub salsa_db: Arc<parking_lot::Mutex<SalsaDatabase>>,
+    /// Mapping from URI to Salsa SourceFile input
+    salsa_files: Arc<parking_lot::RwLock<HashMap<Url, crate::salsa_db::SourceFile>>>,
     model: ParkingRwLock<Option<WorkspaceModelSnapshot>>,
     jdk_classes: RwLock<Vec<ClassMetadata>>,
 }
 
 impl Workspace {
     pub fn new() -> Self {
+        let index = Arc::new(RwLock::new(WorkspaceIndex::new()));
+
+        // Create Salsa database with workspace index reference
+        let salsa_db = {
+            let index_clone = Arc::new(parking_lot::RwLock::new(WorkspaceIndex::new()));
+            SalsaDatabase::with_workspace_index(index_clone)
+        };
+
         Self {
             documents: DocumentStore::new(),
-            index: Arc::new(RwLock::new(WorkspaceIndex::new())),
+            index,
+            salsa_db: Arc::new(parking_lot::Mutex::new(salsa_db)),
+            salsa_files: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             model: ParkingRwLock::new(None),
             jdk_classes: RwLock::new(Vec::new()),
         }
@@ -352,6 +367,48 @@ impl Workspace {
         *self.index.write().await = index;
         *self.model.write() = None;
         Ok(())
+    }
+
+    /// Get or create a Salsa SourceFile for the given URI
+    /// This is the bridge between LSP and Salsa
+    pub fn get_or_create_salsa_file(
+        &self,
+        uri: &Url,
+        content: &str,
+        language_id: &str,
+    ) -> crate::salsa_db::SourceFile {
+        use salsa::Setter;
+
+        let mut files = self.salsa_files.write();
+        let mut db = self.salsa_db.lock();
+
+        if let Some(file) = files.get(uri) {
+            // Update existing file
+            file.set_content(&mut *db).to(content.to_string());
+            *file
+        } else {
+            // Create new file
+            let file = crate::salsa_db::SourceFile::new(
+                &*db,
+                FileId::new(uri.clone()),
+                content.to_string(),
+                Arc::from(language_id),
+            );
+            files.insert(uri.clone(), file);
+            file
+        }
+    }
+
+    /// Get an existing Salsa SourceFile for the given URI
+    pub fn get_salsa_file(&self, uri: &Url) -> Option<crate::salsa_db::SourceFile> {
+        let files = self.salsa_files.read();
+        files.get(uri).copied()
+    }
+
+    /// Remove a Salsa SourceFile (e.g., when file is deleted)
+    pub fn remove_salsa_file(&self, uri: &Url) {
+        let mut files = self.salsa_files.write();
+        files.remove(uri);
     }
 }
 

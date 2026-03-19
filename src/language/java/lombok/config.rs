@@ -23,10 +23,10 @@ impl LombokConfig {
         // Walk up the directory tree
         loop {
             let config_file = current.join("lombok.config");
-            if config_file.exists() {
-                if let Ok(content) = std::fs::read_to_string(&config_file) {
-                    config.merge_from_content(&content);
-                }
+            if config_file.exists()
+                && let Ok(content) = std::fs::read_to_string(&config_file)
+            {
+                config.merge_from_content(&content);
             }
 
             // Check for stop file

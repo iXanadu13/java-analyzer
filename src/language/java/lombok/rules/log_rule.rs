@@ -90,9 +90,9 @@ impl LogRule {
     }
 
     /// Find which log framework annotation is present
-    fn find_log_annotation<'a>(
-        annotations: &'a [crate::index::AnnotationSummary],
-    ) -> Option<(&'a crate::index::AnnotationSummary, &'static LogFramework)> {
+    fn find_log_annotation(
+        annotations: &[crate::index::AnnotationSummary],
+    ) -> Option<(&crate::index::AnnotationSummary, &'static LogFramework)> {
         for framework in Self::frameworks() {
             if let Some(anno) = find_lombok_annotation(annotations, framework.annotation) {
                 return Some((anno, framework));
@@ -122,7 +122,7 @@ impl SyntheticMemberRule for LogRule {
         let config = LombokConfig::new();
 
         // Get configured field name (default: "log")
-        let field_name = config.get("lombok.log.fieldName").unwrap_or_else(|| "log");
+        let field_name = config.get("lombok.log.fieldName").unwrap_or("log");
 
         // Check if field already exists
         if explicit_fields
@@ -136,7 +136,7 @@ impl SyntheticMemberRule for LogRule {
         let class_annotations = extract_class_annotations(input.ctx, input.decl, input.type_ctx);
 
         if let Some((annotation, framework)) = LogRule::find_log_annotation(&class_annotations) {
-            generate_log_field(framework, annotation, &field_name, &config, out);
+            generate_log_field(framework, annotation, field_name, &config, out);
         }
     }
 }

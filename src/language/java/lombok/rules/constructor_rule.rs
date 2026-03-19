@@ -145,17 +145,17 @@ fn generate_no_args_constructor(
     });
 
     // Generate static factory method if staticName is specified
-    if let Some(static_name) = static_name {
-        if !static_name.is_empty() {
-            generate_static_factory_method(
-                &static_name,
-                &MethodParams::empty(),
-                None, // No class name needed for return type inference
-                explicit_methods,
-                out,
-                LombokConstructorType::NoArgs,
-            );
-        }
+    if let Some(static_name) = static_name
+        && !static_name.is_empty()
+    {
+        generate_static_factory_method(
+            static_name,
+            &MethodParams::empty(),
+            None, // No class name needed for return type inference
+            explicit_methods,
+            out,
+            LombokConstructorType::NoArgs,
+        );
     }
 }
 
@@ -217,17 +217,17 @@ fn generate_required_args_constructor(
     });
 
     // Generate static factory method if staticName is specified
-    if let Some(static_name) = static_name {
-        if !static_name.is_empty() {
-            generate_static_factory_method(
-                &static_name,
-                &constructor.params,
-                None,
-                explicit_methods,
-                out,
-                LombokConstructorType::RequiredArgs,
-            );
-        }
+    if let Some(static_name) = static_name
+        && !static_name.is_empty()
+    {
+        generate_static_factory_method(
+            static_name,
+            &constructor.params,
+            None,
+            explicit_methods,
+            out,
+            LombokConstructorType::RequiredArgs,
+        );
     }
 }
 
@@ -289,17 +289,17 @@ fn generate_all_args_constructor(
     });
 
     // Generate static factory method if staticName is specified
-    if let Some(static_name) = static_name {
-        if !static_name.is_empty() {
-            generate_static_factory_method(
-                &static_name,
-                &constructor.params,
-                None,
-                explicit_methods,
-                out,
-                LombokConstructorType::AllArgs,
-            );
-        }
+    if let Some(static_name) = static_name
+        && !static_name.is_empty()
+    {
+        generate_static_factory_method(
+            static_name,
+            &constructor.params,
+            None,
+            explicit_methods,
+            out,
+            LombokConstructorType::AllArgs,
+        );
     }
 }
 
@@ -464,17 +464,17 @@ fn build_constructor_descriptor(params: &MethodParams) -> String {
 /// Parse AccessLevel from constructor annotation (uses 'access' parameter, not 'value')
 fn parse_constructor_access_level(annotation: &AnnotationSummary) -> AccessLevel {
     // Constructor annotations use 'access' parameter
-    if let Some(value) = annotation.elements.get("access") {
-        if let Some(level) = AccessLevel::from_annotation_value(value) {
-            return level;
-        }
+    if let Some(value) = annotation.elements.get("access")
+        && let Some(level) = AccessLevel::from_annotation_value(value)
+    {
+        return level;
     }
 
     // Fall back to 'value' parameter for compatibility
-    if let Some(value) = annotation.elements.get("value") {
-        if let Some(level) = AccessLevel::from_annotation_value(value) {
-            return level;
-        }
+    if let Some(value) = annotation.elements.get("value")
+        && let Some(level) = AccessLevel::from_annotation_value(value)
+    {
+        return level;
     }
 
     // Default to PUBLIC

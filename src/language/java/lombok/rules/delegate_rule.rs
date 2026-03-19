@@ -1,21 +1,18 @@
 use std::sync::Arc;
 use tree_sitter::Node;
-use tree_sitter_utils::traversal::first_child_of_kind;
 
 use crate::{
-    index::{AnnotationValue, FieldSummary, MethodParam, MethodParams, MethodSummary},
+    index::{AnnotationValue, FieldSummary, MethodSummary},
     language::java::{
-        JavaContextExtractor,
         lombok::{
             types::annotations,
             utils::{find_lombok_annotation, get_annotation_value},
         },
-        members::{extract_class_members_from_body, parse_annotations_in_node},
+        members::extract_class_members_from_body,
         synthetic::{
             SyntheticDefinition, SyntheticDefinitionKind, SyntheticInput, SyntheticMemberRule,
             SyntheticMemberSet, SyntheticOrigin,
         },
-        type_ctx::SourceTypeCtx,
     },
     semantic::context::CurrentClassMember,
 };
@@ -99,20 +96,20 @@ fn find_type_methods(input: &SyntheticInput<'_>, type_name: &str) -> Option<Vec<
         .trim_start_matches('L')
         .trim_end_matches(';')
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or(type_name);
 
     // First, search for nested types within the current class
     if let Some(body) = input.decl.child_by_field_name("body") {
         let mut cursor = body.walk();
         for child in body.children(&mut cursor) {
-            if matches!(child.kind(), "interface_declaration" | "class_declaration") {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = input.ctx.node_text(name_node);
-                    if name == simple_name {
-                        // Found the nested type! Extract its methods
-                        return extract_methods_from_type(input, child);
-                    }
+            if matches!(child.kind(), "interface_declaration" | "class_declaration")
+                && let Some(name_node) = child.child_by_field_name("name")
+            {
+                let name = input.ctx.node_text(name_node);
+                if name == simple_name {
+                    // Found the nested type! Extract its methods
+                    return extract_methods_from_type(input, child);
                 }
             }
         }
@@ -265,6 +262,8 @@ fn get_excludes_parameter(annotation: &crate::index::AnnotationSummary) -> Vec<A
 mod tests {
     use super::*;
     use crate::index::AnnotationSummary;
+    use crate::language::java::JavaContextExtractor;
+    use crate::language::java::type_ctx::SourceTypeCtx;
     use crate::language::java::{make_java_parser, scope::extract_imports, scope::extract_package};
     use rust_asm::constants::{ACC_PRIVATE, ACC_STATIC};
     use rustc_hash::FxHashMap;

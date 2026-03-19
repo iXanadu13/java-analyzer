@@ -6,7 +6,10 @@ use std::sync::Arc;
 /// Check if annotations contain a specific Lombok annotation
 /// Checks both full internal name (lombok/Getter) and simple name (Getter)
 pub fn has_lombok_annotation(annotations: &[AnnotationSummary], internal_name: &str) -> bool {
-    let simple_name = internal_name.split('/').last().unwrap_or(internal_name);
+    let simple_name = internal_name
+        .split('/')
+        .next_back()
+        .unwrap_or(internal_name);
     annotations.iter().any(|anno| {
         let anno_name = anno.internal_name.as_ref();
         anno_name == internal_name || anno_name == simple_name
@@ -19,7 +22,10 @@ pub fn find_lombok_annotation<'a>(
     annotations: &'a [AnnotationSummary],
     internal_name: &str,
 ) -> Option<&'a AnnotationSummary> {
-    let simple_name = internal_name.split('/').last().unwrap_or(internal_name);
+    let simple_name = internal_name
+        .split('/')
+        .next_back()
+        .unwrap_or(internal_name);
     annotations.iter().find(|anno| {
         let anno_name = anno.internal_name.as_ref();
         anno_name == internal_name || anno_name == simple_name
@@ -44,10 +50,10 @@ pub fn parse_access_level(anno: &AnnotationSummary) -> AccessLevel {
 /// Check if a field should be excluded based on annotation parameters
 pub fn is_field_excluded(field_name: &str, anno: &AnnotationSummary) -> bool {
     // Check 'exclude' parameter
-    if let Some(exclude_value) = get_annotation_value(anno, "exclude") {
-        if matches_field_in_array(field_name, exclude_value) {
-            return true;
-        }
+    if let Some(exclude_value) = get_annotation_value(anno, "exclude")
+        && matches_field_in_array(field_name, exclude_value)
+    {
+        return true;
     }
 
     // Check 'of' parameter (if present, only include listed fields)
