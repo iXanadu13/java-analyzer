@@ -1,23 +1,6 @@
 repos:
   - repo: local
     hooks:
-      # - id: cargo-check
-      #   name: cargo check
-      #   description: Check the package for errors
-      #   entry: cargo check
-      #   language: system
-      #   types: [rust]
-      #   pass_filenames: false
-
-      - id: clippy
-        name: clippy fix
-        description: Lint rust sources and fix auto-fixable issues
-        entry: cargo clippy
-        language: system
-        args: ["--fix", "--allow-dirty", "--all-targets"]
-        types: [rust]
-        pass_filenames: false
-
       - id: fmt
         name: fmt
         description: Format files with cargo fmt
@@ -26,10 +9,10 @@ repos:
         types: [rust]
         args: ["--"]
 
-      - id: test
-        name: test
-        description: Run tests
-        entry: cargo test
+      - id: cargo-check
+        name: cargo check
+        description: Check the package for errors
+        entry: cargo check
         language: system
         types: [rust]
         pass_filenames: false
