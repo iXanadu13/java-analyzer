@@ -21,6 +21,19 @@
     "onCommand:java-analyzer.setServerPath"
   ],
   "contributes": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "aliases": [
+          "Kotlin",
+          "kotlin"
+        ],
+        "extensions": [
+          ".kt",
+          ".kts"
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "java-analyzer.setJdkPath",

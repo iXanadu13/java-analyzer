@@ -23,6 +23,8 @@ function createClientOptions(
     documentSelector: [
       { scheme: "file", language: "java" },
       { scheme: "file", language: "kotlin" },
+      { scheme: "file", pattern: "**/*.kt" },
+      { scheme: "file", pattern: "**/*.kts" },
     ],
     synchronize: {
       fileEvents: fileWatcher,

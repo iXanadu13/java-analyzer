@@ -212,18 +212,28 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let td = params.text_document;
 
-        let lang = match self.registry.find(&td.language_id) {
-            Some(l) => l,
+        let lang_id = match resolve_supported_language_id(&self.registry, &td.uri, &td.language_id)
+        {
+            Some(id) => id,
             None => return,
         };
+        let lang = self
+            .registry
+            .find(lang_id)
+            .expect("resolved language must be registered");
 
-        info!(uri = %td.uri, lang = %td.language_id, "did_open");
+        info!(
+            uri = %td.uri,
+            reported_lang = %td.language_id,
+            resolved_lang = lang_id,
+            "did_open"
+        );
 
         self.workspace
             .documents
             .open(Document::new(crate::workspace::SourceFile::new(
                 td.uri.clone(),
-                td.language_id.as_str(),
+                lang_id,
                 td.version,
                 td.text.as_str(),
                 None,
@@ -237,9 +247,9 @@ impl LanguageServer for Backend {
         });
 
         // Initialize Salsa database with the opened file
-        let salsa_file =
-            self.workspace
-                .get_or_create_salsa_file(&td.uri, &td.text, &td.language_id);
+        let salsa_file = self
+            .workspace
+            .get_or_create_salsa_file(&td.uri, &td.text, lang_id);
 
         let uri_str = td.uri.to_string();
         let analysis = self.workspace.analysis_context_for_uri(&td.uri);
@@ -689,4 +699,50 @@ fn point_after_insert_bytes(
     }
 
     (row, col)
+}
+
+fn resolve_supported_language_id<'a>(
+    registry: &'a LanguageRegistry,
+    uri: &Url,
+    reported_language_id: &'a str,
+) -> Option<&'a str> {
+    if registry.find(reported_language_id).is_some() {
+        return Some(reported_language_id);
+    }
+
+    infer_language_id_from_uri(uri).filter(|language_id| registry.find(language_id).is_some())
+}
+
+fn infer_language_id_from_uri(uri: &Url) -> Option<&'static str> {
+    let path = uri.to_file_path().ok()?;
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "java" => Some("java"),
+        "kt" | "kts" => Some("kotlin"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{infer_language_id_from_uri, resolve_supported_language_id};
+    use crate::language::LanguageRegistry;
+    use tower_lsp::lsp_types::Url;
+
+    #[test]
+    fn resolves_kotlin_from_file_extension_when_language_id_is_unknown() {
+        let registry = LanguageRegistry::new();
+        let uri = Url::parse("file:///tmp/build.gradle.kts").unwrap();
+
+        let resolved = resolve_supported_language_id(&registry, &uri, "plaintext");
+
+        assert_eq!(resolved, Some("kotlin"));
+    }
+
+    #[test]
+    fn infers_kotlin_from_kt_file_extension() {
+        let uri = Url::parse("file:///tmp/App.kt").unwrap();
+
+        assert_eq!(infer_language_id_from_uri(&uri), Some("kotlin"));
+    }
 }

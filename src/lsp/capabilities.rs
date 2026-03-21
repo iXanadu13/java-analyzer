@@ -42,6 +42,16 @@ pub fn server_capabilities() -> ServerCapabilities {
                                 scheme: Some("file".into()),
                                 pattern: None,
                             },
+                            DocumentFilter {
+                                language: None,
+                                scheme: Some("file".into()),
+                                pattern: Some("**/*.kt".into()),
+                            },
+                            DocumentFilter {
+                                language: None,
+                                scheme: Some("file".into()),
+                                pattern: Some("**/*.kts".into()),
+                            },
                         ]),
                     },
                     semantic_tokens_options: SemanticTokensOptions {
