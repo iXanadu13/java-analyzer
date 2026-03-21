@@ -339,6 +339,7 @@ impl Language for JavaLanguage {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn extract_java_semantic_context_for_test(
     source: &str,
     line: u32,
@@ -364,6 +365,9 @@ pub(crate) fn extract_java_semantic_context_for_test(
     }
     if let Some(workspace) = env.workspace.as_ref() {
         extractor = extractor.with_workspace(Arc::clone(workspace));
+    }
+    if let Some(file_uri) = env.file_uri.as_ref() {
+        extractor = extractor.with_file_uri(Arc::clone(file_uri));
     }
     if let Some(metrics) = env.metrics.as_ref() {
         extractor = extractor.with_metrics(Arc::clone(metrics));
@@ -405,6 +409,7 @@ fn byte_offset_to_position(rope: &Rope, offset: usize) -> Position {
     }
 }
 
+#[deprecated]
 pub struct JavaContextExtractor {
     source: Arc<str>,
     pub rope: Rope,
@@ -695,12 +700,31 @@ impl JavaContextExtractor {
         let flow_started = std::time::Instant::now();
         let statement_labels =
             scope::extract_enclosing_statement_labels(semantic_extractor, semantic_cursor_node);
-        let flow_type_overrides = flow::extract_instanceof_true_branch_overrides(
-            semantic_extractor,
-            semantic_cursor_node,
-            &type_ctx,
-            &local_variables,
-        );
+        let flow_type_overrides = if let (Some(workspace), Some(file_uri)) =
+            (self.workspace.as_ref(), self.file_uri.as_ref())
+        {
+            if let Some(file) = workspace.get_or_create_salsa_file_by_uri_str(file_uri.as_ref()) {
+                let db = workspace.salsa_db.lock();
+                crate::salsa_queries::materialize_flow_type_overrides(
+                    crate::salsa_queries::extract_java_flow_type_overrides(&*db, file, self.offset)
+                        .as_ref(),
+                )
+            } else {
+                flow::extract_instanceof_true_branch_overrides(
+                    semantic_extractor,
+                    semantic_cursor_node,
+                    &type_ctx,
+                    &local_variables,
+                )
+            }
+        } else {
+            flow::extract_instanceof_true_branch_overrides(
+                semantic_extractor,
+                semantic_cursor_node,
+                &type_ctx,
+                &local_variables,
+            )
+        };
         let existing_static_imports =
             scope::extract_static_imports(semantic_extractor, semantic_root);
         let is_class_member_position =
@@ -714,22 +738,19 @@ impl JavaContextExtractor {
 
         let members_started = std::time::Instant::now();
         let current_class_members = if self.workspace.is_some() && self.file_uri.is_some() {
-            // NEW: Incremental extraction with PSI cache
             let workspace = self.workspace.as_ref().unwrap();
             let file_uri = self.file_uri.as_ref().unwrap();
 
             if let Some(file) = workspace.get_or_create_salsa_file_by_uri_str(file_uri.as_ref()) {
                 let db = workspace.salsa_db.lock();
-                let members_map = crate::salsa_queries::extract_class_members_incremental(
+                let members_map = crate::salsa_queries::extract_java_current_class_members(
                     &*db,
                     file,
                     self.offset,
-                    workspace,
+                    Some(workspace),
                 );
-                // Convert HashMap to Vec
                 members_map.into_values().collect()
             } else {
-                // Fallback to old method
                 semantic_cursor_node
                     .and_then(scope::nearest_type_declaration)
                     .map(|decl| {
@@ -754,7 +775,6 @@ impl JavaContextExtractor {
                     .unwrap_or_default()
             }
         } else {
-            // OLD: Direct extraction (no cache)
             semantic_cursor_node
                 .and_then(scope::nearest_type_declaration)
                 .map(|decl| {

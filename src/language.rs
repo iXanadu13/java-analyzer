@@ -183,6 +183,7 @@ pub struct ParseEnv {
     pub name_table: Option<Arc<NameTable>>,
     pub view: Option<IndexView>,
     pub workspace: Option<Arc<crate::workspace::Workspace>>,
+    pub file_uri: Option<Arc<str>>,
     pub metrics: Option<Arc<RequestMetrics>>,
 }
 
@@ -381,6 +382,7 @@ pub(crate) mod test_helpers {
                     name_table: None,
                     view: None,
                     workspace: None,
+                    file_uri: None,
                     metrics: None,
                 },
             )
@@ -441,6 +443,7 @@ pub(crate) mod test_helpers {
         completion_context_from_source(language_id, &source, line, col, trigger_char)
     }
 
+    #[deprecated]
     pub(crate) fn completion_context_from_source_with_view(
         language_id: &str,
         source: &str,
@@ -459,6 +462,7 @@ pub(crate) mod test_helpers {
                     name_table: Some(view.build_name_table()),
                     view: Some(view.clone()),
                     workspace: None,
+                    file_uri: None,
                     metrics: None,
                 },
             )
@@ -483,6 +487,7 @@ pub(crate) mod test_helpers {
         ctx
     }
 
+    #[deprecated]
     pub(crate) fn completion_context_from_marked_source_with_view(
         language_id: &str,
         marked_source: &str,

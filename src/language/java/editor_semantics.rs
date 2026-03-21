@@ -10,7 +10,7 @@ use crate::language::java::completion_context::ContextEnricher;
 use crate::language::java::expression_typing;
 use crate::language::java::render;
 use crate::language::java::type_ctx::SourceTypeCtx;
-use crate::language::java::{flow, scope, utils};
+use crate::language::java::{scope, utils};
 use crate::request_metrics::RequestMetrics;
 use crate::semantic::context::{
     CurrentClassMember, ExpectedTypeConfidence, FunctionalMethodCallHint,
@@ -326,8 +326,11 @@ impl<'a> JavaSemanticRequestContext<'a> {
         ) {
             std::collections::HashMap::new()
         } else {
-            crate::salsa_queries::extract_class_members_incremental(
-                &*db, salsa_file, offset, workspace,
+            crate::salsa_queries::extract_java_current_class_members(
+                &*db,
+                salsa_file,
+                offset,
+                Some(workspace),
             )
         };
         if let Some(metrics) = self.metrics.as_ref() {
@@ -343,6 +346,11 @@ impl<'a> JavaSemanticRequestContext<'a> {
             crate::salsa_queries::extract_active_lambda_param_names_incremental(
                 &*db, salsa_file, offset,
             );
+        let flow_started = std::time::Instant::now();
+        let flow_type_overrides = crate::salsa_queries::materialize_flow_type_overrides(
+            crate::salsa_queries::extract_java_flow_type_overrides(&*db, salsa_file, offset)
+                .as_ref(),
+        );
         drop(db);
         if let Some(metrics) = self.metrics.as_ref() {
             metrics.record_phase_duration_at(
@@ -352,13 +360,6 @@ impl<'a> JavaSemanticRequestContext<'a> {
             );
         }
 
-        let flow_started = std::time::Instant::now();
-        let flow_type_overrides = flow::extract_instanceof_true_branch_overrides(
-            &extractor,
-            cursor_node,
-            &type_ctx,
-            &local_variables,
-        );
         let statement_labels = scope::extract_enclosing_statement_labels(&extractor, cursor_node);
         let is_class_member_position = scope::is_cursor_in_class_member_position(cursor_node);
         if let Some(metrics) = self.metrics.as_ref() {
@@ -819,8 +820,11 @@ mod tests {
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, ModuleId, WorkspaceIndex,
     };
     use crate::language::java::make_java_parser;
+    use crate::salsa_db::{FileId, SourceFile};
     use crate::semantic::CursorLocation;
+    use crate::workspace::Workspace;
     use rust_asm::constants::ACC_PUBLIC;
+    use tower_lsp::lsp_types::Url;
 
     fn make_view() -> crate::index::IndexView {
         let idx = Box::leak(Box::new(WorkspaceIndex::new()));
@@ -895,6 +899,27 @@ mod tests {
         idx.view(IndexScope {
             module: ModuleId::ROOT,
         })
+    }
+
+    fn minimal_class(internal_name: &str) -> ClassMetadata {
+        let (package, name) = internal_name
+            .rsplit_once('/')
+            .map(|(package, name)| (Some(Arc::from(package)), Arc::from(name)))
+            .unwrap_or((None, Arc::from(internal_name)));
+        ClassMetadata {
+            package,
+            name,
+            internal_name: Arc::from(internal_name),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: 0,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }
     }
 
     #[test]
@@ -972,5 +997,93 @@ mod tests {
             call.parameter_name_for_argument(2).as_deref(),
             Some("toIndex")
         );
+    }
+
+    #[test]
+    fn inlay_context_uses_salsa_flow_type_overrides() {
+        let workspace = Workspace::new();
+        workspace.index.write().add_jdk_classes(vec![
+            minimal_class("java/lang/Object"),
+            minimal_class("java/lang/StringBuilder"),
+        ]);
+        let view = workspace.index.read().view(IndexScope {
+            module: ModuleId::ROOT,
+        });
+        let source = r#"
+class Test {
+    void demo() {
+        Object a = new StringBuilder();
+        if (a instanceof StringBuilder && a.appe) {
+        }
+    }
+}
+"#;
+        let offset = source.find("appe").expect("member access") + "appe".len();
+        let rope = Rope::from_str(source);
+        let mut parser = make_java_parser();
+        let tree = parser.parse(source, None).expect("tree");
+        let root = tree.root_node();
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let salsa_file = {
+            let db = workspace.salsa_db.lock();
+            SourceFile::new(
+                &*db,
+                FileId::new(uri),
+                source.to_string(),
+                Arc::from("java"),
+            )
+        };
+
+        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None);
+        let ctx = semantic
+            .inlay_context_at_offset(&workspace, salsa_file, offset)
+            .expect("inlay semantic context");
+
+        assert_eq!(
+            ctx.flow_override_for_local("a")
+                .map(TypeName::erased_internal),
+            Some("java/lang/StringBuilder")
+        );
+    }
+
+    #[test]
+    fn inlay_context_filters_constructor_members_from_salsa_members() {
+        let workspace = Workspace::new();
+        let view = workspace.index.read().view(IndexScope {
+            module: ModuleId::ROOT,
+        });
+        let source = r#"
+class Test {
+    Test() {}
+    static void helper() {}
+
+    void demo() {
+        hel
+    }
+}
+"#;
+        let offset = source.find("hel").expect("prefix offset") + "hel".len();
+        let rope = Rope::from_str(source);
+        let mut parser = make_java_parser();
+        let tree = parser.parse(source, None).expect("tree");
+        let root = tree.root_node();
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let salsa_file = {
+            let db = workspace.salsa_db.lock();
+            SourceFile::new(
+                &*db,
+                FileId::new(uri),
+                source.to_string(),
+                Arc::from("java"),
+            )
+        };
+
+        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None);
+        let ctx = semantic
+            .inlay_context_at_offset(&workspace, salsa_file, offset)
+            .expect("inlay semantic context");
+
+        assert!(ctx.current_class_members.contains_key("helper"));
+        assert!(!ctx.current_class_members.contains_key("<init>"));
     }
 }

@@ -71,10 +71,12 @@ pub use semantic::{
     ClassMembersMetadata, FileStructureMetadata, FlowTypeOverrideData, MethodLocalsMetadata,
     extract_active_lambda_param_names_from_source, extract_active_lambda_param_names_incremental,
     extract_class_members_incremental, extract_class_members_metadata, extract_file_structure,
+    extract_java_current_class_members, extract_java_current_class_members_from_source,
     extract_java_flow_type_overrides, extract_method_locals_incremental,
     extract_method_locals_metadata, extract_visible_method_locals_from_source,
     extract_visible_method_locals_incremental, find_enclosing_class_bounds,
-    find_enclosing_method_bounds,
+    find_enclosing_method_bounds, materialize_current_class_members,
+    materialize_flow_type_overrides,
 };
 pub use symbols::{
     ResolvedSymbolData, SymbolKind, find_local_variable_declaration, is_local_variable,

@@ -7,14 +7,21 @@
 /// then reconstruct full objects on-demand. This avoids needing to make
 /// complex types like LocalVar/TypeName hashable.
 use crate::language::java::{
-    JavaContextExtractor,
+    JavaContextExtractor, members, scope, synthetic,
     type_ctx::{SourceTypeCtx, extract_param_type},
     utils::{get_initializer_text, java_type_to_internal},
 };
 use crate::language::ts_utils::run_query;
 use crate::salsa_db::SourceFile;
-use crate::semantic::{LocalVar, types::type_name::TypeName};
-use std::{collections::HashSet, sync::Arc};
+use crate::semantic::{
+    LocalVar,
+    context::CurrentClassMember,
+    types::{parse_single_type_to_internal, singleton_descriptor_to_type, type_name::TypeName},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tree_sitter::{Node, Query, Tree};
 use tree_sitter_utils::traversal::{
     ancestor_of_kind, ancestor_of_kinds, any_child_of_kind, first_child_of_kind,
@@ -38,6 +45,100 @@ pub struct CachedMethodLocal {
 pub struct FlowTypeOverrideData {
     pub local_name: Arc<str>,
     pub narrowed_type: Arc<str>,
+}
+
+pub fn materialize_flow_type_overrides(
+    data: &[FlowTypeOverrideData],
+) -> HashMap<Arc<str>, TypeName> {
+    data.iter()
+        .map(|override_data| {
+            let narrowed_type = parse_single_type_to_internal(override_data.narrowed_type.as_ref())
+                .or_else(|| {
+                    singleton_descriptor_to_type(override_data.narrowed_type.as_ref())
+                        .map(TypeName::new)
+                })
+                .unwrap_or_else(|| TypeName::new(Arc::clone(&override_data.narrowed_type)));
+            (Arc::clone(&override_data.local_name), narrowed_type)
+        })
+        .collect()
+}
+
+pub fn materialize_current_class_members(
+    members: impl IntoIterator<Item = CurrentClassMember>,
+) -> HashMap<Arc<str>, CurrentClassMember> {
+    members
+        .into_iter()
+        .filter(|member| !member.is_constructor_like())
+        .map(|member| (member.name(), member))
+        .collect()
+}
+
+pub fn extract_java_current_class_members(
+    db: &dyn crate::salsa_queries::Db,
+    file: SourceFile,
+    cursor_offset: usize,
+    workspace: Option<&crate::workspace::Workspace>,
+) -> HashMap<Arc<str>, CurrentClassMember> {
+    if let Some(workspace) = workspace {
+        return materialize_current_class_members(
+            extract_class_members_incremental(db, file, cursor_offset, workspace).into_values(),
+        );
+    }
+
+    extract_java_current_class_members_from_source(db, file, cursor_offset)
+}
+
+pub fn extract_java_current_class_members_from_source(
+    db: &dyn crate::salsa_queries::Db,
+    file: SourceFile,
+    cursor_offset: usize,
+) -> HashMap<Arc<str>, CurrentClassMember> {
+    if file.language_id(db).as_ref() != "java" {
+        return HashMap::new();
+    }
+
+    let Some(tree) = parse_file_tree(db, file) else {
+        return HashMap::new();
+    };
+
+    let root = tree.root_node();
+    let content = file.content(db);
+    let name_table = resolve_name_table_for_file(db, file);
+    let ctx = JavaContextExtractor::new_with_overview(
+        content.as_str().to_owned(),
+        cursor_offset,
+        name_table.clone(),
+    );
+    let cursor_node = ctx.find_cursor_node(root);
+    let package = scope::extract_package(&ctx, root);
+    let imports = scope::extract_imports(&ctx, root);
+    let enclosing_class = scope::extract_enclosing_class(&ctx, cursor_node)
+        .or_else(|| scope::extract_enclosing_class_by_offset(&ctx, root));
+    let enclosing_internal_name =
+        scope::extract_enclosing_internal_name(&ctx, cursor_node, package.as_ref()).or_else(|| {
+            crate::language::java::utils::build_internal_name(&package, &enclosing_class)
+        });
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+
+    let members = cursor_node
+        .and_then(scope::nearest_type_declaration)
+        .map(|decl| {
+            synthetic::extract_type_members_with_synthetics(
+                &ctx,
+                decl,
+                &type_ctx,
+                enclosing_internal_name.as_deref(),
+            )
+        })
+        .or_else(|| {
+            let error_node = crate::language::java::utils::find_top_error_node(root)?;
+            let mut members = Vec::new();
+            members::collect_members_from_node(&ctx, error_node, &type_ctx, &mut members);
+            Some(members)
+        })
+        .unwrap_or_default();
+
+    materialize_current_class_members(members)
 }
 
 fn parse_source_tree(content: &str, language_id: &str) -> Option<Tree> {

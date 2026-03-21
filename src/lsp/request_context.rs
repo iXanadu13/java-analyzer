@@ -116,6 +116,7 @@ impl<'a> PreparedRequest<'a> {
             name_table: None,
             view: Some(self.view.clone()),
             workspace: Some(Arc::clone(&self.workspace)),
+            file_uri: Some(Arc::from(self.uri.as_str())),
             metrics: Some(Arc::clone(&self.metrics)),
         }
     }
