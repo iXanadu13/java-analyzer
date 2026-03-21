@@ -444,7 +444,7 @@ fn maybe_record_extract_phase(
 }
 
 impl JavaContextExtractor {
-    pub fn new(
+    pub fn new_with_overview(
         source: impl Into<Arc<str>>,
         offset: usize,
         name_table: Option<Arc<NameTable>>,
@@ -463,12 +463,24 @@ impl JavaContextExtractor {
         }
     }
 
-    /// Create a simplified extractor for indexing (no cursor offset needed)
-    pub fn for_indexing(source: &str, name_table: Option<Arc<NameTable>>) -> Self {
-        Self::new(source, 0, name_table)
+    pub fn new(
+        source: impl Into<Arc<str>>,
+        offset: usize,
+        name_table: Option<Arc<NameTable>>,
+    ) -> Self {
+        Self::new_with_overview(source, offset, name_table)
     }
 
-    pub(crate) fn with_rope(
+    /// Create a simplified extractor for indexing (no cursor offset needed)
+    pub fn for_indexing_with_overview(source: &str, name_table: Option<Arc<NameTable>>) -> Self {
+        Self::new_with_overview(source, 0, name_table)
+    }
+
+    pub fn for_indexing(source: &str, name_table: Option<Arc<NameTable>>) -> Self {
+        Self::for_indexing_with_overview(source, name_table)
+    }
+
+    pub(crate) fn with_rope_and_overview(
         source: impl Into<Arc<str>>,
         offset: usize,
         rope: Rope,
@@ -485,6 +497,15 @@ impl JavaContextExtractor {
             file_uri: None,
             metrics: None,
         }
+    }
+
+    pub(crate) fn with_rope(
+        source: impl Into<Arc<str>>,
+        offset: usize,
+        rope: Rope,
+        name_table: Option<Arc<NameTable>>,
+    ) -> Self {
+        Self::with_rope_and_overview(source, offset, rope, name_table)
     }
 
     pub fn with_view(mut self, view: IndexView) -> Self {
@@ -582,14 +603,19 @@ impl JavaContextExtractor {
         );
 
         let type_ctx_started = std::time::Instant::now();
-        let mut type_ctx = SourceTypeCtx::new(
-            enclosing_package.clone(),
-            existing_imports.clone(),
-            self.name_table.clone(),
-        );
-        if let Some(view) = &self.view {
-            type_ctx = type_ctx.with_view(view.clone());
-        }
+        let mut type_ctx = if let Some(view) = &self.view {
+            SourceTypeCtx::from_view(
+                enclosing_package.clone(),
+                existing_imports.clone(),
+                view.clone(),
+            )
+        } else {
+            SourceTypeCtx::from_overview(
+                enclosing_package.clone(),
+                existing_imports.clone(),
+                self.name_table.clone(),
+            )
+        };
         if self.view.is_none()
             && let Some(workspace) = &self.workspace
             && let Some(file_uri) = &self.file_uri
@@ -628,7 +654,7 @@ impl JavaContextExtractor {
                 if let Some(file) = workspace.get_or_create_salsa_file_by_uri_str(file_uri.as_ref())
                 {
                     let db = workspace.salsa_db.lock();
-                    crate::salsa_queries::extract_method_locals_incremental(
+                    crate::salsa_queries::extract_visible_method_locals_incremental(
                         &*db,
                         file,
                         self.offset,

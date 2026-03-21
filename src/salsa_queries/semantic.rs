@@ -6,10 +6,33 @@
 /// Strategy: Return lightweight metadata (offsets, counts) from Salsa,
 /// then reconstruct full objects on-demand. This avoids needing to make
 /// complex types like LocalVar/TypeName hashable.
+use crate::language::java::{
+    JavaContextExtractor,
+    type_ctx::{SourceTypeCtx, extract_param_type},
+    utils::{get_initializer_text, java_type_to_internal},
+};
+use crate::language::ts_utils::run_query;
 use crate::salsa_db::SourceFile;
-use crate::semantic::LocalVar;
-use std::sync::Arc;
-use tree_sitter::{Parser, Tree};
+use crate::semantic::{LocalVar, types::type_name::TypeName};
+use std::{collections::HashSet, sync::Arc};
+use tree_sitter::{Node, Parser, Query, Tree};
+use tree_sitter_utils::traversal::{
+    ancestor_of_kind, ancestor_of_kinds, any_child_of_kind, first_child_of_kind,
+    first_child_of_kinds,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopeRange {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedMethodLocal {
+    local: LocalVar,
+    declaration_start: usize,
+    visibility_scope: ScopeRange,
+}
 
 /// Helper to parse a tree from source content
 ///
@@ -35,26 +58,60 @@ fn parse_tree(content: &str, language_id: &str) -> Option<Tree> {
     parser.parse(content, None)
 }
 
-/// Extract actual local variables from a method (uses cache)
+/// Extract parsed method locals from a method (uses cache).
 ///
-/// This is the incremental version that uses the PSI-style cache.
-/// Call this instead of the old extract_locals_with_type_ctx().
+/// This returns the cursor-agnostic method-local table represented by the
+/// incremental cache.
 pub fn extract_method_locals_incremental(
     db: &dyn crate::salsa_queries::Db,
     file: SourceFile,
     cursor_offset: usize,
     workspace: &crate::workspace::Workspace,
 ) -> Vec<LocalVar> {
-    // Step 1: Find method bounds (Salsa cached)
     let Some((method_start, method_end)) = find_enclosing_method_bounds(db, file, cursor_offset)
     else {
         return Vec::new();
     };
 
-    // Step 2: Get metadata (Salsa cached)
+    let cached = get_or_parse_method_locals(db, file, workspace, method_start, method_end);
+    materialize_method_locals(cached)
+}
+
+/// Extract the local variables visible at the cursor.
+///
+/// This is the cursor-sensitive incremental replacement for the old
+/// `extract_locals_with_type_ctx()`-style editor pipeline.
+pub fn extract_visible_method_locals_incremental(
+    db: &dyn crate::salsa_queries::Db,
+    file: SourceFile,
+    cursor_offset: usize,
+    workspace: &crate::workspace::Workspace,
+) -> Vec<LocalVar> {
+    let Some((method_start, method_end)) = find_enclosing_method_bounds(db, file, cursor_offset)
+    else {
+        return extract_root_recovery_locals(db, file, cursor_offset);
+    };
+
+    let cached = get_or_parse_method_locals(db, file, workspace, method_start, method_end);
+
+    let mut visible = filter_visible_locals(&cached, cursor_offset);
+    visible.extend(extract_active_lambda_params_incremental(
+        db,
+        file,
+        cursor_offset,
+    ));
+    normalize_visible_locals(visible)
+}
+
+fn get_or_parse_method_locals(
+    db: &dyn crate::salsa_queries::Db,
+    file: SourceFile,
+    workspace: &crate::workspace::Workspace,
+    method_start: usize,
+    method_end: usize,
+) -> Vec<CachedMethodLocal> {
     let metadata = extract_method_locals_metadata(db, file, method_start, method_end);
 
-    // Step 3: Check PSI cache
     if let Some(cached) = workspace.get_cached_method_locals(metadata.content_hash) {
         tracing::debug!(
             content_hash = metadata.content_hash,
@@ -64,30 +121,91 @@ pub fn extract_method_locals_incremental(
         return cached;
     }
 
-    // Step 4: Cache miss - parse locals
     tracing::debug!(
         content_hash = metadata.content_hash,
         "extract_method_locals_incremental: cache miss, parsing..."
     );
 
     let locals = parse_method_locals(db, file, method_start, method_end);
-
-    // Step 5: Cache the result
     workspace.cache_method_locals(metadata.content_hash, locals.clone());
-
     locals
+}
+
+fn materialize_method_locals(mut locals: Vec<CachedMethodLocal>) -> Vec<LocalVar> {
+    locals.sort_by(|a, b| {
+        a.declaration_start
+            .cmp(&b.declaration_start)
+            .then_with(|| a.visibility_scope.start.cmp(&b.visibility_scope.start))
+            .then_with(|| a.visibility_scope.end.cmp(&b.visibility_scope.end))
+    });
+
+    let mut seen: HashSet<(Arc<str>, usize, usize, usize)> = HashSet::new();
+    let mut out = Vec::new();
+    for local in locals {
+        if seen.insert((
+            Arc::clone(&local.local.name),
+            local.declaration_start,
+            local.visibility_scope.start,
+            local.visibility_scope.end,
+        )) {
+            out.push(local.local);
+        }
+    }
+    out
+}
+
+fn extract_root_recovery_locals(
+    db: &dyn crate::salsa_queries::Db,
+    file: SourceFile,
+    cursor_offset: usize,
+) -> Vec<LocalVar> {
+    use crate::language::java::scope;
+
+    let content = file.content(db);
+    let language_id = file.language_id(db);
+    if language_id.as_ref() != "java" {
+        return vec![];
+    }
+
+    let Some(tree) = parse_tree(content, language_id.as_ref()) else {
+        return vec![];
+    };
+    let root = tree.root_node();
+    let name_table = resolve_name_table_for_file(db, file);
+    let ctx = JavaContextExtractor::new_with_overview(
+        content.to_string(),
+        cursor_offset,
+        name_table.clone(),
+    );
+    let package = scope::extract_package(&ctx, root);
+    let imports = scope::extract_imports(&ctx, root);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+
+    let mut visible = filter_visible_locals(
+        &collect_method_locals(
+            &ctx,
+            root,
+            Some(&type_ctx),
+            fallback_visibility_scope(cursor_offset),
+        ),
+        cursor_offset,
+    );
+    visible.extend(extract_active_lambda_params(
+        &ctx,
+        ctx.find_cursor_node(root),
+        Some(&type_ctx),
+    ));
+    normalize_visible_locals(visible)
 }
 
 /// Parse method locals (called on cache miss)
 fn parse_method_locals(
     db: &dyn crate::salsa_queries::Db,
     file: SourceFile,
-    _method_start: usize,
+    method_start: usize,
     method_end: usize,
-) -> Vec<LocalVar> {
-    use crate::language::java::locals::extract_locals_with_type_ctx;
-    use crate::language::java::type_ctx::SourceTypeCtx;
-    use crate::language::java::{JavaContextExtractor, scope};
+) -> Vec<CachedMethodLocal> {
+    use crate::language::java::scope;
 
     let content = file.content(db);
     let language_id = file.language_id(db);
@@ -105,21 +223,899 @@ fn parse_method_locals(
     let root = tree.root_node();
 
     let name_table = resolve_name_table_for_file(db, file);
+    let ctx = JavaContextExtractor::new_with_overview(
+        content.to_string(),
+        method_start,
+        name_table.clone(),
+    );
 
-    // Create a context extractor with cursor at the end of the method
-    // Use method_end - 1 to ensure we're inside the method (not at the closing brace)
-    // This ensures we extract all locals declared in the method
-    let cursor_pos = method_end.saturating_sub(1);
-    let ctx = JavaContextExtractor::new(content.to_string(), cursor_pos, name_table.clone());
-
-    // Extract package and imports for type resolution
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::new(package, imports, name_table);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
 
-    // Pass None as cursor_node and let extract_locals_with_type_ctx find the method by offset
-    // This is simpler and more reliable than trying to pass the right node
-    extract_locals_with_type_ctx(&ctx, root, None, Some(&type_ctx))
+    let method_node = find_node_at_offset(
+        root,
+        method_start,
+        &[
+            "method_declaration",
+            "constructor_declaration",
+            "compact_constructor_declaration",
+        ],
+    );
+
+    let Some(method_node) = method_node else {
+        return Vec::new();
+    };
+
+    collect_method_locals(
+        &ctx,
+        method_node,
+        Some(&type_ctx),
+        fallback_visibility_scope(method_end),
+    )
+}
+
+fn collect_method_locals(
+    ctx: &JavaContextExtractor,
+    method_node: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) -> Vec<CachedMethodLocal> {
+    let mut locals = extract_declared_locals(ctx, method_node, type_ctx, fallback_scope);
+    locals.extend(extract_enhanced_for_locals(
+        ctx,
+        method_node,
+        type_ctx,
+        fallback_scope,
+    ));
+    locals.extend(extract_catch_params(
+        ctx,
+        method_node,
+        type_ctx,
+        fallback_scope,
+    ));
+    locals.extend(extract_misread_var_decls(
+        ctx,
+        method_node,
+        type_ctx,
+        fallback_scope,
+    ));
+    locals.extend(extract_locals_from_error_nodes(
+        ctx,
+        method_node,
+        type_ctx,
+        fallback_scope,
+    ));
+    locals.extend(extract_method_params(
+        ctx,
+        method_node,
+        type_ctx,
+        fallback_scope,
+    ));
+    locals
+}
+
+fn extract_enhanced_for_locals(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) -> Vec<CachedMethodLocal> {
+    let mut vars = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "enhanced_for_statement"
+            && let Some(name_node) = node.child_by_field_name("name")
+        {
+            let raw_ty = node
+                .child_by_field_name("type")
+                .and_then(|type_node| type_node.utf8_text(ctx.bytes()).ok())
+                .map(str::trim)
+                .filter(|ty| !ty.is_empty())
+                .unwrap_or("Object");
+
+            vars.push(CachedMethodLocal {
+                local: LocalVar {
+                    name: Arc::from(ctx.node_text(name_node)),
+                    type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                    init_expr: None,
+                },
+                declaration_start: name_node.start_byte(),
+                visibility_scope: scope_range_for_owner(node).unwrap_or(fallback_scope),
+            });
+        }
+
+        let children: Vec<Node> = {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).collect()
+        };
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+    vars
+}
+
+fn extract_catch_params(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) -> Vec<CachedMethodLocal> {
+    let mut vars = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "catch_clause"
+            && let Some(param_node) = first_child_of_kind(node, "catch_formal_parameter")
+        {
+            let Some(name_node) = param_node.child_by_field_name("name") else {
+                continue;
+            };
+            let raw_ty = extract_param_type(ctx.node_text(param_node)).trim();
+            let raw_ty = if raw_ty.is_empty() { "Object" } else { raw_ty };
+
+            vars.push(CachedMethodLocal {
+                local: LocalVar {
+                    name: Arc::from(ctx.node_text(name_node)),
+                    type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                    init_expr: None,
+                },
+                declaration_start: name_node.start_byte(),
+                visibility_scope: scope_range_for_owner(node).unwrap_or(fallback_scope),
+            });
+        }
+
+        let children: Vec<Node> = {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).collect()
+        };
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+    vars
+}
+
+fn extract_declared_locals(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) -> Vec<CachedMethodLocal> {
+    let query_src = r#"
+        (local_variable_declaration
+            type: (_) @type
+            declarator: (variable_declarator
+                name: (identifier) @name))
+    "#;
+    let q = match Query::new(&tree_sitter_java::LANGUAGE.into(), query_src) {
+        Ok(q) => q,
+        Err(err) => {
+            tracing::debug!("local var query error: {}", err);
+            return vec![];
+        }
+    };
+
+    let type_idx = q.capture_index_for_name("type").unwrap();
+    let name_idx = q.capture_index_for_name("name").unwrap();
+
+    run_query(&q, root, ctx.bytes(), None)
+        .into_iter()
+        .filter_map(|captures| {
+            let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
+            let name_node = captures.iter().find(|(idx, _)| *idx == name_idx)?.1;
+            let declarator = name_node.parent()?;
+            let decl = declarator.parent()?;
+
+            if any_child_of_kind(declarator, "argument_list").is_some() {
+                return None;
+            }
+
+            if let Some(next) = decl.next_sibling() {
+                let next_text = ctx.byte_slice(next.start_byte(), next.end_byte());
+                if next_text.trim_start().starts_with('(') {
+                    return None;
+                }
+            }
+
+            let name = name_node.utf8_text(ctx.bytes()).ok()?;
+            let raw_ty = recovered_declared_type_text(ctx, decl, ty_node)?.to_string();
+            let visibility_scope = local_visibility_scope(decl).unwrap_or(fallback_scope);
+
+            let local = if raw_ty == "var" {
+                LocalVar {
+                    name: Arc::from(name),
+                    type_internal: TypeName::new("var"),
+                    init_expr: get_initializer_text(ty_node, ctx.bytes()),
+                }
+            } else {
+                LocalVar {
+                    name: Arc::from(name),
+                    type_internal: resolve_declared_source_type(&raw_ty, type_ctx),
+                    init_expr: None,
+                }
+            };
+
+            Some(CachedMethodLocal {
+                local,
+                declaration_start: name_node.start_byte(),
+                visibility_scope,
+            })
+        })
+        .collect()
+}
+
+fn resolve_declared_source_type(raw_ty: &str, type_ctx: Option<&SourceTypeCtx>) -> TypeName {
+    if let Some(type_ctx) = type_ctx
+        && let Some(resolved) = type_ctx.resolve_type_name_relaxed(raw_ty.trim())
+    {
+        if raw_ty.contains('<') && resolved.ty.args.is_empty() {
+            return TypeName::new(java_type_to_internal(raw_ty).as_str());
+        }
+        return resolved.ty;
+    }
+    TypeName::new(java_type_to_internal(raw_ty).as_str())
+}
+
+fn extract_misread_var_decls(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) -> Vec<CachedMethodLocal> {
+    let mut vars = Vec::new();
+    collect_misread_var_decls(ctx, root, &mut vars, type_ctx, fallback_scope);
+    vars
+}
+
+fn collect_misread_var_decls(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    vars: &mut Vec<CachedMethodLocal>,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "variable_declarator"
+            && let Some(assignment) = first_child_of_kind(node, "assignment_expression")
+        {
+            let lhs = assignment
+                .child_by_field_name("left")
+                .or_else(|| assignment.named_child(0));
+            let rhs = assignment
+                .child_by_field_name("right")
+                .or_else(|| assignment.named_child(1));
+            if let (Some(name_node), Some(init_node)) = (lhs, rhs) {
+                if name_node.kind() != "identifier" {
+                    continue;
+                }
+
+                let name = ctx.node_text(name_node);
+                let type_name = find_type_in_error_sibling(ctx, node);
+                let local = if type_name.as_deref() == Some("var") {
+                    LocalVar {
+                        name: Arc::from(name),
+                        type_internal: TypeName::new("var"),
+                        init_expr: Some(ctx.node_text(init_node).to_string()),
+                    }
+                } else {
+                    let raw_ty = type_name.as_deref().unwrap_or("Object");
+                    LocalVar {
+                        name: Arc::from(name),
+                        type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                        init_expr: None,
+                    }
+                };
+
+                vars.push(CachedMethodLocal {
+                    local,
+                    declaration_start: name_node.start_byte(),
+                    visibility_scope: local_visibility_scope(node).unwrap_or(fallback_scope),
+                });
+            }
+        }
+
+        let children: Vec<Node> = {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).collect()
+        };
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+}
+
+fn find_type_in_error_sibling(ctx: &JavaContextExtractor, declarator_node: Node) -> Option<String> {
+    if let Some(error_child) = first_child_of_kind(declarator_node, "ERROR")
+        && let Some(type_node) = first_child_of_kinds(
+            error_child,
+            &["type_identifier", "integral_type", "void_type"],
+        )
+    {
+        return Some(ctx.node_text(type_node).to_string());
+    }
+    None
+}
+
+fn extract_method_params(
+    ctx: &JavaContextExtractor,
+    method_node: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) -> Vec<CachedMethodLocal> {
+    let params_node = if method_node.kind() == "compact_constructor_declaration" {
+        ancestor_of_kind(method_node, "record_declaration").and_then(|record| {
+            record
+                .child_by_field_name("parameters")
+                .or_else(|| first_child_of_kind(record, "formal_parameters"))
+        })
+    } else {
+        method_node.child_by_field_name("parameters")
+    };
+
+    let Some(params_node) = params_node else {
+        return vec![];
+    };
+
+    let visibility_scope = method_like_body_scope(method_node).unwrap_or(fallback_scope);
+    let mut vars = Vec::new();
+    let mut cursor = params_node.walk();
+    for param in params_node.named_children(&mut cursor) {
+        if !matches!(param.kind(), "formal_parameter" | "spread_parameter") {
+            continue;
+        }
+
+        let name_node = param
+            .child_by_field_name("name")
+            .or_else(|| first_child_of_kind(param, "identifier"))
+            .or_else(|| {
+                first_child_of_kind(param, "variable_declarator").and_then(|node| {
+                    node.child_by_field_name("name")
+                        .or_else(|| first_child_of_kind(node, "identifier"))
+                })
+            });
+
+        let Some(name_node) = name_node else {
+            continue;
+        };
+
+        let mut raw_ty = extract_param_type(ctx.node_text(param)).trim().to_string();
+        if param.kind() == "spread_parameter" || raw_ty.ends_with("...") {
+            raw_ty = if let Some(stripped) = raw_ty.strip_suffix("...") {
+                format!("{}[]", stripped.trim())
+            } else {
+                format!("{}[]", raw_ty.trim())
+            };
+        }
+
+        vars.push(CachedMethodLocal {
+            local: LocalVar {
+                name: Arc::from(ctx.node_text(name_node)),
+                type_internal: resolve_declared_source_type(raw_ty.as_str(), type_ctx),
+                init_expr: None,
+            },
+            declaration_start: name_node.start_byte(),
+            visibility_scope,
+        });
+    }
+
+    vars
+}
+
+fn extract_locals_from_error_nodes(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) -> Vec<CachedMethodLocal> {
+    let mut vars = Vec::new();
+    collect_locals_in_errors(ctx, root, &mut vars, type_ctx, fallback_scope);
+    vars
+}
+
+fn collect_locals_in_errors(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    vars: &mut Vec<CachedMethodLocal>,
+    type_ctx: Option<&SourceTypeCtx>,
+    fallback_scope: ScopeRange,
+) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "ERROR" {
+            let query_src = r#"
+                (local_variable_declaration
+                    type: (_) @type
+                    declarator: (variable_declarator
+                        name: (identifier) @name))
+            "#;
+            if let Ok(q) = Query::new(&tree_sitter_java::LANGUAGE.into(), query_src) {
+                let type_idx = q.capture_index_for_name("type").unwrap();
+                let name_idx = q.capture_index_for_name("name").unwrap();
+                let found: Vec<CachedMethodLocal> = run_query(&q, node, ctx.bytes(), None)
+                    .into_iter()
+                    .filter_map(|captures| {
+                        let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
+                        let name_node = captures.iter().find(|(idx, _)| *idx == name_idx)?.1;
+                        let declarator = name_node.parent()?;
+                        let decl = declarator.parent()?;
+                        let raw_ty = recovered_declared_type_text(ctx, decl, ty_node)?.to_string();
+                        let visibility_scope =
+                            local_visibility_scope(decl).unwrap_or(fallback_scope);
+
+                        let local = if raw_ty == "var" {
+                            LocalVar {
+                                name: Arc::from(name_node.utf8_text(ctx.bytes()).ok()?),
+                                type_internal: TypeName::new("var"),
+                                init_expr: get_initializer_text(ty_node, ctx.bytes()),
+                            }
+                        } else {
+                            LocalVar {
+                                name: Arc::from(name_node.utf8_text(ctx.bytes()).ok()?),
+                                type_internal: resolve_declared_source_type(&raw_ty, type_ctx),
+                                init_expr: None,
+                            }
+                        };
+
+                        Some(CachedMethodLocal {
+                            local,
+                            declaration_start: name_node.start_byte(),
+                            visibility_scope,
+                        })
+                    })
+                    .collect();
+                vars.extend(found);
+            }
+        }
+
+        let children: Vec<Node> = {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).collect()
+        };
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+}
+
+fn extract_active_lambda_params_incremental(
+    db: &dyn crate::salsa_queries::Db,
+    file: SourceFile,
+    cursor_offset: usize,
+) -> Vec<CachedMethodLocal> {
+    use crate::language::java::scope;
+
+    let content = file.content(db);
+    let language_id = file.language_id(db);
+    if language_id.as_ref() != "java" {
+        return vec![];
+    }
+
+    let Some(tree) = parse_tree(content, language_id.as_ref()) else {
+        return vec![];
+    };
+    let root = tree.root_node();
+
+    let name_table = resolve_name_table_for_file(db, file);
+    let ctx = JavaContextExtractor::new_with_overview(
+        content.to_string(),
+        cursor_offset,
+        name_table.clone(),
+    );
+    let package = scope::extract_package(&ctx, root);
+    let imports = scope::extract_imports(&ctx, root);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+    let cursor_node = ctx.find_cursor_node(root);
+
+    extract_active_lambda_params(&ctx, cursor_node, Some(&type_ctx))
+}
+
+fn extract_active_lambda_params(
+    ctx: &JavaContextExtractor,
+    cursor_node: Option<Node>,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Vec<CachedMethodLocal> {
+    let mut lambdas = Vec::new();
+    let mut current = cursor_node;
+    while let Some(node) = current {
+        if node.kind() == "lambda_expression" {
+            lambdas.push(node);
+        }
+        current = node.parent();
+    }
+
+    if lambdas.is_empty() {
+        return extract_lambda_params_from_error_nodes_in_ancestry(ctx, cursor_node, type_ctx);
+    }
+
+    let mut vars = Vec::new();
+    for lambda in lambdas.into_iter().rev() {
+        let Some(body) = lambda.child_by_field_name("body") else {
+            continue;
+        };
+        if ctx.offset < body.start_byte() || ctx.offset > body.end_byte() {
+            continue;
+        }
+        let Some(params) = lambda.child_by_field_name("parameters") else {
+            continue;
+        };
+        vars.extend(extract_lambda_params_from_node(ctx, params, type_ctx));
+    }
+    vars
+}
+
+fn extract_lambda_params_from_error_nodes_in_ancestry(
+    ctx: &JavaContextExtractor,
+    cursor_node: Option<Node>,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Vec<CachedMethodLocal> {
+    let mut current = cursor_node;
+    while let Some(node) = current {
+        if (node.kind() == "ERROR" || node.kind() == "block" || node.kind() == "program")
+            && let Some(result) = extract_lambda_params_from_error_arrow_node(ctx, node, type_ctx)
+        {
+            return result;
+        }
+        current = node.parent();
+    }
+    vec![]
+}
+
+fn extract_lambda_params_from_error_arrow_node(
+    ctx: &JavaContextExtractor,
+    container: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Option<Vec<CachedMethodLocal>> {
+    let children: Vec<Node> = {
+        let mut walker = container.walk();
+        container.children(&mut walker).collect()
+    };
+    let arrow_idx = children
+        .iter()
+        .rposition(|node| node.kind() == "->" && node.end_byte() <= ctx.offset)?;
+    if arrow_idx == 0 {
+        return None;
+    }
+
+    let arrow_end = children[arrow_idx].end_byte();
+    if ctx.offset < arrow_end {
+        return None;
+    }
+
+    let params_node = children[arrow_idx - 1];
+    let visibility_scope = lambda_param_visibility_scope(params_node)
+        .unwrap_or_else(|| fallback_visibility_scope(ctx.offset));
+
+    let param_entries: Vec<(Arc<str>, TypeName, usize)> = match params_node.kind() {
+        "identifier" => vec![(
+            Arc::from(ctx.node_text(params_node)),
+            TypeName::new("unknown"),
+            params_node.start_byte(),
+        )],
+        "inferred_parameters" => {
+            let mut walker = params_node.walk();
+            params_node
+                .named_children(&mut walker)
+                .filter(|node| node.kind() == "identifier")
+                .map(|node| {
+                    (
+                        Arc::from(ctx.node_text(node)),
+                        TypeName::new("unknown"),
+                        node.start_byte(),
+                    )
+                })
+                .collect()
+        }
+        "formal_parameters" => {
+            let mut walker = params_node.walk();
+            params_node
+                .named_children(&mut walker)
+                .filter_map(|node| {
+                    if matches!(node.kind(), "formal_parameter" | "spread_parameter") {
+                        let name_node = node.child_by_field_name("name")?;
+                        let ty = extract_lambda_formal_param_type(ctx, node, type_ctx);
+                        Some((
+                            Arc::from(ctx.node_text(name_node)),
+                            ty,
+                            name_node.start_byte(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        _ => return None,
+    };
+
+    if param_entries.is_empty() {
+        return None;
+    }
+
+    Some(
+        param_entries
+            .into_iter()
+            .map(
+                |(name, type_internal, declaration_start)| CachedMethodLocal {
+                    local: LocalVar {
+                        name,
+                        type_internal,
+                        init_expr: None,
+                    },
+                    declaration_start,
+                    visibility_scope,
+                },
+            )
+            .collect(),
+    )
+}
+
+fn extract_lambda_params_from_node(
+    ctx: &JavaContextExtractor,
+    params: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Vec<CachedMethodLocal> {
+    let visibility_scope = lambda_param_visibility_scope(params)
+        .unwrap_or_else(|| fallback_visibility_scope(ctx.offset));
+
+    match params.kind() {
+        "identifier" => vec![CachedMethodLocal {
+            local: LocalVar {
+                name: Arc::from(ctx.node_text(params)),
+                type_internal: TypeName::new("unknown"),
+                init_expr: None,
+            },
+            declaration_start: params.start_byte(),
+            visibility_scope,
+        }],
+        "inferred_parameters" => {
+            let mut vars = Vec::new();
+            let mut walker = params.walk();
+            for node in params.named_children(&mut walker) {
+                if node.kind() != "identifier" {
+                    continue;
+                }
+                vars.push(CachedMethodLocal {
+                    local: LocalVar {
+                        name: Arc::from(ctx.node_text(node)),
+                        type_internal: TypeName::new("unknown"),
+                        init_expr: None,
+                    },
+                    declaration_start: node.start_byte(),
+                    visibility_scope,
+                });
+            }
+            vars
+        }
+        "formal_parameters" => {
+            let mut vars = Vec::new();
+            let mut walker = params.walk();
+            for node in params.named_children(&mut walker) {
+                if !matches!(node.kind(), "formal_parameter" | "spread_parameter") {
+                    continue;
+                }
+                let Some(name_node) = node.child_by_field_name("name") else {
+                    continue;
+                };
+                vars.push(CachedMethodLocal {
+                    local: LocalVar {
+                        name: Arc::from(ctx.node_text(name_node)),
+                        type_internal: extract_lambda_formal_param_type(ctx, node, type_ctx),
+                        init_expr: None,
+                    },
+                    declaration_start: name_node.start_byte(),
+                    visibility_scope,
+                });
+            }
+            vars
+        }
+        _ => vec![],
+    }
+}
+
+fn extract_lambda_formal_param_type(
+    ctx: &JavaContextExtractor,
+    param_node: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> TypeName {
+    let Some(type_node) = param_node.child_by_field_name("type") else {
+        return TypeName::new("unknown");
+    };
+    let raw_ty = ctx.node_text(type_node).trim().to_string();
+    if raw_ty.is_empty() || raw_ty == "var" {
+        return TypeName::new("unknown");
+    }
+    resolve_declared_source_type(&raw_ty, type_ctx)
+}
+
+fn filter_visible_locals(
+    locals: &[CachedMethodLocal],
+    cursor_offset: usize,
+) -> Vec<CachedMethodLocal> {
+    locals
+        .iter()
+        .filter(|local| {
+            local.declaration_start < cursor_offset
+                && scope_contains_offset(local.visibility_scope, cursor_offset)
+        })
+        .cloned()
+        .collect()
+}
+
+fn normalize_visible_locals(mut vars: Vec<CachedMethodLocal>) -> Vec<LocalVar> {
+    vars.sort_by(|a, b| {
+        b.declaration_start
+            .cmp(&a.declaration_start)
+            .then_with(|| b.visibility_scope.start.cmp(&a.visibility_scope.start))
+            .then_with(|| b.visibility_scope.end.cmp(&a.visibility_scope.end))
+    });
+
+    let mut seen: HashSet<Arc<str>> = HashSet::new();
+    let mut visible = Vec::new();
+    for ranked in vars {
+        if seen.insert(Arc::clone(&ranked.local.name)) {
+            visible.push(ranked.local);
+        }
+    }
+    visible
+}
+
+fn is_plausible_local_type_text(raw_ty: &str) -> bool {
+    let trimmed = raw_ty.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains(';')
+        || trimmed.contains("//")
+        || trimmed.contains("/*")
+        || trimmed.contains('=')
+        || trimmed.contains('{')
+        || trimmed.contains('}')
+    {
+        return false;
+    }
+    true
+}
+
+fn recovered_declared_type_text<'a>(
+    ctx: &'a JavaContextExtractor,
+    decl: Node<'a>,
+    ty_node: Node<'a>,
+) -> Option<&'a str> {
+    let raw_ty = ty_node.utf8_text(ctx.bytes()).ok()?.trim();
+    if is_plausible_local_type_text(raw_ty) {
+        return Some(raw_ty);
+    }
+    recover_type_text_from_decl(ctx, decl)
+}
+
+fn recover_type_text_from_decl<'a>(
+    ctx: &'a JavaContextExtractor,
+    decl: Node<'a>,
+) -> Option<&'a str> {
+    let declarator = decl.child_by_field_name("declarator")?;
+    let boundary = declarator.start_byte();
+    let mut best = None;
+    collect_last_type_like_before(decl, boundary, &mut best);
+    best.and_then(|node| node.utf8_text(ctx.bytes()).ok().map(str::trim))
+        .filter(|text| is_plausible_local_type_text(text))
+}
+
+fn collect_last_type_like_before<'a>(root: Node<'a>, boundary: usize, best: &mut Option<Node<'a>>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.start_byte() >= boundary {
+            continue;
+        }
+        if node.end_byte() <= boundary && is_type_like_node(node.kind()) {
+            *best = Some(node);
+        }
+
+        let children: Vec<Node> = {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).collect()
+        };
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+}
+
+fn is_type_like_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "type_identifier"
+            | "scoped_type_identifier"
+            | "integral_type"
+            | "floating_point_type"
+            | "boolean_type"
+            | "void_type"
+            | "array_type"
+            | "generic_type"
+            | "annotated_type"
+    )
+}
+
+fn local_visibility_scope(decl: Node) -> Option<ScopeRange> {
+    let owner = nearest_local_scope_owner(decl)?;
+    scope_range_for_owner(owner)
+}
+
+fn lambda_param_visibility_scope(params: Node) -> Option<ScopeRange> {
+    let parent = params.parent()?;
+    if parent.kind() == "lambda_expression" {
+        let body = parent.child_by_field_name("body")?;
+        return Some(node_scope_range(body));
+    }
+
+    let children: Vec<Node> = {
+        let mut walker = parent.walk();
+        parent.children(&mut walker).collect()
+    };
+    let params_idx = children.iter().position(|node| node.id() == params.id())?;
+    let arrow = children
+        .get(params_idx + 1)
+        .filter(|node| node.kind() == "->")?;
+    Some(ScopeRange {
+        start: arrow.end_byte(),
+        end: parent.end_byte(),
+    })
+}
+
+fn method_like_body_scope(method: Node) -> Option<ScopeRange> {
+    scope_range_for_owner(method)
+}
+
+fn nearest_local_scope_owner(node: Node) -> Option<Node> {
+    ancestor_of_kinds(
+        node,
+        &[
+            "block",
+            "for_statement",
+            "enhanced_for_statement",
+            "catch_clause",
+            "switch_block_statement_group",
+            "switch_rule",
+            "method_declaration",
+            "constructor_declaration",
+            "compact_constructor_declaration",
+            "lambda_expression",
+            "static_initializer",
+            "instance_initializer",
+        ],
+    )
+}
+
+fn scope_range_for_owner(owner: Node) -> Option<ScopeRange> {
+    let scope_node = match owner.kind() {
+        "method_declaration"
+        | "constructor_declaration"
+        | "compact_constructor_declaration"
+        | "lambda_expression"
+        | "catch_clause"
+        | "enhanced_for_statement" => owner.child_by_field_name("body")?,
+        _ => owner,
+    };
+    Some(node_scope_range(scope_node))
+}
+
+fn node_scope_range(node: Node) -> ScopeRange {
+    ScopeRange {
+        start: node.start_byte(),
+        end: node.end_byte(),
+    }
+}
+
+fn scope_contains_offset(scope: ScopeRange, offset: usize) -> bool {
+    scope.start <= offset && offset < scope.end
+}
+
+fn fallback_visibility_scope(offset: usize) -> ScopeRange {
+    ScopeRange {
+        start: 0,
+        end: offset.saturating_add(1),
+    }
 }
 
 /// Metadata about a file's structure (cached by Salsa)
@@ -200,14 +1196,9 @@ pub fn extract_method_locals_metadata(
     method_content.hash(&mut hasher);
     let content_hash = hasher.finish();
 
-    // Parse the tree and count locals
+    // Parse the tree and count the same cursor-agnostic locals we cache for completions.
     let local_count = if let Some(tree) = parse_tree(content, language_id.as_ref()) {
-        count_locals_in_range(
-            tree.root_node(),
-            content.as_bytes(),
-            method_start,
-            method_end,
-        )
+        count_method_locals(tree.root_node(), content, method_start, method_end)
     } else {
         0
     };
@@ -229,126 +1220,29 @@ pub fn extract_method_locals_metadata(
     }
 }
 
-/// Count local variables in a specific range
-fn count_locals_in_range(
-    root: tree_sitter::Node,
-    source: &[u8],
-    start: usize,
-    end: usize,
-) -> usize {
-    let mut count = 0;
+fn count_method_locals(root: Node, source: &str, method_start: usize, method_end: usize) -> usize {
+    let method_node = find_node_at_offset(
+        root,
+        method_start,
+        &[
+            "method_declaration",
+            "constructor_declaration",
+            "compact_constructor_declaration",
+        ],
+    );
 
-    // Find the node that contains our range
-    let mut cursor = root.walk();
-    let mut current = root;
+    let Some(method_node) = method_node else {
+        return 0;
+    };
 
-    // Navigate to the node at start position
-    loop {
-        let mut found_child = false;
-        let children: Vec<_> = current.children(&mut cursor).collect();
-        for child in children {
-            if child.start_byte() <= start && end <= child.end_byte() {
-                current = child;
-                found_child = true;
-                break;
-            }
-        }
-
-        if !found_child {
-            break;
-        }
-    }
-
-    // Now traverse from this node
-    traverse_and_count(&mut current.walk(), source, start, end, &mut count);
-
-    count
-}
-
-/// Recursive traversal to count local variable declarations
-fn traverse_and_count(
-    cursor: &mut tree_sitter::TreeCursor,
-    source: &[u8],
-    start: usize,
-    end: usize,
-    count: &mut usize,
-) {
-    traverse_and_count_with_depth(cursor, source, start, end, count, 0);
-}
-
-/// Recursive traversal with depth limit to prevent stack overflow
-fn traverse_and_count_with_depth(
-    cursor: &mut tree_sitter::TreeCursor,
-    source: &[u8],
-    start: usize,
-    end: usize,
-    count: &mut usize,
-    depth: usize,
-) {
-    // Prevent stack overflow with depth limit
-    const MAX_DEPTH: usize = 500;
-    if depth > MAX_DEPTH {
-        tracing::warn!(
-            "traverse_and_count: max depth {} exceeded, stopping",
-            MAX_DEPTH
-        );
-        return;
-    }
-
-    let node = cursor.node();
-
-    // Skip nodes completely outside our range
-    if node.end_byte() < start || node.start_byte() > end {
-        return;
-    }
-
-    // Count local variable declarations
-    if node.kind() == "local_variable_declaration" {
-        // Count the number of declarators (can have multiple: int x, y, z;)
-        let mut child_cursor = node.walk();
-        let declarator_count = node
-            .children(&mut child_cursor)
-            .filter(|n| n.kind() == "variable_declarator")
-            .count();
-        *count += declarator_count;
-    }
-
-    // Also count for loop init variables (for (int i = 0; ...))
-    if node.kind() == "for_statement"
-        && let Some(init) = node.child_by_field_name("init")
-        && init.kind() == "local_variable_declaration"
-    {
-        let mut child_cursor = init.walk();
-        let declarator_count = init
-            .children(&mut child_cursor)
-            .filter(|n| n.kind() == "variable_declarator")
-            .count();
-        *count += declarator_count;
-    }
-
-    // Also count enhanced for loop variables
-    if node.kind() == "enhanced_for_statement" {
-        // The loop variable is a local
-        *count += 1;
-    }
-
-    // Also count catch parameters
-    if node.kind() == "catch_clause"
-        && let Some(_param) = node.child_by_field_name("parameter")
-    {
-        *count += 1;
-    }
-
-    // Recurse into children with incremented depth
-    if cursor.goto_first_child() {
-        loop {
-            traverse_and_count_with_depth(cursor, source, start, end, count, depth + 1);
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-        cursor.goto_parent();
-    }
+    let ctx = JavaContextExtractor::new_with_overview(source.to_string(), method_start, None);
+    collect_method_locals(
+        &ctx,
+        method_node,
+        None,
+        fallback_visibility_scope(method_end),
+    )
+    .len()
 }
 
 /// Metadata about a class's members (cached by Salsa)
@@ -571,7 +1465,11 @@ pub fn find_enclosing_method_bounds(
     // Walk up to find method or constructor
     let method_node = ancestor_of_kinds(
         node_at_cursor,
-        &["method_declaration", "constructor_declaration"],
+        &[
+            "method_declaration",
+            "constructor_declaration",
+            "compact_constructor_declaration",
+        ],
     )?;
 
     let start = method_node.start_byte();
@@ -772,12 +1670,12 @@ fn parse_class_members(
     let name_table = resolve_name_table_for_file(db, file);
 
     // Create a minimal context extractor for parsing
-    let ctx = JavaContextExtractor::for_indexing(content, name_table.clone());
+    let ctx = JavaContextExtractor::for_indexing_with_overview(content, name_table.clone());
 
     // Extract package and imports for type resolution
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::new(package, imports, name_table);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
 
     // Find the class node at class_start
     let class_node = find_node_at_offset(
@@ -818,4 +1716,482 @@ fn resolve_name_table_for_file(
     Some(index.build_name_table(crate::index::IndexScope {
         module: crate::index::ModuleId::ROOT,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::language::java::{JavaContextExtractor, locals, scope};
+    use crate::salsa_db::{Database, FileId};
+    use crate::workspace::Workspace;
+    use indoc::indoc;
+    use tower_lsp::lsp_types::Url;
+    use tree_sitter::Parser;
+
+    #[derive(Clone, Copy)]
+    struct ParityCase {
+        name: &'static str,
+        source: &'static str,
+        marker: &'static str,
+        strip_marker: bool,
+    }
+
+    fn prepare_source(source: &str, marker: &str, strip_marker: bool) -> (String, usize) {
+        let offset = source.find(marker).expect("marker");
+        if strip_marker {
+            (source.replacen(marker, "", 1), offset)
+        } else {
+            (source.to_string(), offset)
+        }
+    }
+
+    fn setup_case(
+        source: &str,
+    ) -> (
+        Database,
+        Workspace,
+        SourceFile,
+        Arc<crate::index::NameTable>,
+    ) {
+        let db = Database::default();
+        let workspace = Workspace::new();
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let file = SourceFile::new(&db, FileId::new(uri), source.to_string(), Arc::from("java"));
+        let name_table = resolve_name_table_for_file(&db, file).expect("name table");
+        (db, workspace, file, name_table)
+    }
+
+    fn reference_locals(
+        _db: &Database,
+        _file: SourceFile,
+        source: &str,
+        offset: usize,
+        name_table: Arc<crate::index::NameTable>,
+    ) -> Vec<LocalVar> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .expect("java grammar");
+        let tree = parser.parse(source, None).expect("parsed");
+        let root = tree.root_node();
+        let extractor = JavaContextExtractor::new_with_overview(
+            source.to_string(),
+            offset,
+            Some(name_table.clone()),
+        );
+        let package = scope::extract_package(&extractor, root);
+        let imports = scope::extract_imports(&extractor, root);
+        let type_ctx = SourceTypeCtx::from_overview(package, imports, Some(name_table));
+        let cursor_node = extractor.find_cursor_node(root);
+        locals::extract_locals_with_type_ctx(&extractor, root, cursor_node, Some(&type_ctx))
+    }
+
+    fn locals_signature(locals: &[LocalVar]) -> Vec<(String, String, Option<String>)> {
+        locals
+            .iter()
+            .map(|local| {
+                (
+                    local.name.to_string(),
+                    local.type_internal.to_internal_with_generics(),
+                    local.init_expr.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn assert_incremental_matches_reference(case: ParityCase) {
+        let (source, offset) = prepare_source(case.source, case.marker, case.strip_marker);
+        let (db, workspace, file, name_table) = setup_case(&source);
+
+        let expected = reference_locals(&db, file, &source, offset, name_table);
+        let actual = extract_visible_method_locals_incremental(&db, file, offset, &workspace);
+
+        let expected_sig = locals_signature(&expected);
+        let actual_sig = locals_signature(&actual);
+        assert_eq!(
+            actual_sig, expected_sig,
+            "{}\nexpected={expected_sig:?}\nactual={actual_sig:?}",
+            case.name
+        );
+    }
+
+    #[test]
+    fn test_incremental_locals_match_reference_regular_cases() {
+        let cases = [
+            ParityCase {
+                name: "standard locals preserve generics",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            int a = 1;
+                            String b = "hello";
+                            List<String> c = new ArrayList<>();
+                            // cursor here
+                        }
+                    }
+                "#},
+                marker: "// cursor here",
+                strip_marker: false,
+            },
+            ParityCase {
+                name: "method params and varargs stay visible",
+                source: indoc! {r#"
+                    class A {
+                        void f(String sep, int... numbers) {
+                            // cursor here
+                        }
+                    }
+                "#},
+                marker: "// cursor here",
+                strip_marker: false,
+            },
+            ParityCase {
+                name: "var declarations keep initializer text",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            var map = new HashMap<String, String>();
+                            var list = new ArrayList<>();
+                            // cursor here
+                        }
+                    }
+                "#},
+                marker: "// cursor here",
+                strip_marker: false,
+            },
+            ParityCase {
+                name: "future declarations do not leak",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            int visible = 1;
+                            // cursor here
+                            int invisible = 2;
+                        }
+                    }
+                "#},
+                marker: "// cursor here",
+                strip_marker: false,
+            },
+            ParityCase {
+                name: "inner block locals expire outside the block",
+                source: indoc! {r#"
+                    class T {
+                        void m() {
+                            {
+                                String s1 = "";
+                            }
+                            s1/*caret*/
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "misread declarations recover without semicolon",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            String s = "incomplete"
+                            // cursor here
+                        }
+                    }
+                "#},
+                marker: "// cursor here",
+                strip_marker: false,
+            },
+            ParityCase {
+                name: "error nodes contribute recoverable locals",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            try {
+                                String trapped = "value";
+                                call(
+                            // cursor
+                        }
+                    }
+                "#},
+                marker: "// cursor",
+                strip_marker: false,
+            },
+            ParityCase {
+                name: "misread method declarations do not pollute locals",
+                source: indoc! {r#"
+                    class A {
+                        public static String str = "1234";
+
+                        public static void func() {
+                            str
+                            func(
+                                func("1234", 5678)
+                            );
+                            // cursor here
+                        }
+
+                        public static void func(Object o) {}
+                        public static Object func(String s, int i) { return null; }
+                    }
+                "#},
+                marker: "// cursor here",
+                strip_marker: false,
+            },
+            ParityCase {
+                name: "incomplete next declarations stay hidden",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            var b = make();
+                            b/*caret*/ nums = makeNums();
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "broken member access does not pollute following type",
+                source: indoc! {r#"
+                    class T {
+                        void m() {
+                            RandomEnum.B.;
+
+                            RandomRecord rc;
+                            rc./*caret*/
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+        ];
+
+        for case in cases {
+            assert_incremental_matches_reference(case);
+        }
+    }
+
+    #[test]
+    fn test_incremental_locals_match_reference_lambda_cases() {
+        let cases = [
+            ParityCase {
+                name: "single lambda parameter is visible",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            java.util.function.Function<String, Integer> fn = s -> s/*caret*/;
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "parenthesized inferred lambda parameters are visible",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            java.util.function.BiFunction<String, String, Integer> fn = (left, right) -> left/*caret*/;
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "zero arg lambdas do not synthesize locals",
+                source: indoc! {r#"
+                    class A {
+                        void f() {
+                            Runnable r = () -> { System.out.println(); /*caret*/ };
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "typed lambda params keep declared type",
+                source: indoc! {r#"
+                    import java.util.function.Function;
+                    class T {
+                        void m() {
+                            Function<String, Integer> f = (String x) -> x/*caret*/;
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "var lambda params stay unknown",
+                source: indoc! {r#"
+                    import java.util.function.Function;
+                    class T {
+                        void m() {
+                            Function<String, Integer> f = (var x) -> x/*caret*/;
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "lambda inner block locals expire after block",
+                source: indoc! {r#"
+                    import java.util.function.Function;
+
+                    class T {
+                        void m() {
+                            Function<String, Void> f = s -> {
+                                {
+                                    String s1 = s.trim();
+                                }
+                                s1/*caret*/
+                                return null;
+                            };
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+        ];
+
+        for case in cases {
+            assert_incremental_matches_reference(case);
+        }
+    }
+
+    #[test]
+    fn test_incremental_locals_match_reference_constructor_cases() {
+        let cases = [
+            ParityCase {
+                name: "compact constructor parameters stay visible",
+                source: indoc! {r#"
+                    record Point(int x, int y) {
+                        public Point {
+                            if (x < 0) x = 0;
+                            /*caret*/
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "explicit constructor parameters are scoped correctly",
+                source: indoc! {r#"
+                    record Point(int x, int y) {
+                        public Point(int x) {
+                            this(x, 0);
+                            /*caret*/
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+            ParityCase {
+                name: "compact constructor preserves complex parameter types",
+                source: indoc! {r#"
+                    record Person(String name, int age) {
+                        public Person {
+                            if (name == null) throw new IllegalArgumentException();
+                            /*caret*/
+                        }
+                    }
+                "#},
+                marker: "/*caret*/",
+                strip_marker: true,
+            },
+        ];
+
+        for case in cases {
+            assert_incremental_matches_reference(case);
+        }
+    }
+
+    #[test]
+    fn test_incremental_locals_cache_remains_cursor_sensitive() {
+        let source = indoc! {r#"
+            class A {
+                void f() {
+                    int first = 1;
+                    // early
+                    int second = 2;
+                    // late
+                }
+            }
+        "#};
+        let early_offset = source.find("// early").unwrap();
+        let late_offset = source.find("// late").unwrap();
+        let (db, workspace, file, _) = setup_case(source);
+
+        let late = extract_visible_method_locals_incremental(&db, file, late_offset, &workspace);
+        let early = extract_visible_method_locals_incremental(&db, file, early_offset, &workspace);
+
+        let late_names: Vec<_> = late.iter().map(|local| local.name.as_ref()).collect();
+        let early_names: Vec<_> = early.iter().map(|local| local.name.as_ref()).collect();
+
+        assert!(late_names.contains(&"first"));
+        assert!(late_names.contains(&"second"));
+        assert!(early_names.contains(&"first"));
+        assert!(
+            !early_names.contains(&"second"),
+            "cached locals must still be filtered by cursor: {early_names:?}"
+        );
+    }
+
+    #[test]
+    fn test_visible_incremental_locals_do_not_leak_catch_or_enhanced_for_vars() {
+        let source_with_markers = indoc! {r#"
+            class A {
+                void f(Iterable<String> items) {
+                    for (String item : items) {
+                        item.trim();
+                    }
+                    item/*loop*/
+
+                    try {
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                    e/*catch*/
+                }
+            }
+        "#};
+        let loop_marker = "/*loop*/";
+        let catch_marker = "/*catch*/";
+        let loop_offset = source_with_markers.find(loop_marker).unwrap();
+        let catch_offset = source_with_markers.find(catch_marker).unwrap() - loop_marker.len();
+        let source = source_with_markers
+            .replacen(loop_marker, "", 1)
+            .replacen(catch_marker, "", 1);
+        let (db, workspace, file, _) = setup_case(&source);
+
+        let loop_locals =
+            extract_visible_method_locals_incremental(&db, file, loop_offset, &workspace);
+        let catch_locals =
+            extract_visible_method_locals_incremental(&db, file, catch_offset, &workspace);
+
+        let loop_names: Vec<_> = loop_locals
+            .iter()
+            .map(|local| local.name.as_ref())
+            .collect();
+        let catch_names: Vec<_> = catch_locals
+            .iter()
+            .map(|local| local.name.as_ref())
+            .collect();
+
+        assert!(
+            !loop_names.contains(&"item"),
+            "enhanced-for variable leaked after loop: {loop_names:?}"
+        );
+        assert!(
+            !catch_names.contains(&"e"),
+            "catch variable leaked after catch block: {catch_names:?}"
+        );
+    }
 }

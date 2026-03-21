@@ -52,7 +52,8 @@ pub use resolve::resolve_type_in_context;
 pub use semantic::{
     ClassMembersMetadata, FileStructureMetadata, MethodLocalsMetadata,
     extract_class_members_incremental, extract_class_members_metadata, extract_file_structure,
-    extract_method_locals_incremental, extract_method_locals_metadata, find_enclosing_class_bounds,
+    extract_method_locals_incremental, extract_method_locals_metadata,
+    extract_visible_method_locals_incremental, find_enclosing_class_bounds,
     find_enclosing_method_bounds,
 };
 pub use symbols::{

@@ -214,8 +214,11 @@ pub fn extract_java_completion_context(
     };
 
     let root = tree.root_node();
-    let extractor =
-        crate::language::java::JavaContextExtractor::new(content.to_string(), offset, None);
+    let extractor = crate::language::java::JavaContextExtractor::new_with_overview(
+        content.to_string(),
+        offset,
+        None,
+    );
     let cursor_node = extractor.find_cursor_node(root);
     let (rich_location, rich_query) =
         crate::language::java::location::determine_location(&extractor, cursor_node, trigger_char);

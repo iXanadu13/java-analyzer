@@ -274,10 +274,11 @@ impl<'a> JavaSemanticRequestContext<'a> {
         }
 
         let type_ctx_started = std::time::Instant::now();
-        let type_ctx = Arc::new(
-            SourceTypeCtx::new(enclosing_package.clone(), existing_imports.clone(), None)
-                .with_view(self.view.clone()),
-        );
+        let type_ctx = Arc::new(SourceTypeCtx::from_view(
+            enclosing_package.clone(),
+            existing_imports.clone(),
+            self.view.clone(),
+        ));
         if let Some(metrics) = self.metrics.as_ref() {
             metrics.record_phase_duration_at(
                 "inlay.prepare_type_ctx",
@@ -288,7 +289,7 @@ impl<'a> JavaSemanticRequestContext<'a> {
 
         let db = workspace.salsa_db.lock();
         let locals_started = std::time::Instant::now();
-        let local_variables = crate::salsa_queries::extract_method_locals_incremental(
+        let local_variables = crate::salsa_queries::extract_visible_method_locals_incremental(
             &*db, salsa_file, offset, workspace,
         );
         if let Some(metrics) = self.metrics.as_ref() {

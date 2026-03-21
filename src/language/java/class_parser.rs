@@ -47,7 +47,7 @@ pub fn parse_java_source_with_view(
     name_table: Option<Arc<crate::index::NameTable>>,
     view: Option<&IndexView>,
 ) -> Vec<ClassMetadata> {
-    let ctx = JavaContextExtractor::for_indexing(source, name_table.clone());
+    let ctx = JavaContextExtractor::for_indexing_with_overview(source, name_table.clone());
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
@@ -90,7 +90,8 @@ pub fn parse_java_source_with_view(
         Some(IndexView::new(smallvec::smallvec![bucket]))
     };
 
-    let mut base_type_ctx = SourceTypeCtx::new(package.clone(), imports, name_table.clone());
+    let mut base_type_ctx =
+        SourceTypeCtx::from_overview(package.clone(), imports, name_table.clone());
     if let Some(view) = parsing_view.clone() {
         base_type_ctx = base_type_ctx.with_view(view);
     }
@@ -223,7 +224,7 @@ fn refine_source_metadata_with_index_view(
             .as_ref()
             .map(|_| Vec::<Arc<str>>::new())
             .unwrap_or_default();
-        let type_ctx = SourceTypeCtx::new(
+        let type_ctx = SourceTypeCtx::from_overview(
             class.package.clone(),
             imports,
             Some(
@@ -353,7 +354,7 @@ fn parse_java_class(
 
     let body = node.child_by_field_name("body");
     let full_source = std::str::from_utf8(ctx.bytes()).unwrap_or("");
-    let ctx = JavaContextExtractor::for_indexing(full_source, ctx.name_table.clone());
+    let ctx = JavaContextExtractor::for_indexing_with_overview(full_source, ctx.name_table.clone());
     if let Some(b) = body {
         for member in extract_class_members_from_body(&ctx, b, type_ctx) {
             match member {
@@ -483,7 +484,8 @@ fn extract_class_annotations(
             .unwrap_or(prefix_start);
         if body_start > prefix_start {
             let header = &ctx.source[prefix_start..body_start];
-            let temp_ctx = JavaContextExtractor::for_indexing(header, ctx.name_table.clone());
+            let temp_ctx =
+                JavaContextExtractor::for_indexing_with_overview(header, ctx.name_table.clone());
             let mut parser = make_java_parser();
             if let Some(tree) = parser.parse(header, None) {
                 annos = crate::language::java::members::parse_annotations_in_node(
@@ -568,13 +570,14 @@ pub fn find_symbol_range(
     descriptor: Option<&str>,
     index: &IndexView,
 ) -> Option<tower_lsp::lsp_types::Range> {
-    let ctx = JavaContextExtractor::for_indexing(content, Some(index.build_name_table()));
+    let ctx =
+        JavaContextExtractor::for_indexing_with_overview(content, Some(index.build_name_table()));
     let mut parser = make_java_parser();
     let tree = parser.parse(content, None)?;
     let root = tree.root_node();
     let package = extract_package(&ctx, root);
     let imports = crate::language::java::scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::new(package, imports, Some(index.build_name_table()))
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, Some(index.build_name_table()))
         .with_view(index.clone());
 
     // For nested classes, we need to look up the class metadata to get the simple name
@@ -593,21 +596,8 @@ pub fn find_symbol_range(
     let class_node = find_class_node(root, target_internal, &ctx, &type_ctx)?;
 
     let target_node = if let Some(m_name) = member_name {
-        let normalized_descriptor = descriptor.map(|desc| {
-            let mut out = desc.to_string();
-            out = out.replace("LString;", "Ljava/lang/String;");
-            out = out.replace("[LString;", "[Ljava/lang/String;");
-            out
-        });
         let body = class_node.child_by_field_name("body")?;
-        find_member_node(
-            &ctx,
-            body,
-            m_name,
-            normalized_descriptor.as_deref().or(descriptor),
-            &type_ctx,
-        )
-        .or_else(|| {
+        find_member_node(&ctx, body, m_name, descriptor, &type_ctx).or_else(|| {
             synthetic::resolve_synthetic_definition(
                 &ctx,
                 class_node,
@@ -619,7 +609,7 @@ pub fn find_symbol_range(
                     SyntheticDefinitionKind::Field
                 },
                 m_name,
-                normalized_descriptor.as_deref().or(descriptor),
+                descriptor,
             )
         })?
     } else {

@@ -472,10 +472,11 @@ pub(crate) mod test_helpers {
             let lang = registry.find(language_id).expect("language registered");
             let base_package = ctx.enclosing_package.clone();
             let base_imports = ctx.existing_imports.clone();
-            let type_ctx = Arc::new(
-                SourceTypeCtx::new(base_package, base_imports, Some(view.build_name_table()))
-                    .with_view(view.clone()),
-            );
+            let type_ctx = Arc::new(SourceTypeCtx::from_view(
+                base_package,
+                base_imports,
+                view.clone(),
+            ));
             ctx = ctx.with_extension(type_ctx);
             lang.enrich_completion_context(&mut ctx, root_scope(), view);
         }

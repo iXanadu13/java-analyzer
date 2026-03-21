@@ -134,14 +134,19 @@ fn enrich_java_semantic_context(
         })
         .collect();
 
-    let mut type_ctx = SourceTypeCtx::new(
-        data.enclosing_package.clone(),
-        existing_imports.clone(),
-        None,
-    );
-    if let Some(request_analysis) = analysis {
-        type_ctx = type_ctx.with_view(request_analysis.view.clone());
-    }
+    let type_ctx = if let Some(request_analysis) = analysis {
+        SourceTypeCtx::from_view(
+            data.enclosing_package.clone(),
+            existing_imports.clone(),
+            request_analysis.view.clone(),
+        )
+    } else {
+        SourceTypeCtx::from_overview(
+            data.enclosing_package.clone(),
+            existing_imports.clone(),
+            None,
+        )
+    };
     let type_ctx = Arc::new(type_ctx.with_current_class_methods(method_map));
 
     let mut local_variables = ctx.local_variables.clone();
@@ -307,7 +312,7 @@ fn fetch_locals_from_workspace(
     workspace: &crate::workspace::Workspace,
     context: &CompletionContextData,
 ) -> Vec<LocalVar> {
-    crate::salsa_queries::extract_method_locals_incremental(
+    crate::salsa_queries::extract_visible_method_locals_incremental(
         db,
         file,
         context.cursor_offset,

@@ -13,7 +13,8 @@ use crate::build_integration::{SourceRootId, WorkspaceModelSnapshot, WorkspaceRo
 use crate::index::codebase::{index_codebase, index_codebase_paths};
 use crate::index::{ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex};
 use crate::salsa_db::{Database as SalsaDatabase, FileId};
-use crate::semantic::{LocalVar, context::CurrentClassMember};
+use crate::salsa_queries::semantic::CachedMethodLocal;
+use crate::semantic::context::CurrentClassMember;
 use document::DocumentStore;
 
 pub mod document;
@@ -24,8 +25,8 @@ pub mod document;
 /// When file content changes, the hash changes and cache is automatically invalidated.
 #[derive(Default)]
 struct SemanticCache {
-    /// Cached local variables per method, keyed by content hash
-    method_locals: HashMap<u64, Vec<LocalVar>>,
+    /// Cached parsed method locals per method, keyed by content hash
+    method_locals: HashMap<u64, Vec<CachedMethodLocal>>,
     /// Cached class members per class, keyed by content hash
     class_members: HashMap<u64, HashMap<Arc<str>, CurrentClassMember>>,
 }
@@ -83,7 +84,7 @@ impl Workspace {
     }
 
     /// Get cached method locals by content hash (IntelliJ-style PSI cache)
-    pub fn get_cached_method_locals(&self, content_hash: u64) -> Option<Vec<LocalVar>> {
+    pub fn get_cached_method_locals(&self, content_hash: u64) -> Option<Vec<CachedMethodLocal>> {
         self.semantic_cache
             .read()
             .method_locals
@@ -91,8 +92,8 @@ impl Workspace {
             .cloned()
     }
 
-    /// Cache method locals by content hash
-    pub fn cache_method_locals(&self, content_hash: u64, locals: Vec<LocalVar>) {
+    /// Cache parsed method locals by content hash
+    pub fn cache_method_locals(&self, content_hash: u64, locals: Vec<CachedMethodLocal>) {
         self.semantic_cache
             .write()
             .method_locals

@@ -27,7 +27,7 @@ pub struct RelaxedTypeResolution {
 }
 
 impl SourceTypeCtx {
-    pub fn new(
+    pub fn from_overview(
         package: Option<Arc<str>>,
         imports: Vec<Arc<str>>,
         name_table: Option<Arc<crate::index::NameTable>>,
@@ -39,6 +39,24 @@ impl SourceTypeCtx {
             view: None,
             current_class_methods: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn from_view(package: Option<Arc<str>>, imports: Vec<Arc<str>>, view: IndexView) -> Self {
+        Self {
+            package,
+            imports,
+            name_table: None,
+            view: Some(view),
+            current_class_methods: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn new(
+        package: Option<Arc<str>>,
+        imports: Vec<Arc<str>>,
+        name_table: Option<Arc<crate::index::NameTable>>,
+    ) -> Self {
+        Self::from_overview(package, imports, name_table)
     }
 
     pub fn with_view(mut self, view: IndexView) -> Self {
