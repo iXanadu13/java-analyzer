@@ -15,10 +15,13 @@ use crate::index::{
     ModuleIndex, NameTable, index_jar,
 };
 
+type AnalysisContextKey = (ModuleId, ClasspathId, Option<SourceRootId>);
+
 pub struct WorkspaceIndex {
     modules: DashMap<ModuleId, Arc<ModuleIndex>>,
     jdk: Arc<BucketIndex>,
     jar_cache: DashMap<Arc<str>, Arc<BucketIndex>>,
+    view_cache: DashMap<AnalysisContextKey, (u64, IndexView)>,
     graph: RwLock<ModuleGraph>,
     /// Version counter that increments on every mutation
     /// Used by Salsa to detect changes
@@ -34,6 +37,7 @@ impl WorkspaceIndex {
             modules,
             jdk: Arc::new(BucketIndex::new()),
             jar_cache: DashMap::new(),
+            view_cache: DashMap::new(),
             graph: RwLock::new(ModuleGraph::new()),
             version: AtomicU64::new(0),
         }
@@ -48,6 +52,11 @@ impl WorkspaceIndex {
     /// Increment the version counter (called on every mutation)
     fn increment_version(&self) {
         self.version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn invalidate_analysis_caches(&self) {
+        self.view_cache.clear();
+        self.increment_version();
     }
 
     pub fn ensure_module(&self, id: ModuleId, name: Arc<str>) -> Arc<ModuleIndex> {
@@ -69,7 +78,7 @@ impl WorkspaceIndex {
     ) {
         let module = self.ensure_module(scope.module, default_module_name(scope.module));
         module.source.update_source(origin, classes);
-        self.increment_version();
+        self.invalidate_analysis_caches();
     }
 
     pub fn update_source_in_context(
@@ -81,12 +90,13 @@ impl WorkspaceIndex {
     ) {
         let module = self.ensure_module(module, default_module_name(module));
         module.update_source_in_root(source_root, origin, classes);
-        self.increment_version();
+        self.invalidate_analysis_caches();
     }
 
     pub fn remove_source_origin(&self, scope: IndexScope, origin: &ClassOrigin) {
         let module = self.ensure_module(scope.module, default_module_name(scope.module));
         module.source.remove_by_origin(origin);
+        self.invalidate_analysis_caches();
     }
 
     pub fn remove_source_origin_in_context(
@@ -97,11 +107,12 @@ impl WorkspaceIndex {
     ) {
         let module = self.ensure_module(module, default_module_name(module));
         module.remove_source_origin_in_root(source_root, origin);
+        self.invalidate_analysis_caches();
     }
 
     pub fn add_jdk_classes(&self, classes: Vec<ClassMetadata>) {
         self.jdk.add_classes(classes);
-        self.increment_version();
+        self.invalidate_analysis_caches();
     }
 
     pub fn add_jar_classes(&self, scope: IndexScope, classes: Vec<ClassMetadata>) {
@@ -109,7 +120,7 @@ impl WorkspaceIndex {
         let bucket = Arc::new(BucketIndex::new());
         bucket.add_classes(classes);
         module.add_classpath_bucket(ClasspathId::Main, bucket);
-        self.increment_version();
+        self.invalidate_analysis_caches();
     }
 
     pub fn get_or_index_jar(&self, path: Arc<str>) -> Arc<BucketIndex> {
@@ -142,12 +153,14 @@ impl WorkspaceIndex {
             .collect();
         let module = self.ensure_module(module, default_module_name(module));
         module.set_classpath(classpath_id, jar_paths, buckets);
+        self.invalidate_analysis_caches();
     }
 
     pub fn set_module_dependencies(&self, module: ModuleId, deps: Vec<ModuleId>) {
         let module_index = self.ensure_module(module, default_module_name(module));
         module_index.set_deps(deps.clone());
         self.graph.write().set_deps(module, deps);
+        self.invalidate_analysis_caches();
     }
 
     pub fn register_module_source_roots(
@@ -157,11 +170,13 @@ impl WorkspaceIndex {
     ) {
         let module_index = self.ensure_module(module, default_module_name(module));
         module_index.set_source_roots(roots);
+        self.invalidate_analysis_caches();
     }
 
     pub fn set_module_active_classpath(&self, module: ModuleId, classpath_id: ClasspathId) {
         let module_index = self.ensure_module(module, default_module_name(module));
         module_index.set_active_classpath(classpath_id);
+        self.invalidate_analysis_caches();
     }
 
     pub fn module_classpath_jars(
@@ -192,6 +207,14 @@ impl WorkspaceIndex {
         classpath_id: ClasspathId,
         source_root: Option<SourceRootId>,
     ) -> IndexView {
+        let key = (module_id, classpath_id, source_root);
+        let started_version = self.version();
+        if let Some(cached) = self.view_cache.get(&key)
+            && cached.value().0 == started_version
+        {
+            return cached.value().1.clone();
+        }
+
         let module = self.ensure_module(module_id, default_module_name(module_id));
 
         let mut layers: SmallVec<Arc<BucketIndex>, 8> = SmallVec::new();
@@ -233,7 +256,11 @@ impl WorkspaceIndex {
             "building index view for analysis context"
         );
         layers.push(Arc::clone(&self.jdk));
-        IndexView::new(layers)
+        let view = IndexView::new(layers);
+        if self.version() == started_version {
+            self.view_cache.insert(key, (started_version, view.clone()));
+        }
+        view
     }
 
     pub fn build_name_table(&self, scope: IndexScope) -> Arc<NameTable> {
@@ -468,5 +495,42 @@ mod tests {
             idx.view_for_analysis_context(module, ClasspathId::Test, Some(SourceRootId(20)));
         assert!(test_view.get_class("pkg/Foo").is_some());
         assert!(test_view.get_class("pkg/FooTest").is_some());
+    }
+
+    #[test]
+    fn test_analysis_context_view_cache_reuses_name_table_until_mutation() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+
+        idx.add_classes(vec![make_class("pkg/Alpha", ClassOrigin::Unknown)]);
+
+        let view1 = idx.view(scope);
+        let names1 = view1.build_name_table();
+        let view2 = idx.view(scope);
+        let names2 = view2.build_name_table();
+
+        assert!(
+            Arc::ptr_eq(&names1, &names2),
+            "reused analysis context should share the cached name table"
+        );
+
+        let source_origin = ClassOrigin::SourceFile(Arc::from("file:///pkg/Beta.java"));
+        idx.update_source(
+            scope,
+            source_origin.clone(),
+            vec![make_class("pkg/Beta", source_origin)],
+        );
+
+        let view3 = idx.view(scope);
+        let names3 = view3.build_name_table();
+
+        assert!(
+            !Arc::ptr_eq(&names1, &names3),
+            "workspace mutations should invalidate cached analysis views"
+        );
+        assert!(names3.exists("pkg/Alpha"));
+        assert!(names3.exists("pkg/Beta"));
     }
 }

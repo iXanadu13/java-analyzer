@@ -19,7 +19,7 @@ struct BucketState {
     simple_name_index: HashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
     package_index: HashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
     owner_index: HashMap<OwnerKey, Vec<Arc<ClassMetadata>>>,
-    name_table: NameTable,
+    name_table: Arc<NameTable>,
     mro_cache: MroCacheMap,
     fuzzy_matcher: Nucleo<Arc<str>>,
 }
@@ -37,7 +37,7 @@ impl BucketIndex {
             simple_name_index: HashMap::with_capacity(100_000),
             package_index: HashMap::with_capacity(10_000),
             owner_index: HashMap::with_capacity(50_000),
-            name_table: NameTable(FxHashSet::default()),
+            name_table: Arc::new(NameTable(FxHashSet::default())),
             mro_cache: HashMap::new(),
             fuzzy_matcher: Nucleo::new(nucleo::Config::DEFAULT, waker, None, 1),
         };
@@ -89,7 +89,9 @@ impl BucketIndex {
                 .or_default()
                 .push(Arc::clone(&internal));
 
-            inner.name_table.0.insert(Arc::clone(&internal));
+            Arc::make_mut(&mut inner.name_table)
+                .0
+                .insert(Arc::clone(&internal));
 
             injector.push(simple, |item: &Arc<str>, cols| {
                 cols[0] = item.as_ref().into();
@@ -364,7 +366,7 @@ impl BucketIndex {
 
     pub fn build_name_table(&self) -> Arc<NameTable> {
         let inner = self.inner.read();
-        Arc::new(inner.name_table.clone())
+        Arc::clone(&inner.name_table)
     }
 
     pub fn remove_by_origin(&self, origin: &ClassOrigin) {
@@ -420,7 +422,7 @@ impl BucketIndex {
     }
 
     fn rebuild_name_table_locked(inner: &mut BucketState) {
-        inner.name_table = NameTable(inner.classes.keys().cloned().collect());
+        inner.name_table = Arc::new(NameTable(inner.classes.keys().cloned().collect()));
     }
 
     fn intern_class(class: &mut ClassMetadata) {

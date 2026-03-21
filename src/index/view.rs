@@ -1,19 +1,25 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::index::{BucketIndex, ClassMetadata, FieldSummary, MethodSummary, NameTable};
 
 #[derive(Default)]
 struct IndexViewCaches {
+    class_by_internal: DashMap<Arc<str>, Option<Arc<ClassMetadata>>>,
+    classes_by_simple_name: DashMap<Arc<str>, Arc<Vec<Arc<ClassMetadata>>>>,
+    classes_in_package: DashMap<Arc<str>, Arc<Vec<Arc<ClassMetadata>>>>,
+    direct_inner_classes: DashMap<(Option<Arc<str>>, Arc<str>), Arc<Vec<Arc<ClassMetadata>>>>,
     inherited_members: DashMap<Arc<str>, Arc<InheritedMembers>>,
     mro: DashMap<Arc<str>, Arc<Vec<Arc<ClassMetadata>>>>,
     methods_by_name: DashMap<(Arc<str>, Arc<str>), Arc<Vec<Arc<MethodSummary>>>>,
     fields_by_name: DashMap<(Arc<str>, Arc<str>), Option<Arc<FieldSummary>>>,
     declaring_method_owner: DashMap<(Arc<str>, Arc<str>, Arc<str>), Option<Arc<ClassMetadata>>>,
+    all_classes: OnceLock<Arc<Vec<Arc<ClassMetadata>>>>,
+    name_table: OnceLock<Arc<NameTable>>,
 }
 
 struct InheritedMembers {
@@ -28,6 +34,26 @@ pub struct IndexView {
 }
 
 impl IndexView {
+    fn merge_classes<F>(&self, mut fetch: F) -> Vec<Arc<ClassMetadata>>
+    where
+        F: FnMut(&BucketIndex) -> Vec<Arc<ClassMetadata>>,
+    {
+        let mut by_internal: FxHashMap<Arc<str>, Arc<ClassMetadata>> = Default::default();
+        for layer in &self.layers {
+            for class in fetch(layer) {
+                let key = Arc::clone(&class.internal_name);
+                if let Some(current) = by_internal.get(&key) {
+                    if Self::should_replace(current, &class) {
+                        by_internal.insert(key, class);
+                    }
+                } else {
+                    by_internal.insert(key, class);
+                }
+            }
+        }
+        by_internal.into_values().collect()
+    }
+
     fn resolve_internal_hint_to_class(&self, internal_hint: &str) -> Option<Arc<ClassMetadata>> {
         let (pkg, simple) = internal_hint.rsplit_once('/')?;
         let mut matches = self
@@ -75,6 +101,10 @@ impl IndexView {
     }
 
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
+        if let Some(cached) = self.caches.class_by_internal.get(internal_name) {
+            return cached.clone();
+        }
+
         let mut best: Option<Arc<ClassMetadata>> = None;
         for layer in &self.layers {
             if let Some(class) = layer.get_class(internal_name) {
@@ -87,6 +117,9 @@ impl IndexView {
                 }
             }
         }
+        self.caches
+            .class_by_internal
+            .insert(Arc::from(internal_name), best.clone());
         best
     }
 
@@ -116,10 +149,17 @@ impl IndexView {
         let mut cur = enclosing;
         while let Some(parent_name) = cur.inner_class_of.clone() {
             scope_chain.push(Arc::clone(&parent_name));
-            let parent = self
-                .iter_all_classes()
-                .into_iter()
-                .find(|c| c.name.as_ref() == parent_name.as_ref() && c.package == enclosing_pkg);
+            let parent = cur
+                .internal_name
+                .rsplit_once('$')
+                .and_then(|(owner_internal, _)| self.get_class(owner_internal))
+                .or_else(|| {
+                    self.get_classes_by_simple_name(parent_name.as_ref())
+                        .into_iter()
+                        .find(|c| {
+                            c.name.as_ref() == parent_name.as_ref() && c.package == enclosing_pkg
+                        })
+                });
             match parent {
                 Some(p) => cur = p,
                 None => break,
@@ -168,39 +208,28 @@ impl IndexView {
     }
 
     pub fn get_classes_by_simple_name(&self, simple_name: &str) -> Vec<Arc<ClassMetadata>> {
-        let mut by_internal: rustc_hash::FxHashMap<Arc<str>, Arc<ClassMetadata>> =
-            Default::default();
-        for layer in &self.layers {
-            for class in layer.get_classes_by_simple_name(simple_name) {
-                let key = Arc::clone(&class.internal_name);
-                if let Some(current) = by_internal.get(&key) {
-                    if Self::should_replace(current, &class) {
-                        by_internal.insert(key, class);
-                    }
-                } else {
-                    by_internal.insert(key, class);
-                }
-            }
+        if let Some(cached) = self.caches.classes_by_simple_name.get(simple_name) {
+            return cached.value().as_ref().clone();
         }
-        by_internal.into_values().collect()
+
+        let merged =
+            Arc::new(self.merge_classes(|layer| layer.get_classes_by_simple_name(simple_name)));
+        self.caches
+            .classes_by_simple_name
+            .insert(Arc::from(simple_name), Arc::clone(&merged));
+        merged.as_ref().clone()
     }
 
     pub fn classes_in_package(&self, pkg: &str) -> Vec<Arc<ClassMetadata>> {
-        let mut by_internal: rustc_hash::FxHashMap<Arc<str>, Arc<ClassMetadata>> =
-            Default::default();
-        for layer in &self.layers {
-            for class in layer.classes_in_package(pkg) {
-                let key = Arc::clone(&class.internal_name);
-                if let Some(current) = by_internal.get(&key) {
-                    if Self::should_replace(current, &class) {
-                        by_internal.insert(key, class);
-                    }
-                } else {
-                    by_internal.insert(key, class);
-                }
-            }
+        if let Some(cached) = self.caches.classes_in_package.get(pkg) {
+            return cached.value().as_ref().clone();
         }
-        by_internal.into_values().collect()
+
+        let merged = Arc::new(self.merge_classes(|layer| layer.classes_in_package(pkg)));
+        self.caches
+            .classes_in_package
+            .insert(Arc::from(pkg), Arc::clone(&merged));
+        merged.as_ref().clone()
     }
 
     /// Returns classes directly declared in the package (excludes nested/inner classes).
@@ -218,23 +247,20 @@ impl IndexView {
         let Some(owner) = self.get_class(owner_internal) else {
             return vec![];
         };
+        let key = (owner.package.clone(), Arc::clone(&owner.name));
+        if let Some(cached) = self.caches.direct_inner_classes.get(&key) {
+            return cached.value().as_ref().clone();
+        }
+
         let owner_pkg = owner.package.as_deref();
         let owner_name = owner.name.as_ref();
-        let mut by_internal: rustc_hash::FxHashMap<Arc<str>, Arc<ClassMetadata>> =
-            Default::default();
-        for layer in &self.layers {
-            for class in layer.direct_inner_classes_by_owner(owner_pkg, owner_name) {
-                let key = Arc::clone(&class.internal_name);
-                if let Some(current) = by_internal.get(&key) {
-                    if Self::should_replace(current, &class) {
-                        by_internal.insert(key, class);
-                    }
-                } else {
-                    by_internal.insert(key, class);
-                }
-            }
-        }
-        by_internal.into_values().collect()
+        let merged = Arc::new(
+            self.merge_classes(|layer| layer.direct_inner_classes_by_owner(owner_pkg, owner_name)),
+        );
+        self.caches
+            .direct_inner_classes
+            .insert(key, Arc::clone(&merged));
+        merged.as_ref().clone()
     }
 
     /// Resolves a direct nested class by simple name under `owner_internal`.
@@ -553,51 +579,38 @@ impl IndexView {
     }
 
     pub fn exact_match_keys(&self) -> Vec<Arc<str>> {
-        let mut out = Vec::new();
-        let mut seen: FxHashSet<Arc<str>> = Default::default();
-        for (idx, layer) in self.layers.iter().enumerate() {
-            let layer_keys = layer.exact_match_keys();
-            tracing::debug!(
-                layer_idx = idx,
-                layer_key_count = layer_keys.len(),
-                "IndexView layer keys"
-            );
-            for key in layer_keys {
-                if seen.insert(Arc::clone(&key)) {
-                    out.push(key);
-                }
-            }
-        }
-        out
+        let name_table = self.build_name_table();
+        name_table.iter().cloned().collect()
     }
 
     pub fn iter_all_classes(&self) -> Vec<Arc<ClassMetadata>> {
-        let mut by_internal: rustc_hash::FxHashMap<Arc<str>, Arc<ClassMetadata>> =
-            Default::default();
-        for layer in &self.layers {
-            for class in layer.iter_all_classes() {
-                let key = Arc::clone(&class.internal_name);
-                if let Some(current) = by_internal.get(&key) {
-                    if Self::should_replace(current, &class) {
-                        by_internal.insert(key, class);
-                    }
-                } else {
-                    by_internal.insert(key, class);
-                }
-            }
-        }
-        by_internal.into_values().collect()
+        self.caches
+            .all_classes
+            .get_or_init(|| Arc::new(self.merge_classes(|layer| layer.iter_all_classes())))
+            .as_ref()
+            .clone()
     }
 
     pub fn build_name_table(&self) -> Arc<NameTable> {
-        let names = self.exact_match_keys();
-        tracing::debug!(
-            layer_count = self.layers.len(),
-            name_count = names.len(),
-            phase = "indexing_or_discovery",
-            "build NameTable from IndexView"
-        );
-        NameTable::from_names(names)
+        Arc::clone(self.caches.name_table.get_or_init(|| {
+            let mut names = Vec::new();
+            let mut seen: FxHashSet<Arc<str>> = Default::default();
+            for layer in &self.layers {
+                let layer_table = layer.build_name_table();
+                for name in layer_table.iter() {
+                    if seen.insert(Arc::clone(name)) {
+                        names.push(Arc::clone(name));
+                    }
+                }
+            }
+            tracing::debug!(
+                layer_count = self.layers.len(),
+                name_count = names.len(),
+                phase = "indexing_or_discovery",
+                "build NameTable from IndexView"
+            );
+            NameTable::from_names(names)
+        }))
     }
 }
 
