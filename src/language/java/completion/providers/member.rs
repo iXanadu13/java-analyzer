@@ -995,7 +995,7 @@ fn resolve_strict_class_name(
 }
 
 /// Resolves simple class names to internal names
-/// Search order: imports → same package → global
+/// Search order: imports -> same package
 fn resolve_simple_name_to_internal(
     simple: &str,
     ctx: &SemanticContext,
@@ -1029,12 +1029,6 @@ fn resolve_simple_name_to_internal(
         }
     }
 
-    let candidates = index.get_classes_by_simple_name(simple);
-    tracing::debug!(simple, count = candidates.len(), internals = ?candidates.iter().map(|c| c.internal_name.as_ref()).collect::<Vec<_>>(), "global lookup");
-
-    if !candidates.is_empty() {
-        return Some(Arc::clone(&candidates[0].internal_name));
-    }
     None
 }
 
