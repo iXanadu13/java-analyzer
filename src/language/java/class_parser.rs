@@ -40,7 +40,12 @@ pub fn parse_java_source(
     origin: ClassOrigin,
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> Vec<ClassMetadata> {
-    parse_java_source_with_view(source, origin, name_table, None)
+    let mut parser = make_java_parser();
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => return vec![],
+    };
+    extract_java_classes_from_tree(source, &tree, &origin, name_table, None)
 }
 
 #[cfg_attr(
@@ -69,6 +74,65 @@ pub fn extract_java_classes_from_tree(
     view: Option<&IndexView>,
 ) -> Vec<ClassMetadata> {
     extract_java_classes_from_root(source, tree.root_node(), origin, name_table, view)
+}
+
+pub fn discover_java_names_from_tree(source: &str, tree: &Tree) -> Vec<Arc<str>> {
+    discover_java_names_from_root(source, tree.root_node())
+}
+
+pub fn discover_java_names_from_root(source: &str, root: Node<'_>) -> Vec<Arc<str>> {
+    let ctx = JavaContextExtractor::for_indexing(source, None);
+    let package = extract_package(&ctx, root);
+
+    let mut results = Vec::new();
+    let mut stack: Vec<(Node, Option<Arc<str>>)> = vec![(root, None)]; // (Node, Option<OuterName>)
+
+    while let Some((node, outer)) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if matches!(child.kind(), "package_declaration" | "import_declaration") {
+                continue;
+            }
+            if kind_is(CLASS_DECL_KINDS).test(Input::new(child, (), None)) {
+                if let Some(name_node) = first_child_of_kind(child, "identifier") {
+                    let class_name = ctx.node_text(name_node);
+                    if !class_name.is_empty() {
+                        let internal_name = match (&package, &outer) {
+                            (Some(pkg), Some(out)) => format!("{}/{}${}", pkg, out, class_name),
+                            (Some(pkg), None) => format!("{}/{}", pkg, class_name),
+                            (None, Some(out)) => format!("{}${}", out, class_name),
+                            (None, None) => class_name.to_string(),
+                        };
+                        let internal_name_arc: Arc<str> = Arc::from(internal_name.as_str());
+                        results.push(internal_name_arc.clone());
+                        if let Some(body) = child.child_by_field_name("body") {
+                            let next_outer = match outer {
+                                Some(ref o) => format!("{}${}", o, class_name),
+                                None => class_name.to_string(),
+                            };
+                            stack.push((body, Some(Arc::from(next_outer.as_str()))));
+                        }
+                    }
+                }
+            } else {
+                // Descend into non-declaration nodes (anonymous classes, blocks, etc.)
+                stack.push((child, outer.clone()));
+            }
+        }
+    }
+
+    if results.is_empty()
+        && let Some(error_node) = find_top_error_node(root)
+        && let Some((_, name)) = recover_error_type_decl(&ctx, error_node)
+    {
+        let internal_name = match &package {
+            Some(pkg) => Arc::from(format!("{}/{}", pkg, name).as_str()),
+            None => name,
+        };
+        results.push(internal_name);
+    }
+
+    results
 }
 
 pub fn extract_java_classes_from_root(
@@ -854,64 +918,12 @@ fn extract_java_access_flags(ctx: &JavaContextExtractor, node: Node) -> u16 {
 }
 
 pub fn discover_java_names(source: &str) -> Vec<Arc<str>> {
-    let ctx = JavaContextExtractor::for_indexing(source, None);
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => return vec![],
     };
-    let root = tree.root_node();
-    let package = extract_package(&ctx, root);
-
-    let mut results = Vec::new();
-    let mut stack: Vec<(Node, Option<Arc<str>>)> = vec![(root, None)]; // (Node, Option<OuterName>)
-
-    while let Some((node, outer)) = stack.pop() {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if matches!(child.kind(), "package_declaration" | "import_declaration") {
-                continue;
-            }
-            if kind_is(CLASS_DECL_KINDS).test(Input::new(child, (), None)) {
-                if let Some(name_node) = first_child_of_kind(child, "identifier") {
-                    let class_name = ctx.node_text(name_node);
-                    if !class_name.is_empty() {
-                        let internal_name = match (&package, &outer) {
-                            (Some(pkg), Some(out)) => format!("{}/{}${}", pkg, out, class_name),
-                            (Some(pkg), None) => format!("{}/{}", pkg, class_name),
-                            (None, Some(out)) => format!("{}${}", out, class_name),
-                            (None, None) => class_name.to_string(),
-                        };
-                        let internal_name_arc: Arc<str> = Arc::from(internal_name.as_str());
-                        results.push(internal_name_arc.clone());
-                        if let Some(body) = child.child_by_field_name("body") {
-                            let next_outer = match outer {
-                                Some(ref o) => format!("{}${}", o, class_name),
-                                None => class_name.to_string(),
-                            };
-                            stack.push((body, Some(Arc::from(next_outer.as_str()))));
-                        }
-                    }
-                }
-            } else {
-                // Descend into non-declaration nodes (anonymous classes, blocks, etc.)
-                stack.push((child, outer.clone()));
-            }
-        }
-    }
-
-    if results.is_empty()
-        && let Some(error_node) = find_top_error_node(root)
-        && let Some((_, name)) = recover_error_type_decl(&ctx, error_node)
-    {
-        let internal_name = match &package {
-            Some(pkg) => Arc::from(format!("{}/{}", pkg, name).as_str()),
-            None => name,
-        };
-        results.push(internal_name);
-    }
-
-    results
+    discover_java_names_from_tree(source, &tree)
 }
 
 fn find_class_node<'a>(

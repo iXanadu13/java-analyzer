@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
 
-use super::source::parse_source_file;
+use super::incremental::{SourceTextInput, prepare_source_inputs};
 use super::{ClassMetadata, ClassOrigin};
 
 /// Scan result
@@ -69,7 +69,7 @@ fn is_excluded(path: &Path) -> bool {
     })
 }
 
-fn collect_source_files<I>(roots: I) -> Vec<PathBuf>
+pub(crate) fn collect_source_files<I>(roots: I) -> Vec<PathBuf>
 where
     I: IntoIterator<Item = PathBuf>,
 {
@@ -97,20 +97,13 @@ fn index_source_files(
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> CodebaseIndex {
     let file_count = source_files.len();
+    let source_inputs = load_source_inputs(source_files);
 
     tracing::debug!("discovering stubs...");
-    let discovered_names: Vec<Arc<str>> = source_files
+    let prepared_sources = prepare_source_inputs(source_inputs);
+    let discovered_names: Vec<Arc<str>> = prepared_sources
         .par_iter()
-        .flat_map(|path| {
-            let content = std::fs::read_to_string(path).ok()?;
-            let lang = if path.extension().and_then(|s| s.to_str()) == Some("kt") {
-                "kotlin"
-            } else {
-                "java"
-            };
-            Some(super::source::discover_internal_names_str(&content, lang))
-        })
-        .flatten()
+        .flat_map(|source| source.discover_internal_names())
         .collect();
 
     let discovered_names_len = discovered_names.len();
@@ -124,13 +117,9 @@ fn index_source_files(
         enriched_name_table_len = enriched_name_table.len(),
         "full structural analysis",
     );
-    let classes: Vec<ClassMetadata> = source_files
+    let classes: Vec<ClassMetadata> = prepared_sources
         .into_par_iter()
-        .flat_map(|path| {
-            let uri = path_to_uri_str(&path);
-            let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-            parse_source_file(&path, origin, Some(enriched_name_table.clone()))
-        })
+        .flat_map(|source| source.extract_classes(Some(enriched_name_table.clone())))
         .collect();
 
     tracing::info!(
@@ -143,6 +132,28 @@ fn index_source_files(
         classes,
         file_count,
     }
+}
+
+pub(crate) fn load_source_inputs(source_files: Vec<PathBuf>) -> Vec<SourceTextInput> {
+    source_files
+        .into_par_iter()
+        .filter_map(|path| {
+            let content = std::fs::read_to_string(&path).ok()?;
+            let uri = path_to_uri_str(&path);
+            let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
+            let language_id: Arc<str> = if path.extension().and_then(|s| s.to_str()) == Some("kt") {
+                Arc::from("kotlin")
+            } else {
+                Arc::from("java")
+            };
+            Some(SourceTextInput::new(
+                Arc::from(uri.as_str()),
+                language_id,
+                content,
+                origin,
+            ))
+        })
+        .collect()
 }
 
 fn path_to_uri_str(path: &Path) -> String {

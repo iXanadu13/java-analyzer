@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 
 use crate::index::{ClassOrigin, cache, merge_source_into_bytecode, parse_class_data_bytes};
 
+use super::incremental::{SourceTextInput, prepare_source_inputs, source_uri_for_origin};
 use super::{ClassMetadata, index_jar};
 
 const JDK_ORIGIN: &str = "jdk://builtin";
@@ -208,15 +209,23 @@ impl JdkIndexer {
             "found java files in JDK src.zip"
         );
 
-        let results: Vec<_> = source_files
+        let prepared_sources = prepare_source_inputs(
+            source_files
+                .into_iter()
+                .map(|(name, content)| {
+                    let origin = ClassOrigin::ZipSource {
+                        zip_path: Arc::clone(&zip_path),
+                        entry_name: Arc::from(name.as_str()),
+                    };
+                    let uri = source_uri_for_origin(&origin, "java");
+                    SourceTextInput::new(uri, Arc::from("java"), content, origin)
+                })
+                .collect(),
+        );
+
+        let results: Vec<_> = prepared_sources
             .into_par_iter()
-            .flat_map(|(name, content)| {
-                let origin = ClassOrigin::ZipSource {
-                    zip_path: Arc::clone(&zip_path),
-                    entry_name: Arc::from(name.as_str()),
-                };
-                crate::index::source::parse_source_str(&content, "java", origin, name_table.clone())
-            })
+            .flat_map(|source| source.extract_classes(name_table.clone()))
             .collect();
 
         let results_clone = results.clone();

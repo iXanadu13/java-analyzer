@@ -18,6 +18,7 @@ use crate::semantic::types::{SymbolProvider, parse_return_type_from_descriptor};
 pub mod bucket;
 pub mod cache;
 pub mod codebase;
+pub mod incremental;
 pub mod jdk;
 pub mod module_graph;
 pub mod module_index;

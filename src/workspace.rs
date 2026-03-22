@@ -9,7 +9,8 @@ use tower_lsp::lsp_types::Url;
 use tracing::info;
 
 use crate::build_integration::{SourceRootId, WorkspaceModelSnapshot, WorkspaceRootKind};
-use crate::index::codebase::{index_codebase, index_codebase_paths};
+use crate::index::codebase::{collect_source_files, load_source_inputs};
+use crate::index::incremental::SourceTextInput;
 use crate::index::{ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex};
 use crate::salsa_db::{Database as SalsaDatabase, FileId};
 use crate::salsa_queries::semantic::CachedMethodLocal;
@@ -55,6 +56,8 @@ pub struct Workspace {
     pub salsa_db: Arc<parking_lot::Mutex<SalsaDatabase>>,
     /// Mapping from URI to Salsa SourceFile input
     salsa_files: Arc<parking_lot::RwLock<HashMap<Url, crate::salsa_db::SourceFile>>>,
+    /// File URIs currently managed by workspace/fallback bulk indexing.
+    indexed_salsa_uris: Arc<parking_lot::RwLock<HashSet<Url>>>,
     /// IntelliJ-style semantic cache for parsed locals and members
     /// Keyed by content hash, automatically invalidated when content changes
     semantic_cache: Arc<parking_lot::RwLock<SemanticCache>>,
@@ -76,6 +79,7 @@ impl Workspace {
             index,
             salsa_db: Arc::new(parking_lot::Mutex::new(salsa_db)),
             salsa_files: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            indexed_salsa_uris: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             semantic_cache: Arc::new(parking_lot::RwLock::new(SemanticCache::default())),
             model: ParkingRwLock::new(None),
             jdk_classes: RwLock::new(Vec::new()),
@@ -273,6 +277,12 @@ impl Workspace {
 
     pub async fn apply_workspace_model(&self, snapshot: WorkspaceModelSnapshot) -> Result<()> {
         let jdk_classes = self.jdk_classes.read().await.clone();
+        let open_doc_overlays = self
+            .documents
+            .snapshot_documents()
+            .into_iter()
+            .map(|(uri, language_id, content)| (uri.to_string(), (language_id, content)))
+            .collect::<HashMap<_, _>>();
         let root_inputs = snapshot
             .modules
             .iter()
@@ -296,12 +306,15 @@ impl Workspace {
             root_inputs
                 .into_iter()
                 .map(|(module_id, root_id, classpath, root_path)| {
+                    let source_files = collect_source_files([root_path.clone()]);
+                    let mut source_inputs = load_source_inputs(source_files);
+                    overlay_open_document_inputs(&mut source_inputs, &open_doc_overlays);
                     (
                         module_id,
                         root_id,
                         classpath,
                         root_path.clone(),
-                        index_codebase_paths([root_path], None).classes,
+                        source_inputs,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -387,7 +400,11 @@ impl Workspace {
             new_index.set_module_dependencies(module.id, module.dependency_modules.clone());
         }
 
-        for (module_id, root_id, classpath, root_path, classes) in indexed_roots {
+        let mut current_indexed_uris = HashSet::new();
+        for (module_id, root_id, classpath, root_path, source_inputs) in indexed_roots {
+            let (classes, indexed_uris) =
+                self.index_source_inputs_with_shared_salsa(source_inputs, None);
+            current_indexed_uris.extend(indexed_uris);
             let mut by_origin: std::collections::HashMap<ClassOrigin, Vec<_>> =
                 std::collections::HashMap::new();
             for class in classes {
@@ -408,6 +425,7 @@ impl Workspace {
                 new_index.update_source_in_context(module_id, Some(root_id), origin, classes);
             }
         }
+        self.prune_indexed_salsa_files(&current_indexed_uris);
 
         {
             let mut guard = self.index.write();
@@ -467,7 +485,21 @@ impl Workspace {
     }
 
     pub async fn index_fallback_root(&self, root: PathBuf) -> Result<()> {
-        let result = tokio::task::spawn_blocking(move || index_codebase(root, None)).await?;
+        let open_doc_overlays = self
+            .documents
+            .snapshot_documents()
+            .into_iter()
+            .map(|(uri, language_id, content)| (uri.to_string(), (language_id, content)))
+            .collect::<HashMap<_, _>>();
+        let source_inputs = tokio::task::spawn_blocking(move || {
+            let source_files = collect_source_files([root]);
+            let mut source_inputs = load_source_inputs(source_files);
+            overlay_open_document_inputs(&mut source_inputs, &open_doc_overlays);
+            source_inputs
+        })
+        .await?;
+        let (classes, current_indexed_uris) =
+            self.index_source_inputs_with_shared_salsa(source_inputs, None);
         let scope = IndexScope {
             module: ModuleId::ROOT,
         };
@@ -478,7 +510,7 @@ impl Workspace {
         }
         let mut by_origin: std::collections::HashMap<ClassOrigin, Vec<_>> =
             std::collections::HashMap::new();
-        for class in result.classes {
+        for class in classes {
             by_origin
                 .entry(class.origin.clone())
                 .or_default()
@@ -487,6 +519,7 @@ impl Workspace {
         for (origin, classes) in by_origin {
             index.update_source(scope, origin, classes);
         }
+        self.prune_indexed_salsa_files(&current_indexed_uris);
         *self.index.write() = index;
         *self.model.write() = None;
         Ok(())
@@ -582,6 +615,78 @@ impl Workspace {
 
         crate::salsa_queries::parse::seed_parse_tree(&*db, file, &tree);
     }
+
+    fn index_source_inputs_with_shared_salsa(
+        &self,
+        source_inputs: Vec<SourceTextInput>,
+        name_table: Option<Arc<crate::index::NameTable>>,
+    ) -> (Vec<ClassMetadata>, HashSet<Url>) {
+        let mut prepared = Vec::with_capacity(source_inputs.len());
+        let mut indexed_uris = HashSet::new();
+
+        for source in source_inputs {
+            let Ok(uri) = Url::parse(source.uri.as_ref()) else {
+                continue;
+            };
+            indexed_uris.insert(uri.clone());
+            let salsa_file = if source.language_id.as_ref() == "java" {
+                Some(self.get_or_create_salsa_file(
+                    &uri,
+                    source.content.as_str(),
+                    source.language_id.as_ref(),
+                ))
+            } else {
+                None
+            };
+            prepared.push(IndexedWorkspaceSource {
+                language_id: source.language_id,
+                content: source.content,
+                origin: source.origin,
+                salsa_file,
+            });
+        }
+
+        let discovered_names = {
+            let db = self.salsa_db.lock();
+            prepared
+                .iter()
+                .flat_map(|source| source.discover_internal_names(&*db))
+                .collect::<Vec<_>>()
+        };
+
+        let enriched_name_table = match name_table {
+            Some(existing) => existing.extend_with(discovered_names),
+            None => crate::index::NameTable::from_names(discovered_names),
+        };
+
+        let classes = {
+            let db = self.salsa_db.lock();
+            prepared
+                .into_iter()
+                .flat_map(|source| source.extract_classes(&*db, Some(enriched_name_table.clone())))
+                .collect::<Vec<_>>()
+        };
+
+        (classes, indexed_uris)
+    }
+
+    fn prune_indexed_salsa_files(&self, current_indexed_uris: &HashSet<Url>) {
+        let stale_uris = {
+            let tracked = self.indexed_salsa_uris.read();
+            tracked
+                .difference(current_indexed_uris)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        for uri in &stale_uris {
+            if self.documents.with_doc(uri, |_| ()).is_none() {
+                self.remove_salsa_file(uri);
+            }
+        }
+
+        *self.indexed_salsa_uris.write() = current_indexed_uris.clone();
+    }
 }
 
 impl Default for Workspace {
@@ -599,6 +704,68 @@ fn merge_classpath<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Vec<&'a Path
         }
     }
     merged
+}
+
+struct IndexedWorkspaceSource {
+    language_id: Arc<str>,
+    content: String,
+    origin: ClassOrigin,
+    salsa_file: Option<crate::salsa_db::SourceFile>,
+}
+
+impl IndexedWorkspaceSource {
+    fn discover_internal_names(&self, db: &crate::salsa_db::Database) -> Vec<Arc<str>> {
+        if let Some(file) = self.salsa_file
+            && let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file)
+        {
+            return crate::language::java::class_parser::discover_java_names_from_tree(
+                self.content.as_str(),
+                &tree,
+            );
+        }
+
+        crate::index::source::discover_internal_names_str(
+            self.content.as_str(),
+            self.language_id.as_ref(),
+        )
+    }
+
+    fn extract_classes(
+        self,
+        db: &crate::salsa_db::Database,
+        name_table: Option<Arc<crate::index::NameTable>>,
+    ) -> Vec<ClassMetadata> {
+        if let Some(file) = self.salsa_file
+            && let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file)
+        {
+            return crate::language::java::class_parser::extract_java_classes_from_tree(
+                self.content.as_str(),
+                &tree,
+                &self.origin,
+                name_table,
+                None,
+            );
+        }
+
+        crate::index::source::parse_source_str(
+            self.content.as_str(),
+            self.language_id.as_ref(),
+            self.origin,
+            name_table,
+        )
+    }
+}
+
+fn overlay_open_document_inputs(
+    source_inputs: &mut [SourceTextInput],
+    open_doc_overlays: &HashMap<String, (String, String)>,
+) {
+    for source in source_inputs {
+        if let Some((language_id, content)) = open_doc_overlays.get(source.uri.as_ref()) {
+            source.language_id = Arc::from(language_id.as_str());
+            source.content = content.clone();
+        }
+    }
 }
 
 impl Workspace {
@@ -649,6 +816,7 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::time::SystemTime;
 
     use crate::build_integration::{
@@ -657,6 +825,7 @@ mod tests {
     };
     use crate::salsa_db::ParseTreeOrigin;
     use crate::workspace::document::Document;
+    use tempfile::tempdir;
 
     #[test]
     fn managed_workspace_prefers_imported_source_root_context() {
@@ -826,6 +995,73 @@ mod tests {
 
         assert_eq!(snapshot.origin, ParseTreeOrigin::Seeded);
         assert_eq!(snapshot.content.as_ref(), text);
+    }
+
+    #[tokio::test]
+    async fn fallback_root_indexing_reuses_shared_salsa_parse_tree() {
+        let workspace = Workspace::new();
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("Demo.java");
+        fs::write(&path, "class Demo { int value; }").expect("write source");
+        let uri =
+            Url::from_file_path(path.canonicalize().expect("canonical path")).expect("file uri");
+
+        workspace
+            .index_fallback_root(dir.path().to_path_buf())
+            .await
+            .expect("first index");
+
+        let file = workspace.get_salsa_file(&uri).expect("tracked salsa file");
+        {
+            let db = workspace.salsa_db.lock();
+            let snapshot = db
+                .cached_parse_tree(&file.file_id(&*db))
+                .expect("cached parse tree");
+            assert_eq!(snapshot.origin, ParseTreeOrigin::Full);
+        }
+
+        fs::write(&path, "class Demo { String value; }").expect("rewrite source");
+
+        workspace
+            .index_fallback_root(dir.path().to_path_buf())
+            .await
+            .expect("second index");
+
+        let file = workspace.get_salsa_file(&uri).expect("tracked salsa file");
+        let db = workspace.salsa_db.lock();
+        let snapshot = db
+            .cached_parse_tree(&file.file_id(&*db))
+            .expect("cached parse tree");
+        assert_eq!(snapshot.origin, ParseTreeOrigin::Incremental);
+    }
+
+    #[tokio::test]
+    async fn fallback_root_indexing_prefers_open_document_snapshot() {
+        let workspace = Workspace::new();
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("Demo.java");
+        fs::write(&path, "class Demo { int disk; }").expect("write source");
+        let uri =
+            Url::from_file_path(path.canonicalize().expect("canonical path")).expect("file uri");
+
+        workspace
+            .documents
+            .open(Document::new(crate::workspace::SourceFile::new(
+                uri.clone(),
+                "java",
+                1,
+                "class Demo { String live; }",
+                None,
+            )));
+
+        workspace
+            .index_fallback_root(dir.path().to_path_buf())
+            .await
+            .expect("index root");
+
+        let file = workspace.get_salsa_file(&uri).expect("tracked salsa file");
+        let db = workspace.salsa_db.lock();
+        assert_eq!(file.content(&*db), "class Demo { String live; }");
     }
 }
 pub mod source_file;

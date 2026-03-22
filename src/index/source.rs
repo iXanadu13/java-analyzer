@@ -9,10 +9,7 @@ use super::{
 use crate::{
     index::{MethodParams, intern_str},
     language::{
-        java::{
-            class_parser::{discover_java_names, parse_java_source},
-            type_ctx::split_params,
-        },
+        java::type_ctx::split_params,
         ts_utils::{capture_text, run_query},
     },
 };
@@ -25,7 +22,7 @@ pub fn parse_source_str(
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> Vec<ClassMetadata> {
     match lang {
-        "java" => parse_java_source(source, origin, name_table),
+        "java" => super::incremental::parse_java_source_text(source, origin, name_table),
         "kotlin" => parse_kotlin_source(source, origin),
         other => {
             debug!("unsupported source lang: {}", other);
@@ -57,13 +54,13 @@ pub fn parse_source_file(
 
 pub fn discover_internal_names_str(source: &str, lang: &str) -> Vec<Arc<str>> {
     match lang {
-        "java" => discover_java_names(source),
+        "java" => super::incremental::discover_java_names_text(source),
         "kotlin" => discover_kotlin_names(source),
         _ => vec![],
     }
 }
 
-fn discover_kotlin_names(source: &str) -> Vec<Arc<str>> {
+pub(crate) fn discover_kotlin_names(source: &str) -> Vec<Arc<str>> {
     // Kotlin 实现逻辑类似，鉴于 Kotlin 一个文件可以有多个顶层类，逻辑是一致的
     let mut parser = make_kotlin_parser();
     let tree = match parser.parse(source, None) {
