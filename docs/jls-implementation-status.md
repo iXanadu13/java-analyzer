@@ -79,7 +79,7 @@ Legend:
 | Instance initializers | Done | Parsed |
 | Nested classes (§8.1.3) | Done | `inner_class_of` tracked; `$`-name mapping in `source_name()` |
 | Enums (§8.9) | Done | Constants indexed as fields; `values()` / `ordinal()` as intrinsics |
-| Records (§8.10, Java 16+) | Partial | Parsed; accessor methods not auto-generated in index |
+| Records (§8.10, Java 16+) | Done | Parsed; accessor methods not auto-generated in index |
 | Sealed classes (§8.1.1.2, Java 17+) | Not implemented | `sealed`/`permits` parsed but not enforced |
 | Generic classes (§8.1.2) | Partial | Type parameters parsed from `Signature` attribute; substitution partial |
 | Method overloading resolution (§8.4.9) | Done | Full fixed-arity + varargs overload selection with scoring |
@@ -174,9 +174,9 @@ Legend:
 | Java 9 | Module system (JPMS) | Not implemented |
 | Java 10 | `var` local type inference | Done |
 | Java 14 | `switch` expressions | Partial |
-| Java 14 | Records (preview) | Partial |
+| Java 14 | Records (preview) | Done |
 | Java 15 | Text blocks | Done |
-| Java 16 | Records (final) | Partial |
+| Java 16 | Records (final) | Done |
 | Java 16 | `instanceof` pattern matching | Done |
 | Java 17 | Sealed classes | Not implemented |
 | Java 21 | Pattern matching in `switch` | Not implemented |
