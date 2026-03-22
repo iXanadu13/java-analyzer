@@ -1,13 +1,14 @@
 use rayon::prelude::*;
 use salsa::Setter;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Tree;
 
 use super::{ClassMetadata, ClassOrigin, NameTable};
+use crate::salsa_db::ParseTreeOrigin;
 
 pub struct SourceTextInput {
     pub uri: Arc<str>,
@@ -147,6 +148,38 @@ impl SourceParseSession {
         );
         self.files.insert(uri, file);
         Some(file)
+    }
+
+    pub fn prepare_sources(&mut self, inputs: Vec<SourceTextInput>) -> Vec<PreparedSource> {
+        inputs
+            .into_iter()
+            .filter_map(|input| self.prepare_source(input))
+            .collect()
+    }
+
+    pub fn prune_sources(&mut self, keep_uris: &HashSet<Arc<str>>) {
+        let stale_uris = self
+            .files
+            .keys()
+            .filter(|uri| !keep_uris.contains(*uri))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for uri in stale_uris {
+            let Some(file) = self.files.remove(&uri) else {
+                continue;
+            };
+            let file_id = file.file_id(&self.db).clone();
+            self.db.remove_parse_tree(&file_id);
+        }
+    }
+
+    pub fn parse_tree_origin_for_uri(&self, uri: &str) -> Option<ParseTreeOrigin> {
+        let file = self.files.get(uri)?;
+        let file_id = file.file_id(&self.db);
+        self.db
+            .cached_parse_tree(&file_id)
+            .map(|snapshot| snapshot.origin)
     }
 }
 

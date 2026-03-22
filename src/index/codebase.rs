@@ -1,9 +1,10 @@
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
 
-use super::incremental::{SourceTextInput, prepare_source_inputs};
+use super::incremental::{SourceParseSession, SourceTextInput};
 use super::{ClassMetadata, ClassOrigin};
 
 /// Scan result
@@ -11,6 +12,125 @@ pub struct CodebaseIndex {
     pub classes: Vec<ClassMetadata>,
     /// Number of files actually scanned
     pub file_count: usize,
+}
+
+/// Stateful codebase indexer that preserves Java Salsa parse snapshots across rescans.
+#[derive(Default)]
+pub struct CodebaseIndexSession {
+    java_session: SourceParseSession,
+}
+
+impl CodebaseIndexSession {
+    pub fn index_codebase<P: AsRef<Path>>(
+        &mut self,
+        root: P,
+        name_table: Option<Arc<crate::index::NameTable>>,
+    ) -> CodebaseIndex {
+        let root = root.as_ref();
+        tracing::info!(root = %root.display(), "codebase indexing started");
+        let source_files = collect_source_files([root.to_path_buf()]);
+        self.index_source_files(source_files, name_table)
+    }
+
+    pub fn index_codebase_paths<I>(
+        &mut self,
+        roots: I,
+        name_table: Option<Arc<crate::index::NameTable>>,
+    ) -> CodebaseIndex
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        let source_files = collect_source_files(roots);
+        self.index_source_files(source_files, name_table)
+    }
+
+    pub fn index_source_text(
+        &mut self,
+        uri: &str,
+        content: &str,
+        lang: &str,
+        name_table: Option<Arc<crate::index::NameTable>>,
+    ) -> Vec<ClassMetadata> {
+        let origin = ClassOrigin::SourceFile(Arc::from(uri));
+        match lang {
+            "java" => {
+                let input = SourceTextInput::new(
+                    Arc::from(uri),
+                    Arc::from("java"),
+                    content.to_owned(),
+                    origin,
+                );
+                let Some(prepared) = self.java_session.prepare_source(input) else {
+                    return vec![];
+                };
+                prepared.extract_classes(name_table)
+            }
+            // TODO: use incremental parsing for kotlin
+            _ => super::source::parse_source_str(content, lang, origin, name_table),
+        }
+    }
+
+    pub fn java_parse_origin(&self, uri: &str) -> Option<crate::salsa_db::ParseTreeOrigin> {
+        self.java_session.parse_tree_origin_for_uri(uri)
+    }
+
+    fn index_source_files(
+        &mut self,
+        source_files: Vec<PathBuf>,
+        name_table: Option<Arc<crate::index::NameTable>>,
+    ) -> CodebaseIndex {
+        let file_count = source_files.len();
+        let source_inputs = load_source_inputs(source_files);
+        let classes = self.index_source_inputs(source_inputs, name_table);
+
+        tracing::info!(
+            classes = classes.len(),
+            files = file_count,
+            "Codebase indexing complete"
+        );
+
+        CodebaseIndex {
+            classes,
+            file_count,
+        }
+    }
+
+    fn index_source_inputs(
+        &mut self,
+        source_inputs: Vec<SourceTextInput>,
+        name_table: Option<Arc<crate::index::NameTable>>,
+    ) -> Vec<ClassMetadata> {
+        let current_java_uris = source_inputs
+            .iter()
+            .filter(|source| source.language_id.as_ref() == "java")
+            .map(|source| Arc::clone(&source.uri))
+            .collect::<HashSet<_>>();
+        self.java_session.prune_sources(&current_java_uris);
+
+        tracing::debug!("discovering stubs...");
+        let prepared_sources = self.java_session.prepare_sources(source_inputs);
+
+        let discovered_names: Vec<Arc<str>> = prepared_sources
+            .par_iter()
+            .flat_map(|source| source.discover_internal_names())
+            .collect();
+
+        let discovered_names_len = discovered_names.len();
+        let enriched_name_table = match name_table {
+            Some(existing) => existing.extend_with(discovered_names),
+            None => crate::index::NameTable::from_names(discovered_names),
+        };
+
+        tracing::debug!(
+            discovered_names_len,
+            enriched_name_table_len = enriched_name_table.len(),
+            "full structural analysis",
+        );
+        prepared_sources
+            .into_par_iter()
+            .flat_map(|source| source.extract_classes(Some(enriched_name_table.clone())))
+            .collect()
+    }
 }
 
 /// Index the entire codebase directory
@@ -22,10 +142,7 @@ pub fn index_codebase<P: AsRef<Path>>(
     root: P,
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> CodebaseIndex {
-    let root = root.as_ref();
-    tracing::info!(root = %root.display(), "codebase indexing started");
-    let source_files = collect_source_files([root.to_path_buf()]);
-    index_source_files(source_files, name_table)
+    CodebaseIndexSession::default().index_codebase(root, name_table)
 }
 
 pub fn index_codebase_paths<I>(
@@ -35,8 +152,7 @@ pub fn index_codebase_paths<I>(
 where
     I: IntoIterator<Item = PathBuf>,
 {
-    let source_files = collect_source_files(roots);
-    index_source_files(source_files, name_table)
+    CodebaseIndexSession::default().index_codebase_paths(roots, name_table)
 }
 
 /// Parse source text from memory (for LSP textDocument/didChange)
@@ -46,8 +162,7 @@ pub fn index_source_text(
     lang: &str,
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> Vec<ClassMetadata> {
-    let origin = ClassOrigin::SourceFile(Arc::from(uri));
-    super::source::parse_source_str(content, lang, origin, name_table)
+    CodebaseIndexSession::default().index_source_text(uri, content, lang, name_table)
 }
 
 fn is_excluded(path: &Path) -> bool {
@@ -92,48 +207,6 @@ where
         .collect()
 }
 
-fn index_source_files(
-    source_files: Vec<PathBuf>,
-    name_table: Option<Arc<crate::index::NameTable>>,
-) -> CodebaseIndex {
-    let file_count = source_files.len();
-    let source_inputs = load_source_inputs(source_files);
-
-    tracing::debug!("discovering stubs...");
-    let prepared_sources = prepare_source_inputs(source_inputs);
-    let discovered_names: Vec<Arc<str>> = prepared_sources
-        .par_iter()
-        .flat_map(|source| source.discover_internal_names())
-        .collect();
-
-    let discovered_names_len = discovered_names.len();
-    let enriched_name_table = match name_table {
-        Some(existing) => existing.extend_with(discovered_names),
-        None => crate::index::NameTable::from_names(discovered_names),
-    };
-
-    tracing::debug!(
-        discovered_names_len,
-        enriched_name_table_len = enriched_name_table.len(),
-        "full structural analysis",
-    );
-    let classes: Vec<ClassMetadata> = prepared_sources
-        .into_par_iter()
-        .flat_map(|source| source.extract_classes(Some(enriched_name_table.clone())))
-        .collect();
-
-    tracing::info!(
-        classes = classes.len(),
-        files = file_count,
-        "Codebase indexing complete"
-    );
-
-    CodebaseIndex {
-        classes,
-        file_count,
-    }
-}
-
 pub(crate) fn load_source_inputs(source_files: Vec<PathBuf>) -> Vec<SourceTextInput> {
     source_files
         .into_par_iter()
@@ -164,6 +237,7 @@ fn path_to_uri_str(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::salsa_db::ParseTreeOrigin;
     use std::fs;
     use tempfile::TempDir;
 
@@ -311,6 +385,67 @@ class UserRepo(val db: String) {
             classes
                 .iter()
                 .all(|c| { matches!(&c.origin, ClassOrigin::SourceFile(u) if u.as_ref() == uri) })
+        );
+    }
+
+    #[test]
+    fn test_codebase_index_session_reuses_incremental_java_parse_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Demo.java");
+        fs::write(&path, "package org.test;\nclass Demo { int value; }\n").unwrap();
+
+        let uri = path_to_uri_str(&path);
+        let mut session = CodebaseIndexSession::default();
+
+        let first = session.index_codebase(dir.path(), None);
+        assert!(
+            first
+                .classes
+                .iter()
+                .any(|class| class.name.as_ref() == "Demo"),
+            "classes: {:?}",
+            first
+                .classes
+                .iter()
+                .map(|class| class.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(session.java_parse_origin(&uri), Some(ParseTreeOrigin::Full));
+
+        fs::write(
+            &path,
+            "package org.test;\nclass Demo { String value; int count; }\n",
+        )
+        .unwrap();
+
+        let second = session.index_codebase(dir.path(), None);
+        assert!(second.classes.iter().any(|class| {
+            class
+                .fields
+                .iter()
+                .any(|field| field.name.as_ref() == "count")
+        }));
+        assert_eq!(
+            session.java_parse_origin(&uri),
+            Some(ParseTreeOrigin::Incremental)
+        );
+    }
+
+    #[test]
+    fn test_codebase_index_session_reuses_java_source_text_by_uri() {
+        let uri = "file:///workspace/Demo.java";
+        let mut session = CodebaseIndexSession::default();
+
+        let first = session.index_source_text(uri, "class Demo { int value; }", "java", None);
+        assert_eq!(first.len(), 1);
+        assert_eq!(session.java_parse_origin(uri), Some(ParseTreeOrigin::Full));
+
+        let second =
+            session.index_source_text(uri, "class Demo { int value; int count; }", "java", None);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            session.java_parse_origin(uri),
+            Some(ParseTreeOrigin::Incremental)
         );
     }
 }
