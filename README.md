@@ -1,6 +1,6 @@
 # Java Analyzer
 
-![CI Status](https://github.com/cubewhy/java-analyzer/actions/workflows/rust-ci.yaml/badge.svg)
+[![CI Status](https://github.com/cubewhy/java-analyzer/actions/workflows/rust-ci.yaml/badge.svg)](https://github.com/cubewhy/java-analyzer/actions/workflows/rust-ci.yaml)
 ![GitHub License](https://img.shields.io/github/license/cubewhy/java-analyzer)
 
 Extreme fast Java LSP, built in Rust
