@@ -102,7 +102,7 @@ impl ModuleIndex {
         source_root: Option<SourceRootId>,
         origin: ClassOrigin,
         classes: Vec<ClassMetadata>,
-    ) {
+    ) -> bool {
         let state = self.state.read();
         if let Some(root_id) = source_root
             && let Some(root) = state.source_roots.get(&root_id)
@@ -113,8 +113,7 @@ impl ModuleIndex {
                 class_count = classes.len(),
                 "update_source_in_root: adding to source root bucket"
             );
-            root.bucket.update_source(origin, classes);
-            return;
+            return root.bucket.update_source(origin, classes);
         }
         drop(state);
         tracing::debug!(
@@ -123,23 +122,22 @@ impl ModuleIndex {
             class_count = classes.len(),
             "update_source_in_root: adding to module-level source bucket (fallback)"
         );
-        self.source.update_source(origin, classes);
+        self.source.update_source(origin, classes)
     }
 
     pub fn remove_source_origin_in_root(
         &self,
         source_root: Option<SourceRootId>,
         origin: &ClassOrigin,
-    ) {
+    ) -> bool {
         let state = self.state.read();
         if let Some(root_id) = source_root
             && let Some(root) = state.source_roots.get(&root_id)
         {
-            root.bucket.remove_by_origin(origin);
-            return;
+            return root.bucket.remove_by_origin(origin);
         }
         drop(state);
-        self.source.remove_by_origin(origin);
+        self.source.remove_by_origin(origin)
     }
 
     pub fn set_classpath(

@@ -22,6 +22,7 @@ use crate::workspace::AnalysisContext;
 pub struct RequestAnalysisState {
     pub analysis: AnalysisContext,
     pub view: IndexView,
+    pub workspace_version: u64,
 }
 
 /// Conversion layer between Salsa-compatible data and rich semantic types.

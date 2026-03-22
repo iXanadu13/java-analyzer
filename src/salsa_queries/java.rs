@@ -10,7 +10,8 @@ mod scope;
 
 pub use completion::{
     build_java_semantic_context, extract_java_completion_context,
-    extract_java_semantic_context_at_offset, extract_java_semantic_context_from_source_at_offset,
+    extract_java_completion_context_at_offset, extract_java_semantic_context_at_offset,
+    extract_java_semantic_context_from_source_at_offset,
 };
 pub use hints::{compute_java_inlay_hints, infer_java_variable_type};
 pub use indexing::{
@@ -151,6 +152,37 @@ class User {
             }
             other => panic!("expected MemberAccess, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_extract_java_context_at_offset_matches_line_character_query() {
+        let db = Database::default();
+        let uri = Url::parse("file:///test/User.java").unwrap();
+        let content = r#"
+class User {
+    void test() {
+        User user = new User();
+        user.
+    }
+}
+"#;
+        let rope = Rope::from_str(content);
+        let byte_offset = content.find("user.").unwrap() + "user.".len();
+        let char_idx = rope.byte_to_char(byte_offset);
+        let line = rope.char_to_line(char_idx) as u32;
+        let character = (char_idx - rope.line_to_char(line as usize)) as u32;
+        let file = SourceFile::new(
+            &db,
+            FileId::new(uri),
+            content.to_string(),
+            Arc::from("java"),
+        );
+
+        let by_line_col = extract_java_completion_context(&db, file, line, character, Some('.'));
+        let by_offset =
+            extract_java_completion_context_at_offset(&db, file, byte_offset, Some('.'));
+
+        assert_eq!(by_line_col.as_ref(), by_offset.as_ref());
     }
 
     #[test]

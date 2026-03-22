@@ -615,6 +615,7 @@ impl Workspace {
         let db = self.salsa_db.lock();
         let file_id = file.file_id(&*db);
         crate::salsa_queries::Db::remove_parse_tree(&*db, &file_id);
+        crate::salsa_queries::Db::remove_class_extraction(&*db, &file_id);
     }
 
     fn create_salsa_file(

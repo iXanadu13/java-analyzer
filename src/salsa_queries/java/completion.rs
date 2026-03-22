@@ -11,7 +11,6 @@ use crate::salsa_queries::context::{
 };
 use crate::salsa_queries::conversion::{FromSalsaDataWithAnalysis, RequestAnalysisState};
 use crate::semantic::{CursorLocation, SemanticContext};
-use ropey::Rope;
 use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 
@@ -28,7 +27,20 @@ pub fn extract_java_completion_context(
         return Arc::new(empty_context(db, file));
     };
 
-    if is_in_comment(content, offset) {
+    extract_java_completion_context_at_offset(db, file, offset, trigger_char)
+}
+
+#[salsa::tracked]
+pub fn extract_java_completion_context_at_offset(
+    db: &dyn Db,
+    file: SourceFile,
+    cursor_offset: usize,
+    trigger_char: Option<char>,
+) -> Arc<CompletionContextData> {
+    let content: Arc<str> = Arc::from(file.content(db).as_str());
+    let offset = cursor_offset.min(content.len());
+
+    if is_in_comment(content.as_ref(), offset) {
         return Arc::new(empty_context(db, file));
     }
 
@@ -38,7 +50,7 @@ pub fn extract_java_completion_context(
 
     let root = tree.root_node();
     let extractor = crate::language::java::JavaContextExtractor::new_with_overview(
-        content.to_string(),
+        Arc::clone(&content),
         offset,
         None,
     );
@@ -104,9 +116,7 @@ pub fn extract_java_semantic_context_at_offset(
         return None;
     }
 
-    let rope = Rope::from_str(content);
-    let (line, character) = offset_to_line_col_utf16(&rope, offset);
-    let context = extract_java_completion_context(db, file, line, character, None);
+    let context = extract_java_completion_context_at_offset(db, file, offset, None);
     let analysis = RequestAnalysisState {
         analysis: workspace
             .map(|workspace| workspace.analysis_context_for_uri(file.file_id(db).uri()))
@@ -117,6 +127,9 @@ pub fn extract_java_semantic_context_at_offset(
                 root_kind: None,
             }),
         view,
+        workspace_version: workspace
+            .map(|workspace| workspace.index.load().version())
+            .unwrap_or_else(|| db.workspace_index().version()),
     };
 
     Some(build_java_semantic_context(
@@ -166,9 +179,7 @@ pub fn extract_java_semantic_context_from_source_at_offset(
         source.to_string(),
         Arc::from("java"),
     );
-    let rope = Rope::from_str(source);
-    let (line, character) = offset_to_line_col_utf16(&rope, offset);
-    let context = extract_java_completion_context(&db, file, line, character, None);
+    let context = extract_java_completion_context_at_offset(&db, file, offset, None);
     let analysis = RequestAnalysisState {
         analysis: crate::workspace::AnalysisContext {
             module: ModuleId::ROOT,
@@ -177,6 +188,7 @@ pub fn extract_java_semantic_context_from_source_at_offset(
             root_kind: None,
         },
         view,
+        workspace_version: db.workspace_index().version(),
     };
 
     Some(SemanticContext::from_salsa_data_with_analysis(
@@ -289,19 +301,6 @@ fn empty_context(db: &dyn Db, file: SourceFile) -> CompletionContextData {
         file_uri: Arc::from(file.file_id(db).as_str()),
         language_id: Arc::from("java"),
     }
-}
-
-fn offset_to_line_col_utf16(rope: &Rope, offset: usize) -> (u32, u32) {
-    let offset = offset.min(rope.len_bytes());
-    let line = rope.byte_to_line(offset);
-    let line_start_char = rope.line_to_char(line);
-    let target_char = rope.byte_to_char(offset);
-    let character = rope
-        .slice(line_start_char..target_char)
-        .chars()
-        .map(|ch| if (ch as u32) >= 0x10000 { 2 } else { 1 })
-        .sum::<usize>() as u32;
-    (line as u32, character)
 }
 
 fn convert_statement_labels(

@@ -402,6 +402,7 @@ pub(crate) fn extract_java_semantic_context_for_test(
             root_kind: None,
         },
         view,
+        workspace_version: crate::salsa_queries::Db::workspace_index(&db).version(),
     };
 
     let context = crate::salsa_queries::java::extract_java_completion_context(

@@ -4,6 +4,7 @@ use std::time::Instant;
 use tower_lsp::lsp_types::{Position, Url};
 
 use crate::index::{IndexScope, IndexView};
+use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::language::{Language, LanguageRegistry, ParseEnv};
 use crate::lsp::request_cancellation::{
     CancellationToken, Cancelled, RequestFamily, RequestResult,
@@ -11,6 +12,7 @@ use crate::lsp::request_cancellation::{
 use crate::request_metrics::RequestMetrics;
 use crate::salsa_queries::conversion::{FromSalsaDataWithAnalysis, RequestAnalysisState};
 use crate::semantic::SemanticContext;
+use crate::workspace::document::SemanticContextCacheKey;
 use crate::workspace::{AnalysisContext, SourceFile, Workspace};
 
 pub struct RequestContext {
@@ -112,7 +114,8 @@ impl<'a> PreparedRequest<'a> {
         };
         request.check_cancelled("request_setup.after_ensure_tree")?;
 
-        let (analysis, inferred_package, _) = workspace.load_analysis_state_for_uri(uri);
+        let (analysis, inferred_package, index_snapshot) =
+            workspace.load_analysis_state_for_uri(uri);
         let scope = analysis.scope();
 
         let view = {
@@ -136,6 +139,7 @@ impl<'a> PreparedRequest<'a> {
         let request_analysis = RequestAnalysisState {
             analysis,
             view: view.clone(),
+            workspace_version: index_snapshot.version(),
         };
 
         let salsa_file = workspace.get_or_update_salsa_file_for_snapshot(file.as_ref());
@@ -222,6 +226,38 @@ impl<'a> PreparedRequest<'a> {
         position: Position,
         trigger: Option<char>,
     ) -> RequestResult<Option<SemanticContext>> {
+        let Some(offset) =
+            rope_line_col_to_offset(&self.file.rope, position.line, position.character)
+        else {
+            return Ok(None);
+        };
+        let cache_key = SemanticContextCacheKey {
+            document_version: self.file.version,
+            workspace_version: self.request_analysis.workspace_version,
+            module: self.request_analysis.analysis.module,
+            classpath: self.request_analysis.analysis.classpath,
+            source_root: self.request_analysis.analysis.source_root,
+            offset,
+            trigger,
+        };
+        if let Some(cached) = self
+            .workspace
+            .documents
+            .with_doc(&self.uri, |doc| doc.cached_semantic_context(&cache_key))
+            .flatten()
+        {
+            tracing::debug!(
+                uri = %self.uri,
+                offset,
+                trigger = ?trigger,
+                module = self.request_analysis.analysis.module.0,
+                classpath = ?self.request_analysis.analysis.classpath,
+                source_root = ?self.request_analysis.analysis.source_root.map(|id| id.0),
+                "semantic context cache hit"
+            );
+            return Ok(Some((*cached).clone()));
+        }
+
         tracing::debug!(
             uri = %self.uri,
             module = self.request_analysis.analysis.module.0,
@@ -240,13 +276,14 @@ impl<'a> PreparedRequest<'a> {
                 crate::salsa_queries::parse::cached_parse_tree_origin(&*db, self.salsa_file),
             );
             if self.lang.id() == "java" {
-                Some(crate::salsa_queries::java::extract_java_completion_context(
-                    &*db,
-                    self.salsa_file,
-                    position.line,
-                    position.character,
-                    trigger,
-                ))
+                Some(
+                    crate::salsa_queries::java::extract_java_completion_context_at_offset(
+                        &*db,
+                        self.salsa_file,
+                        offset,
+                        trigger,
+                    ),
+                )
             } else {
                 self.lang.extract_completion_context_salsa(
                     &*db,
@@ -301,6 +338,20 @@ impl<'a> PreparedRequest<'a> {
 
         if let Some(pkg) = self.inferred_package.as_ref() {
             ctx = ctx.with_inferred_package(Arc::clone(pkg));
+        }
+
+        if self
+            .workspace
+            .documents
+            .with_doc(&self.uri, |doc| doc.version() == cache_key.document_version)
+            .unwrap_or(false)
+        {
+            let cached = Arc::new(ctx.clone());
+            self.workspace.documents.with_doc_mut(&self.uri, |doc| {
+                if doc.version() == cache_key.document_version {
+                    doc.cache_semantic_context(cache_key, Arc::clone(&cached));
+                }
+            });
         }
 
         self.request

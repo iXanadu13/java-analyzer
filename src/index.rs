@@ -36,7 +36,7 @@ pub use scope::{ClasspathId, IndexScope, ModuleId};
 pub use view::IndexView;
 pub use workspace_index::WorkspaceIndex;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ClassMetadata {
     pub package: Option<Arc<str>>,
     pub name: Arc<str>,
@@ -159,7 +159,7 @@ pub enum ClassOrigin {
     Unknown,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MethodParams {
     pub items: Vec<MethodParam>,
 }
@@ -281,14 +281,14 @@ impl<const N: usize> From<[(&str, &str); N]> for MethodParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MethodParam {
     pub descriptor: Arc<str>,
     pub name: Arc<str>,
     pub annotations: Vec<AnnotationSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MethodSummary {
     pub name: Arc<str>,
     pub params: MethodParams,
@@ -331,7 +331,7 @@ impl MethodSummary {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FieldSummary {
     pub name: Arc<str>,
     pub descriptor: Arc<str>,

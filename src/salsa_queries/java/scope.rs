@@ -27,12 +27,12 @@ pub fn extract_java_enclosing_method(
     file: SourceFile,
     offset: usize,
 ) -> Option<Arc<MethodSummaryData>> {
-    let content = file.content(db);
+    let content: Arc<str> = Arc::from(file.content(db).as_str());
     let tree = crate::salsa_queries::parse::parse_tree(db, file)?;
     let root = tree.root_node();
     let name_table = get_name_table_for_java_file(db, file);
     let extractor = crate::language::java::JavaContextExtractor::new_with_overview(
-        content.to_string(),
+        Arc::clone(&content),
         offset.min(content.len()),
         name_table.clone(),
     );

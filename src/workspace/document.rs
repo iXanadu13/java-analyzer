@@ -1,10 +1,28 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use tower_lsp::lsp_types::{SemanticToken, Url};
 use tree_sitter::Tree;
 
+use crate::build_integration::SourceRootId;
+use crate::index::{ClasspathId, ModuleId};
+use crate::semantic::SemanticContext;
+
 use super::source_file::SourceFile;
+
+const SEMANTIC_CONTEXT_CACHE_LIMIT: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SemanticContextCacheKey {
+    pub document_version: i32,
+    pub workspace_version: u64,
+    pub module: ModuleId,
+    pub classpath: ClasspathId,
+    pub source_root: Option<SourceRootId>,
+    pub offset: usize,
+    pub trigger: Option<char>,
+}
 
 /// Per-document mutable LSP state.
 ///
@@ -25,6 +43,9 @@ pub struct Document {
     /// Keyed on `result_id` (= document version as string) and invalidated
     /// whenever `source` is replaced with a new version.
     pub semantic_token_cache: Option<(String, Vec<SemanticToken>)>,
+
+    /// Cached semantic contexts for the current document version.
+    semantic_context_cache: HashMap<SemanticContextCacheKey, Arc<SemanticContext>>,
 }
 
 impl Document {
@@ -33,6 +54,7 @@ impl Document {
         Self {
             source: Arc::new(source),
             semantic_token_cache: None,
+            semantic_context_cache: HashMap::new(),
         }
     }
 
@@ -52,6 +74,7 @@ impl Document {
     pub fn update_source(&mut self, source: SourceFile) {
         self.source = Arc::new(source);
         self.semantic_token_cache = None;
+        self.semantic_context_cache.clear();
     }
 
     /// Attach an already-incremented tree to the current source, producing a
@@ -62,8 +85,27 @@ impl Document {
         // with a new SourceFile that shares everything except the tree.
         let prev = Arc::unwrap_or_clone(Arc::clone(&self.source));
         self.source = Arc::new(prev.with_tree(tree));
+        self.semantic_context_cache.clear();
         // Tree change does not invalidate semantic-token cache by itself;
         // text already changed before the tree was updated.
+    }
+
+    pub fn cached_semantic_context(
+        &self,
+        key: &SemanticContextCacheKey,
+    ) -> Option<Arc<SemanticContext>> {
+        self.semantic_context_cache.get(key).cloned()
+    }
+
+    pub fn cache_semantic_context(
+        &mut self,
+        key: SemanticContextCacheKey,
+        context: Arc<SemanticContext>,
+    ) {
+        if self.semantic_context_cache.len() >= SEMANTIC_CONTEXT_CACHE_LIMIT {
+            self.semantic_context_cache.clear();
+        }
+        self.semantic_context_cache.insert(key, context);
     }
 
     // ── Convenience pass-throughs ────────────────────────────────────────

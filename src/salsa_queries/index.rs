@@ -8,6 +8,20 @@ use crate::salsa_db::SourceFile;
 
 use std::sync::Arc;
 
+fn compute_extracted_classes(
+    db: &dyn Db,
+    file: SourceFile,
+    language_id: &str,
+) -> Vec<ClassMetadata> {
+    if language_id == "java" {
+        crate::salsa_queries::java::parse_java_classes(db, file)
+    } else if language_id == "kotlin" {
+        crate::salsa_queries::kotlin::parse_kotlin_classes(db, file)
+    } else {
+        vec![]
+    }
+}
+
 /// A wrapper for class extraction results that can be used with Salsa
 ///
 /// We store a hash of the classes for change detection, and the actual
@@ -29,15 +43,19 @@ pub struct ClassExtractionResult {
 /// classes are retrieved separately via `get_extracted_classes`.
 #[salsa::tracked]
 pub fn extract_classes(db: &dyn Db, file: SourceFile) -> ClassExtractionResult {
+    let content = file.content(db);
     let lang_id = file.language_id(db);
+    let file_id = file.file_id(db).clone();
+    let classes = compute_extracted_classes(db, file, lang_id.as_ref());
 
-    let classes = if lang_id.as_ref() == "java" {
-        crate::salsa_queries::java::parse_java_classes(db, file)
-    } else if lang_id.as_ref() == "kotlin" {
-        crate::salsa_queries::kotlin::parse_kotlin_classes(db, file)
-    } else {
-        vec![]
-    };
+    db.store_class_extraction(
+        file_id,
+        crate::salsa_db::ClassExtractionSnapshot {
+            content: Arc::from(content.as_str()),
+            language_id: Arc::clone(&lang_id),
+            classes: classes.clone(),
+        },
+    );
 
     // Compute hash for change detection
     let content_hash = {
@@ -64,15 +82,27 @@ pub fn extract_classes(db: &dyn Db, file: SourceFile) -> ClassExtractionResult {
 /// This is not a Salsa query - it directly parses the file.
 /// Call this after `extract_classes` to get the actual class data.
 pub fn get_extracted_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata> {
+    let content = file.content(db);
     let lang_id = file.language_id(db);
+    let file_id = file.file_id(db).clone();
 
-    if lang_id.as_ref() == "java" {
-        crate::salsa_queries::java::parse_java_classes(db, file)
-    } else if lang_id.as_ref() == "kotlin" {
-        crate::salsa_queries::kotlin::parse_kotlin_classes(db, file)
-    } else {
-        vec![]
+    if let Some(snapshot) = db.cached_class_extraction(&file_id)
+        && snapshot.content.as_ref() == content
+        && snapshot.language_id.as_ref() == lang_id.as_ref()
+    {
+        return snapshot.classes;
     }
+
+    let classes = compute_extracted_classes(db, file, lang_id.as_ref());
+    db.store_class_extraction(
+        file_id,
+        crate::salsa_db::ClassExtractionSnapshot {
+            content: Arc::from(content.as_str()),
+            language_id: lang_id,
+            classes: classes.clone(),
+        },
+    );
+    classes
 }
 
 /// Metadata for IndexView caching
@@ -333,6 +363,28 @@ mod tests {
         let result2 = extract_classes(&db, file);
         assert_eq!(result2.class_count, 2);
         assert_ne!(result1.content_hash, result2.content_hash);
+    }
+
+    #[test]
+    fn test_get_extracted_classes_uses_cached_snapshot() {
+        let db = Database::default();
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let file = SourceFile::new(
+            &db,
+            FileId::new(uri),
+            "public class Test {}".to_string(),
+            Arc::from("java"),
+        );
+
+        let _ = extract_classes(&db, file);
+        let cached = db
+            .cached_class_extraction(&file.file_id(&db))
+            .expect("class extraction cache should be populated");
+        assert_eq!(cached.classes.len(), 1);
+
+        let classes = get_extracted_classes(&db, file);
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].name.as_ref(), "Test");
     }
 
     #[test]

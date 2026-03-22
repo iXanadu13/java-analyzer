@@ -95,7 +95,7 @@ impl BucketIndex {
         inner.mro_cache.clear();
     }
 
-    pub fn update_source(&self, origin: ClassOrigin, classes: Vec<ClassMetadata>) {
+    pub fn update_source(&self, origin: ClassOrigin, classes: Vec<ClassMetadata>) -> bool {
         let mut filtered = Vec::new();
 
         for c in classes {
@@ -111,11 +111,16 @@ impl BucketIndex {
         }
 
         if filtered.is_empty() {
-            return;
+            return false;
+        }
+
+        if self.same_classes_for_origin(&origin, &filtered) {
+            return false;
         }
 
         self.remove_by_origin(&origin);
         self.add_classes(filtered);
+        true
     }
 
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
@@ -379,11 +384,11 @@ impl BucketIndex {
         Arc::clone(&inner.name_table)
     }
 
-    pub fn remove_by_origin(&self, origin: &ClassOrigin) {
+    pub fn remove_by_origin(&self, origin: &ClassOrigin) -> bool {
         let mut inner = self.inner.write();
         let internals = match inner.by_origin.remove(origin) {
             Some(v) => v,
-            None => return,
+            None => return false,
         };
 
         for internal in &internals {
@@ -416,6 +421,30 @@ impl BucketIndex {
 
         inner.mro_cache.clear();
         Self::rebuild_name_table_locked(&mut inner);
+        true
+    }
+
+    fn same_classes_for_origin(&self, origin: &ClassOrigin, classes: &[ClassMetadata]) -> bool {
+        let inner = self.inner.read();
+        let Some(internals) = inner.by_origin.get(origin) else {
+            return false;
+        };
+        if internals.len() != classes.len() {
+            return false;
+        }
+
+        let mut existing = internals
+            .iter()
+            .filter_map(|internal| inner.classes.get(internal).map(|meta| (**meta).clone()))
+            .collect::<Vec<_>>();
+        drop(inner);
+
+        existing.sort_unstable_by(|left, right| left.internal_name.cmp(&right.internal_name));
+
+        let mut incoming = classes.to_vec();
+        incoming.sort_unstable_by(|left, right| left.internal_name.cmp(&right.internal_name));
+
+        existing == incoming
     }
 
     fn rebuild_name_table_locked(inner: &mut BucketState) {

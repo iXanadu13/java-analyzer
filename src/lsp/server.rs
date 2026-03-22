@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -25,6 +25,8 @@ use crate::lsp::request_cancellation::{RequestCancellationManager, RequestFamily
 use crate::lsp::request_context::RequestContext;
 use crate::workspace::{Workspace, document::Document};
 
+const DID_CHANGE_REINDEX_DEBOUNCE: Duration = Duration::from_millis(75);
+
 pub struct Backend {
     client: Client,
     pub workspace: Arc<Workspace>,
@@ -34,6 +36,7 @@ pub struct Backend {
     pub decompiler_cache: crate::decompiler::cache::DecompilerCache,
     request_cancellation: Arc<RequestCancellationManager>,
     build_services: tokio::sync::RwLock<Vec<BuildIntegrationService>>,
+    pending_document_reindex_versions: Arc<dashmap::DashMap<Url, i32>>,
 }
 
 impl Backend {
@@ -52,6 +55,7 @@ impl Backend {
             decompiler_cache: DecompilerCache::new(cache_dir),
             request_cancellation: Arc::new(RequestCancellationManager::new()),
             build_services: tokio::sync::RwLock::new(Vec::new()),
+            pending_document_reindex_versions: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -168,14 +172,16 @@ impl Backend {
             .ok();
     }
 
-    fn reindex_document_from_salsa(&self, uri: &Url, reason: &'static str) -> Option<()> {
+    fn reindex_document_from_workspace(
+        workspace: &Workspace,
+        uri: &Url,
+        reason: &'static str,
+    ) -> Option<()> {
         let started = Instant::now();
-        let source = self.workspace.document_snapshot(uri)?;
-        let salsa_file = self
-            .workspace
-            .get_or_update_salsa_file_for_snapshot(source.as_ref());
+        let source = workspace.document_snapshot(uri)?;
+        let salsa_file = workspace.get_or_update_salsa_file_for_snapshot(source.as_ref());
         let sync_elapsed = started.elapsed();
-        let analysis = self.workspace.analysis_context_for_uri(uri);
+        let analysis = workspace.analysis_context_for_uri(uri);
         let uri_str = uri.to_string();
 
         let (
@@ -186,7 +192,7 @@ impl Backend {
             extract_materialize_elapsed,
             extraction_result,
         ) = {
-            let db = self.workspace.salsa_db.lock();
+            let db = workspace.salsa_db.lock();
             let parse_origin_before =
                 crate::salsa_queries::parse::cached_parse_tree_origin(&*db, salsa_file);
             let tracked_started = Instant::now();
@@ -229,8 +235,8 @@ impl Backend {
             "document indexing with Salsa"
         );
 
-        self.workspace.index.update(|index| {
-            index.update_source_in_context(analysis.module, analysis.source_root, origin, classes);
+        let index_updated = workspace.index.update(|index| {
+            index.update_source_in_context(analysis.module, analysis.source_root, origin, classes)
         });
         tracing::debug!(
             uri = %uri,
@@ -238,12 +244,70 @@ impl Backend {
             module = analysis.module.0,
             classpath = ?analysis.classpath,
             source_root = ?analysis.source_root.map(|id| id.0),
+            index_updated,
             index_update_ms = index_update_started.elapsed().as_secs_f64() * 1000.0,
             total_reindex_ms = started.elapsed().as_secs_f64() * 1000.0,
             "document indexing timing"
         );
 
         Some(())
+    }
+
+    fn reindex_document_from_salsa(&self, uri: &Url, reason: &'static str) -> Option<()> {
+        Self::reindex_document_from_workspace(self.workspace.as_ref(), uri, reason)
+    }
+
+    fn schedule_did_change_reindex(&self, uri: Url, version: i32) {
+        self.pending_document_reindex_versions
+            .insert(uri.clone(), version);
+
+        let workspace = Arc::clone(&self.workspace);
+        let pending_versions = Arc::clone(&self.pending_document_reindex_versions);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(DID_CHANGE_REINDEX_DEBOUNCE).await;
+
+            if pending_versions.get(&uri).map(|entry| *entry.value()) != Some(version) {
+                tracing::debug!(uri = %uri, version, "skipping stale debounced document reindex");
+                return;
+            }
+
+            if workspace.documents.with_doc(&uri, |doc| doc.version()) != Some(version) {
+                tracing::debug!(
+                    uri = %uri,
+                    version,
+                    "skipping debounced document reindex due to document version mismatch"
+                );
+                return;
+            }
+
+            let uri_for_reindex = uri.clone();
+            let workspace_for_reindex = Arc::clone(&workspace);
+            let reindex_result = tokio::task::spawn_blocking(move || {
+                Self::reindex_document_from_workspace(
+                    workspace_for_reindex.as_ref(),
+                    &uri_for_reindex,
+                    "did_change_debounced",
+                )
+            })
+            .await;
+
+            match reindex_result {
+                Ok(Some(())) => {
+                    tracing::debug!(uri = %uri, version, "completed debounced document reindex");
+                }
+                Ok(None) => {
+                    tracing::debug!(uri = %uri, version, "debounced document reindex skipped");
+                }
+                Err(error) => {
+                    tracing::error!(%error, uri = %uri, version, "debounced document reindex task panicked");
+                }
+            }
+
+            if pending_versions.get(&uri).map(|entry| *entry.value()) == Some(version) {
+                pending_versions.remove(&uri);
+            }
+        });
     }
 }
 
@@ -474,10 +538,7 @@ impl LanguageServer for Backend {
             return;
         }
 
-        self.reindex_document_from_salsa(uri, "did_change");
-
-        self.client.semantic_tokens_refresh().await.ok();
-        self.notify_build_file_change(uri).await;
+        self.schedule_did_change_reindex(uri.clone(), params.text_document.version);
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {

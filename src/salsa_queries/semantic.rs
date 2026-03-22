@@ -102,10 +102,10 @@ pub fn extract_java_current_class_members_from_source(
     };
 
     let root = tree.root_node();
-    let content = file.content(db);
+    let content: Arc<str> = Arc::from(file.content(db).as_str());
     let name_table = resolve_name_table_for_file(db, file);
     let ctx = JavaContextExtractor::new_with_overview(
-        content.as_str().to_owned(),
+        Arc::clone(&content),
         cursor_offset,
         name_table.clone(),
     );
@@ -255,7 +255,7 @@ pub fn extract_java_flow_type_overrides(
 ) -> Arc<Vec<FlowTypeOverrideData>> {
     use crate::language::java::{flow, scope};
 
-    let content = file.content(db);
+    let content: Arc<str> = Arc::from(file.content(db).as_str());
     let language_id = file.language_id(db);
     if language_id.as_ref() != "java" {
         return Arc::new(vec![]);
@@ -267,7 +267,7 @@ pub fn extract_java_flow_type_overrides(
     let root = tree.root_node();
     let name_table = resolve_name_table_for_file(db, file);
     let ctx = JavaContextExtractor::new_with_overview(
-        content.to_string(),
+        Arc::clone(&content),
         cursor_offset,
         name_table.clone(),
     );
@@ -386,7 +386,7 @@ fn extract_root_recovery_locals(
 ) -> Vec<LocalVar> {
     use crate::language::java::scope;
 
-    let content = file.content(db);
+    let content: Arc<str> = Arc::from(file.content(db).as_str());
     let language_id = file.language_id(db);
     if language_id.as_ref() != "java" {
         return vec![];
@@ -398,7 +398,7 @@ fn extract_root_recovery_locals(
     let root = tree.root_node();
     let name_table = resolve_name_table_for_file(db, file);
     let ctx = JavaContextExtractor::new_with_overview(
-        content.to_string(),
+        Arc::clone(&content),
         cursor_offset,
         name_table.clone(),
     );
@@ -432,7 +432,7 @@ fn parse_method_locals(
 ) -> Vec<CachedMethodLocal> {
     use crate::language::java::scope;
 
-    let content = file.content(db);
+    let content: Arc<str> = Arc::from(file.content(db).as_str());
     let language_id = file.language_id(db);
 
     // Only handle Java for now
@@ -449,7 +449,7 @@ fn parse_method_locals(
 
     let name_table = resolve_name_table_for_file(db, file);
     let ctx = JavaContextExtractor::new_with_overview(
-        content.to_string(),
+        Arc::clone(&content),
         method_start,
         name_table.clone(),
     );

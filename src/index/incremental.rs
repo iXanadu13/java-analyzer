@@ -171,6 +171,7 @@ impl SourceParseSession {
             };
             let file_id = file.file_id(&self.db).clone();
             self.db.remove_parse_tree(&file_id);
+            self.db.remove_class_extraction(&file_id);
         }
     }
 

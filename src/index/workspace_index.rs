@@ -75,10 +75,13 @@ impl WorkspaceIndex {
         scope: IndexScope,
         origin: ClassOrigin,
         classes: Vec<ClassMetadata>,
-    ) {
+    ) -> bool {
         let module = self.ensure_module(scope.module, default_module_name(scope.module));
-        module.source.update_source(origin, classes);
-        self.invalidate_analysis_caches();
+        let changed = module.source.update_source(origin, classes);
+        if changed {
+            self.invalidate_analysis_caches();
+        }
+        changed
     }
 
     pub fn update_source_in_context(
@@ -87,16 +90,22 @@ impl WorkspaceIndex {
         source_root: Option<SourceRootId>,
         origin: ClassOrigin,
         classes: Vec<ClassMetadata>,
-    ) {
+    ) -> bool {
         let module = self.ensure_module(module, default_module_name(module));
-        module.update_source_in_root(source_root, origin, classes);
-        self.invalidate_analysis_caches();
+        let changed = module.update_source_in_root(source_root, origin, classes);
+        if changed {
+            self.invalidate_analysis_caches();
+        }
+        changed
     }
 
-    pub fn remove_source_origin(&self, scope: IndexScope, origin: &ClassOrigin) {
+    pub fn remove_source_origin(&self, scope: IndexScope, origin: &ClassOrigin) -> bool {
         let module = self.ensure_module(scope.module, default_module_name(scope.module));
-        module.source.remove_by_origin(origin);
-        self.invalidate_analysis_caches();
+        let changed = module.source.remove_by_origin(origin);
+        if changed {
+            self.invalidate_analysis_caches();
+        }
+        changed
     }
 
     pub fn remove_source_origin_in_context(
@@ -104,10 +113,13 @@ impl WorkspaceIndex {
         module: ModuleId,
         source_root: Option<SourceRootId>,
         origin: &ClassOrigin,
-    ) {
+    ) -> bool {
         let module = self.ensure_module(module, default_module_name(module));
-        module.remove_source_origin_in_root(source_root, origin);
-        self.invalidate_analysis_caches();
+        let changed = module.remove_source_origin_in_root(source_root, origin);
+        if changed {
+            self.invalidate_analysis_caches();
+        }
+        changed
     }
 
     pub fn add_jdk_classes(&self, classes: Vec<ClassMetadata>) {
@@ -532,5 +544,49 @@ mod tests {
         );
         assert!(names3.exists("pkg/Alpha"));
         assert!(names3.exists("pkg/Beta"));
+    }
+
+    #[test]
+    fn test_identical_source_update_does_not_bump_workspace_version() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let origin = ClassOrigin::SourceFile(Arc::from("file:///pkg/Alpha.java"));
+
+        assert!(
+            idx.update_source(
+                scope,
+                origin.clone(),
+                vec![make_class("pkg/Alpha", origin.clone())]
+            ),
+            "initial source publish should mutate the workspace index",
+        );
+        let version_after_first_publish = idx.version();
+
+        assert!(
+            !idx.update_source(
+                scope,
+                origin.clone(),
+                vec![make_class("pkg/Alpha", origin.clone())],
+            ),
+            "re-publishing the same extracted classes should be a no-op",
+        );
+        assert_eq!(
+            idx.version(),
+            version_after_first_publish,
+            "workspace version should stay stable when the source structure is unchanged",
+        );
+
+        let mut changed = make_class("pkg/Alpha", origin.clone());
+        changed.methods.push(make_method("ping", "()V"));
+        assert!(
+            idx.update_source(scope, origin, vec![changed]),
+            "structural source changes should still invalidate cached analysis views",
+        );
+        assert!(
+            idx.version() > version_after_first_publish,
+            "workspace version should advance once the indexed class surface changes",
+        );
     }
 }

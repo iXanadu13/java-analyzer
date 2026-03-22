@@ -41,6 +41,22 @@ pub trait Db: salsa::Database {
 
     /// Clear a file's parse snapshot when the file leaves the Salsa workspace.
     fn remove_parse_tree(&self, file_id: &crate::salsa_db::FileId);
+
+    /// Latest materialized class extraction for a file.
+    fn cached_class_extraction(
+        &self,
+        file_id: &crate::salsa_db::FileId,
+    ) -> Option<crate::salsa_db::ClassExtractionSnapshot>;
+
+    /// Store the most recent class extraction for a file.
+    fn store_class_extraction(
+        &self,
+        file_id: crate::salsa_db::FileId,
+        snapshot: crate::salsa_db::ClassExtractionSnapshot,
+    );
+
+    /// Clear a file's class extraction snapshot when it leaves the Salsa workspace.
+    fn remove_class_extraction(&self, file_id: &crate::salsa_db::FileId);
 }
 
 // Re-export commonly used types and functions

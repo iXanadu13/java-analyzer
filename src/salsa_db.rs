@@ -103,6 +103,15 @@ pub struct ParseTreeSnapshot {
     pub origin: ParseTreeOrigin,
 }
 
+/// Latest extracted class snapshot retained to avoid reparsing when callers
+/// need both Salsa change tracking and the materialized class list.
+#[derive(Clone)]
+pub struct ClassExtractionSnapshot {
+    pub content: Arc<str>,
+    pub language_id: Arc<str>,
+    pub classes: Vec<crate::index::ClassMetadata>,
+}
+
 /// Tracked: Parsed syntax tree metadata for a source file
 ///
 /// We store metadata about the tree rather than the tree itself,
@@ -173,6 +182,7 @@ pub struct Database {
     /// Reference to the workspace index for queries
     workspace_index: Option<WorkspaceIndexHandle>,
     parse_trees: parking_lot::RwLock<HashMap<FileId, ParseTreeSnapshot>>,
+    class_extractions: parking_lot::RwLock<HashMap<FileId, ClassExtractionSnapshot>>,
 }
 
 impl Database {
@@ -182,6 +192,7 @@ impl Database {
             storage: Default::default(),
             workspace_index: Some(workspace_index),
             parse_trees: Default::default(),
+            class_extractions: Default::default(),
         }
     }
 
@@ -195,6 +206,18 @@ impl Database {
 
     pub fn remove_parse_tree(&self, file_id: &FileId) {
         self.parse_trees.write().remove(file_id);
+    }
+
+    pub fn cached_class_extraction(&self, file_id: &FileId) -> Option<ClassExtractionSnapshot> {
+        self.class_extractions.read().get(file_id).cloned()
+    }
+
+    pub fn store_class_extraction(&self, file_id: FileId, snapshot: ClassExtractionSnapshot) {
+        self.class_extractions.write().insert(file_id, snapshot);
+    }
+
+    pub fn remove_class_extraction(&self, file_id: &FileId) {
+        self.class_extractions.write().remove(file_id);
     }
 }
 
@@ -225,6 +248,18 @@ impl crate::salsa_queries::Db for Database {
 
     fn remove_parse_tree(&self, file_id: &FileId) {
         Database::remove_parse_tree(self, file_id);
+    }
+
+    fn cached_class_extraction(&self, file_id: &FileId) -> Option<ClassExtractionSnapshot> {
+        Database::cached_class_extraction(self, file_id)
+    }
+
+    fn store_class_extraction(&self, file_id: FileId, snapshot: ClassExtractionSnapshot) {
+        Database::store_class_extraction(self, file_id, snapshot);
+    }
+
+    fn remove_class_extraction(&self, file_id: &FileId) {
+        Database::remove_class_extraction(self, file_id);
     }
 }
 

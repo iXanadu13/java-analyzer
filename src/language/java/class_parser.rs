@@ -149,7 +149,7 @@ pub fn extract_java_classes_from_root(
     let parsing_view = if let Some(view) = view.cloned() {
         view
     } else {
-        source_discovery_view(source, origin)
+        source_discovery_view_from_root(source, root, origin)
     };
 
     let mut base_type_ctx =
@@ -183,9 +183,15 @@ pub fn extract_java_classes_from_root(
     results
 }
 
-fn source_discovery_view(source: &str, origin: &ClassOrigin) -> IndexView {
+fn source_discovery_view_from_root(
+    source: &str,
+    root: Node<'_>,
+    origin: &ClassOrigin,
+) -> IndexView {
     let bucket = Arc::new(BucketIndex::new());
-    let seed_classes = discover_java_names(source)
+    // Reuse the current syntax tree instead of reparsing the same source text
+    // just to seed a discovery view for local type refinement.
+    let seed_classes = discover_java_names_from_root(source, root)
         .into_iter()
         .map(|internal_name| ClassMetadata {
             package: internal_name

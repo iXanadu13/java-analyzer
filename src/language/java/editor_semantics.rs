@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -22,7 +24,8 @@ use crate::semantic::types::{
 use crate::semantic::{LocalVar, SemanticContext};
 use crate::{
     language::java::completion_context::resolve_source_like_type_with_scope,
-    semantic::types::symbol_resolver::SymbolResolver, workspace::Workspace,
+    semantic::types::symbol_resolver::SymbolResolver,
+    workspace::{Workspace, document::SemanticContextCacheKey},
 };
 
 #[derive(Debug, Clone)]
@@ -143,6 +146,7 @@ pub(crate) struct JavaSemanticRequestContext<'a> {
     view: &'a IndexView,
     enricher: ContextEnricher<'a>,
     request: Option<Arc<RequestContext>>,
+    semantic_context_cache: RefCell<HashMap<usize, Option<SemanticContext>>>,
 }
 
 impl<'a> JavaSemanticRequestContext<'a> {
@@ -160,6 +164,7 @@ impl<'a> JavaSemanticRequestContext<'a> {
             view,
             enricher: ContextEnricher::new(view),
             request,
+            semantic_context_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -182,6 +187,9 @@ impl<'a> JavaSemanticRequestContext<'a> {
         &self,
         offset: usize,
     ) -> RequestResult<Option<SemanticContext>> {
+        if let Some(cached) = self.semantic_context_cache.borrow().get(&offset).cloned() {
+            return Ok(cached);
+        }
         self.check_cancelled("inlay.semantic_context.before_extract")?;
         if let Some(metrics) = self.metrics() {
             metrics.record_semantic_context_lookup("inlay_semantic_context", offset);
@@ -215,7 +223,11 @@ impl<'a> JavaSemanticRequestContext<'a> {
             );
         }
         self.check_cancelled("inlay.semantic_context.after_enrich")?;
-        Ok(Some(ctx))
+        let cached = Some(ctx.clone());
+        self.semantic_context_cache
+            .borrow_mut()
+            .insert(offset, cached.clone());
+        Ok(cached)
     }
 
     fn indexed_source_class_covers_file(
@@ -242,6 +254,50 @@ impl<'a> JavaSemanticRequestContext<'a> {
         salsa_file: crate::salsa_db::SourceFile,
         offset: usize,
     ) -> RequestResult<Option<SemanticContext>> {
+        if let Some(cached) = self.semantic_context_cache.borrow().get(&offset).cloned() {
+            return Ok(cached);
+        }
+
+        let (uri, document_version, cache_key) = {
+            let db = workspace.salsa_db.lock();
+            let uri = salsa_file.file_id(&*db).uri().clone();
+            let document_version = workspace.documents.with_doc(&uri, |doc| doc.version());
+            let analysis = workspace.analysis_context_for_uri(&uri);
+            let cache_key = document_version.map(|document_version| SemanticContextCacheKey {
+                document_version,
+                workspace_version: workspace.index.load().version(),
+                module: analysis.module,
+                classpath: analysis.classpath,
+                source_root: analysis.source_root,
+                offset,
+                trigger: None,
+            });
+            (uri, document_version, cache_key)
+        };
+
+        if let Some(cache_key) = cache_key
+            && let Some(cached) = workspace
+                .documents
+                .with_doc(&uri, |doc| doc.cached_semantic_context(&cache_key))
+                .flatten()
+        {
+            let mut ctx = (*cached).clone();
+            let db = workspace.salsa_db.lock();
+            if self.indexed_source_class_covers_file(
+                &*db,
+                salsa_file,
+                ctx.enclosing_internal_name.as_ref(),
+            ) {
+                ctx.current_class_members.clear();
+            }
+            drop(db);
+            let cached = Some(ctx);
+            self.semantic_context_cache
+                .borrow_mut()
+                .insert(offset, cached.clone());
+            return Ok(cached);
+        }
+
         self.check_cancelled("inlay.salsa_context.before_extract")?;
         if let Some(metrics) = self.metrics() {
             metrics.record_semantic_context_lookup("inlay_scope_context", offset);
@@ -263,6 +319,7 @@ impl<'a> JavaSemanticRequestContext<'a> {
         ) else {
             return Ok(None);
         };
+        let raw_ctx = ctx.clone();
         if self.indexed_source_class_covers_file(
             &*db,
             salsa_file,
@@ -279,6 +336,22 @@ impl<'a> JavaSemanticRequestContext<'a> {
             );
         }
         self.check_cancelled("inlay.salsa_context.after_extract")?;
+        if let (Some(document_version), Some(cache_key)) = (document_version, cache_key) {
+            let cached = Arc::new(raw_ctx);
+            workspace.documents.with_doc_mut(&uri, |doc| {
+                if doc.version() == document_version {
+                    doc.cache_semantic_context(cache_key, Arc::clone(&cached));
+                }
+            });
+            self.semantic_context_cache
+                .borrow_mut()
+                .insert(offset, Some(ctx.clone()));
+            return Ok(Some(ctx));
+        }
+
+        self.semantic_context_cache
+            .borrow_mut()
+            .insert(offset, Some(ctx.clone()));
         Ok(Some(ctx))
     }
 }
