@@ -1,6 +1,6 @@
 use rust_asm::constants::{ACC_ANNOTATION, ACC_ENUM, ACC_INTERFACE, ACC_PUBLIC, ACC_SUPER};
 use std::sync::Arc;
-use tree_sitter::{Node, Query};
+use tree_sitter::{Node, Query, Tree};
 use tree_sitter_utils::{
     Handler, Input, NodePredicate,
     constructors::Always,
@@ -31,6 +31,10 @@ use crate::{
     semantic::{context::CurrentClassMember, types::generics::parse_class_type_parameters},
 };
 
+#[cfg_attr(
+    not(test),
+    deprecated(note = "Use salsa_queries::parse::parse_tree + extract_java_classes_from_tree")
+)]
 pub fn parse_java_source(
     source: &str,
     origin: ClassOrigin,
@@ -39,59 +43,54 @@ pub fn parse_java_source(
     parse_java_source_with_view(source, origin, name_table, None)
 }
 
+#[cfg_attr(
+    not(test),
+    deprecated(note = "Use salsa_queries::parse::parse_tree + extract_java_classes_from_tree")
+)]
 pub fn parse_java_source_with_view(
     source: &str,
     origin: ClassOrigin,
     name_table: Option<Arc<crate::index::NameTable>>,
     view: Option<&IndexView>,
 ) -> Vec<ClassMetadata> {
-    let ctx = JavaContextExtractor::for_indexing_with_overview(source, name_table.clone());
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => return vec![],
     };
-    let root = tree.root_node();
+    extract_java_classes_from_tree(source, &tree, &origin, name_table, view)
+}
 
+pub fn extract_java_classes_from_tree(
+    source: &str,
+    tree: &Tree,
+    origin: &ClassOrigin,
+    name_table: Option<Arc<crate::index::NameTable>>,
+    view: Option<&IndexView>,
+) -> Vec<ClassMetadata> {
+    extract_java_classes_from_root(source, tree.root_node(), origin, name_table, view)
+}
+
+pub fn extract_java_classes_from_root(
+    source: &str,
+    root: Node<'_>,
+    origin: &ClassOrigin,
+    name_table: Option<Arc<crate::index::NameTable>>,
+    view: Option<&IndexView>,
+) -> Vec<ClassMetadata> {
+    let ctx = JavaContextExtractor::for_indexing_with_overview(source, name_table.clone());
     let package = extract_package(&ctx, root);
     let imports = crate::language::java::scope::extract_imports(&ctx, root);
-    let parsing_view = if let Some(view) = view {
-        Some(view.clone())
+    let should_refine = view.is_none();
+    let parsing_view = if let Some(view) = view.cloned() {
+        view
     } else {
-        let bucket = Arc::new(BucketIndex::new());
-        let seed_classes = discover_java_names(source)
-            .into_iter()
-            .map(|internal_name| ClassMetadata {
-                package: internal_name
-                    .rsplit_once('/')
-                    .map(|(pkg, _)| Arc::from(pkg)),
-                name: Arc::from(
-                    internal_name
-                        .rsplit(['/', '$'])
-                        .next()
-                        .unwrap_or(internal_name.as_ref()),
-                ),
-                internal_name,
-                super_name: None,
-                interfaces: vec![],
-                annotations: vec![],
-                methods: vec![],
-                fields: vec![],
-                access_flags: 0,
-                generic_signature: None,
-                inner_class_of: None,
-                origin: origin.clone(),
-            })
-            .collect::<Vec<_>>();
-        bucket.add_classes(seed_classes);
-        Some(IndexView::new(smallvec::smallvec![bucket]))
+        source_discovery_view(source, origin)
     };
 
     let mut base_type_ctx =
         SourceTypeCtx::from_overview(package.clone(), imports, name_table.clone());
-    if let Some(view) = parsing_view.clone() {
-        base_type_ctx = base_type_ctx.with_view(view);
-    }
+    base_type_ctx = base_type_ctx.with_view(parsing_view.clone());
     let type_ctx = Arc::new(base_type_ctx);
     let mut results = Vec::new();
     collect_java_classes(
@@ -113,11 +112,56 @@ pub fn parse_java_source_with_view(
         results.push(meta);
     }
 
-    if parsing_view.is_none() {
+    if should_refine {
         refine_source_metadata_with_index_view(&mut results, name_table);
     }
 
     results
+}
+
+fn source_discovery_view(source: &str, origin: &ClassOrigin) -> IndexView {
+    let bucket = Arc::new(BucketIndex::new());
+    let seed_classes = discover_java_names(source)
+        .into_iter()
+        .map(|internal_name| ClassMetadata {
+            package: internal_name
+                .rsplit_once('/')
+                .map(|(pkg, _)| Arc::from(pkg)),
+            name: Arc::from(
+                internal_name
+                    .rsplit(['/', '$'])
+                    .next()
+                    .unwrap_or(internal_name.as_ref()),
+            ),
+            internal_name,
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: 0,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: origin.clone(),
+        })
+        .collect::<Vec<_>>();
+    bucket.add_classes(seed_classes);
+    IndexView::new(smallvec::smallvec![bucket])
+}
+
+pub fn extract_package_from_root(source: &str, root: Node<'_>) -> Option<Arc<str>> {
+    let ctx = JavaContextExtractor::for_indexing(source, None);
+    extract_package(&ctx, root)
+}
+
+pub fn extract_imports_from_root(source: &str, root: Node<'_>) -> Vec<Arc<str>> {
+    let ctx = JavaContextExtractor::for_indexing(source, None);
+    crate::language::java::scope::extract_imports(&ctx, root)
+}
+
+pub fn extract_static_imports_from_root(source: &str, root: Node<'_>) -> Vec<Arc<str>> {
+    let ctx = JavaContextExtractor::for_indexing(source, None);
+    crate::language::java::scope::extract_static_imports(&ctx, root)
 }
 
 #[cfg(test)]
@@ -2209,23 +2253,19 @@ fn test_nested_class_with_dollar_in_name() {
 ///
 /// This is a convenience wrapper for Salsa queries.
 pub fn extract_package_from_source(source: &str) -> Option<Arc<str>> {
-    let ctx = JavaContextExtractor::for_indexing(source, None);
     let mut parser = make_java_parser();
     let tree = parser.parse(source, None)?;
-    let root = tree.root_node();
-    extract_package(&ctx, root)
+    extract_package_from_root(source, tree.root_node())
 }
 
 /// Extract import declarations from Java source code
 ///
 /// This is a convenience wrapper for Salsa queries.
 pub fn extract_imports_from_source(source: &str) -> Vec<Arc<str>> {
-    let ctx = JavaContextExtractor::for_indexing(source, None);
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => return vec![],
     };
-    let root = tree.root_node();
-    crate::language::java::scope::extract_imports(&ctx, root)
+    extract_imports_from_root(source, tree.root_node())
 }

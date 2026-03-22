@@ -116,7 +116,8 @@ pub fn extract_package(db: &dyn Db, file: SourceFile) -> Option<Arc<str>> {
     // For Java files, extract package
     if lang_id.as_ref() == "java" {
         let content = file.content(db);
-        crate::language::java::class_parser::extract_package_from_source(content)
+        let tree = parse_tree(db, file)?;
+        crate::language::java::class_parser::extract_package_from_root(content, tree.root_node())
     } else if lang_id.as_ref() == "kotlin" {
         super::kotlin::extract_kotlin_package(db, file)
     } else {
@@ -133,7 +134,14 @@ pub fn extract_imports(db: &dyn Db, file: SourceFile) -> Arc<Vec<Arc<str>>> {
 
     let imports = if lang_id.as_ref() == "java" {
         let content = file.content(db);
-        crate::language::java::class_parser::extract_imports_from_source(content)
+        if let Some(tree) = parse_tree(db, file) {
+            crate::language::java::class_parser::extract_imports_from_root(
+                content,
+                tree.root_node(),
+            )
+        } else {
+            vec![]
+        }
     } else if lang_id.as_ref() == "kotlin" {
         super::kotlin::extract_kotlin_imports(db, file)
     } else {

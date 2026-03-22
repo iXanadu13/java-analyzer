@@ -18,7 +18,7 @@ use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::language::{ClassifiedToken, ParseEnv};
 use crate::request_metrics::RequestMetrics;
-use crate::semantic::{CursorLocation, SemanticContext};
+use crate::semantic::SemanticContext;
 use crate::workspace::SourceFile;
 use ropey::Rope;
 use smallvec::smallvec;
@@ -27,7 +27,6 @@ use tower_lsp::lsp_types::{
     SemanticTokenType,
 };
 use tree_sitter::{Node, Parser};
-use tree_sitter_utils::traversal::find_node_by_offset;
 
 pub mod class_parser;
 pub mod completion;

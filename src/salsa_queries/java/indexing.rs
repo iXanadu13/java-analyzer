@@ -13,8 +13,13 @@ pub fn parse_java_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata> {
     let file_id = file.file_id(db);
     let name_table = get_name_table_for_java_file(db, file);
     let origin = crate::index::ClassOrigin::SourceFile(Arc::from(file_id.as_str()));
+    let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file) else {
+        return vec![];
+    };
 
-    crate::language::java::class_parser::parse_java_source(content, origin, name_table)
+    crate::language::java::class_parser::extract_java_classes_from_tree(
+        content, &tree, &origin, name_table, None,
+    )
 }
 
 pub(super) fn get_name_table_for_java_file(
@@ -36,27 +41,28 @@ pub(super) fn get_name_table_for_java_file(
 }
 
 pub fn extract_java_package(db: &dyn Db, file: SourceFile) -> Option<Arc<str>> {
-    let content = file.content(db);
-    crate::language::java::class_parser::extract_package_from_source(content)
+    crate::salsa_queries::parse::extract_package(db, file)
 }
 
 pub fn extract_java_imports(db: &dyn Db, file: SourceFile) -> Vec<Arc<str>> {
-    let content = file.content(db);
-    crate::language::java::class_parser::extract_imports_from_source(content)
+    crate::salsa_queries::parse::extract_imports(db, file)
+        .as_ref()
+        .clone()
 }
 
 pub fn extract_java_static_imports(db: &dyn Db, file: SourceFile) -> Vec<Arc<str>> {
     let content = file.content(db);
-    extract_java_static_imports_from_source(content)
+    let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file) else {
+        return vec![];
+    };
+    crate::language::java::class_parser::extract_static_imports_from_root(content, tree.root_node())
 }
 
 pub fn extract_java_static_imports_from_source(source: &str) -> Vec<Arc<str>> {
-    let ctx = crate::language::java::JavaContextExtractor::for_indexing(source, None);
     let mut parser = crate::language::java::make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => return vec![],
     };
-    let root = tree.root_node();
-    crate::language::java::scope::extract_static_imports(&ctx, root)
+    crate::language::java::class_parser::extract_static_imports_from_root(source, tree.root_node())
 }
