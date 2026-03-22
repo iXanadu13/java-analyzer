@@ -38,7 +38,7 @@ lru = "0.16.3"
 
 [dev-dependencies]
 insta = { version = "1", features = ["ron"] }
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "salsa_performance"
