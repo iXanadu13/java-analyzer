@@ -111,9 +111,8 @@ impl<'a> PreparedRequest<'a> {
         };
         request.check_cancelled("request_setup.after_ensure_tree")?;
 
-        let analysis = workspace.analysis_context_for_uri(uri);
+        let (analysis, inferred_package, _) = workspace.load_analysis_state_for_uri(uri);
         let scope = analysis.scope();
-        let inferred_package = workspace.infer_java_package_for_uri(uri, analysis.source_root);
 
         let view = {
             request.check_cancelled("request_setup.before_index_view")?;

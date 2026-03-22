@@ -1,5 +1,4 @@
 use anyhow::Result;
-use parking_lot::RwLock as ParkingRwLock;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
@@ -52,7 +51,8 @@ impl AnalysisContext {
 
 pub struct Workspace {
     pub documents: DocumentStore,
-    /// Workspace index shared between request-time readers and write-side rebuilds.
+    /// Published workspace state. Reads load the current index snapshot, and
+    /// full workspace-model publishes swap index+model together.
     pub index: WorkspaceIndexHandle,
     /// Salsa database for incremental computation
     pub salsa_db: Arc<parking_lot::Mutex<SalsaDatabase>>,
@@ -63,7 +63,6 @@ pub struct Workspace {
     /// IntelliJ-style semantic cache for parsed locals and members
     /// Keyed by content hash, automatically invalidated when content changes
     semantic_cache: Arc<parking_lot::RwLock<SemanticCache>>,
-    model: ParkingRwLock<Option<WorkspaceModelSnapshot>>,
     jdk_classes: RwLock<Vec<ClassMetadata>>,
 }
 
@@ -82,7 +81,6 @@ impl Workspace {
             salsa_files: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             indexed_salsa_uris: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             semantic_cache: Arc::new(parking_lot::RwLock::new(SemanticCache::default())),
-            model: ParkingRwLock::new(None),
             jdk_classes: RwLock::new(Vec::new()),
         }
     }
@@ -190,10 +188,33 @@ impl Workspace {
             .scope()
     }
 
+    pub(crate) fn load_analysis_state_for_uri(
+        &self,
+        uri: &Url,
+    ) -> (AnalysisContext, Option<Arc<str>>, Arc<WorkspaceIndex>) {
+        let (index, model) = self.index.snapshot();
+        let analysis = Self::resolve_analysis_context_for_snapshot(
+            model.as_ref(),
+            uri.to_file_path().ok().as_deref(),
+        );
+        let inferred_package =
+            Self::infer_java_package_for_uri_with_model(uri, analysis.source_root, model.as_ref());
+        (analysis, inferred_package, index)
+    }
+
     pub fn infer_java_package_for_uri(
         &self,
         uri: &Url,
         source_root: Option<SourceRootId>,
+    ) -> Option<Arc<str>> {
+        let (_, model) = self.index.snapshot();
+        Self::infer_java_package_for_uri_with_model(uri, source_root, model.as_ref())
+    }
+
+    fn infer_java_package_for_uri_with_model(
+        uri: &Url,
+        source_root: Option<SourceRootId>,
+        model: Option<&WorkspaceModelSnapshot>,
     ) -> Option<Arc<str>> {
         let Ok(path) = uri.to_file_path() else {
             tracing::debug!(
@@ -205,7 +226,7 @@ impl Workspace {
             return None;
         };
 
-        let Some(model) = self.model.read().clone() else {
+        let Some(model) = model else {
             tracing::debug!(
                 uri = %uri,
                 path = %path.display(),
@@ -244,7 +265,7 @@ impl Workspace {
     }
 
     pub fn analysis_context_for_uri(&self, uri: &Url) -> AnalysisContext {
-        let ctx = self.resolve_analysis_context_for_path(uri.to_file_path().ok().as_deref());
+        let (ctx, _, _) = self.load_analysis_state_for_uri(uri);
         tracing::debug!(
             uri = %uri,
             module = ctx.module.0,
@@ -268,7 +289,7 @@ impl Workspace {
     }
 
     pub async fn current_model(&self) -> Option<WorkspaceModelSnapshot> {
-        self.model.read().clone()
+        self.index.current_model()
     }
 
     pub async fn set_jdk_classes(&self, classes: Vec<ClassMetadata>) {
@@ -466,8 +487,7 @@ impl Workspace {
         }
 
         self.prune_indexed_salsa_files(&current_indexed_uris);
-        self.index.replace(new_index);
-        *self.model.write() = Some(snapshot.clone());
+        self.index.replace(new_index, Some(snapshot.clone()));
 
         info!(
             generation = snapshot.generation,
@@ -480,9 +500,11 @@ impl Workspace {
     }
 
     pub async fn mark_model_stale(&self) {
-        if let Some(model) = self.model.write().as_mut() {
-            model.freshness = crate::build_integration::ModelFreshness::Stale;
-        }
+        self.index.update_model(|model| {
+            if let Some(model) = model.as_mut() {
+                model.freshness = crate::build_integration::ModelFreshness::Stale;
+            }
+        });
     }
 
     pub async fn index_fallback_root(&self, root: PathBuf) -> Result<()> {
@@ -521,8 +543,7 @@ impl Workspace {
             index.update_source(scope, origin, classes);
         }
         self.prune_indexed_salsa_files(&current_indexed_uris);
-        self.index.replace(index);
-        *self.model.write() = None;
+        self.index.replace(index, None);
         Ok(())
     }
 
@@ -779,7 +800,8 @@ fn overlay_open_document_inputs(
 
 impl Workspace {
     fn resolve_analysis_context_for_path(&self, path: Option<&Path>) -> AnalysisContext {
-        Self::resolve_analysis_context_for_snapshot(self.model.read().as_ref(), path)
+        let (_, model) = self.index.snapshot();
+        Self::resolve_analysis_context_for_snapshot(model.as_ref(), path)
     }
 
     fn resolve_analysis_context_for_snapshot(
@@ -846,7 +868,7 @@ mod tests {
     #[test]
     fn managed_workspace_prefers_imported_source_root_context() {
         let workspace = Workspace::new();
-        *workspace.model.write() = Some(WorkspaceModelSnapshot {
+        workspace.index.replace_model(Some(WorkspaceModelSnapshot {
             generation: 1,
             root: WorkspaceRoot {
                 path: PathBuf::from("/workspace"),
@@ -884,7 +906,7 @@ mod tests {
             },
             freshness: ModelFreshness::Fresh,
             fidelity: ModelFidelity::Full,
-        });
+        }));
 
         let test_file = PathBuf::from("/workspace/app/src/test/java/demo/AppTest.java");
         let ctx = workspace.resolve_analysis_context_for_path(Some(&test_file));
@@ -897,7 +919,7 @@ mod tests {
     #[test]
     fn infer_java_package_for_uri_uses_managed_source_root() {
         let workspace = Workspace::new();
-        *workspace.model.write() = Some(WorkspaceModelSnapshot {
+        workspace.index.replace_model(Some(WorkspaceModelSnapshot {
             generation: 1,
             root: WorkspaceRoot {
                 path: PathBuf::from("/workspace"),
@@ -927,7 +949,7 @@ mod tests {
             },
             freshness: ModelFreshness::Fresh,
             fidelity: ModelFidelity::Full,
-        });
+        }));
 
         let uri = Url::parse("file:///workspace/app/src/main/java/org/example/foo/Bar.java")
             .expect("valid uri");
