@@ -6,7 +6,7 @@ use crate::completion::scorer::AccessFilter;
 use crate::completion::{CandidateKind, CompletionCandidate, fuzzy};
 use crate::language::java::expression_typing;
 use crate::language::java::render;
-use crate::language::java::super_support::is_super_receiver_expr;
+use crate::language::java::super_support::{is_super_receiver_expr, resolve_direct_super_type};
 use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::semantic::context::{CursorLocation, SemanticContext};
 use crate::{
@@ -610,6 +610,18 @@ fn resolve_receiver_type(
         locals_count = ctx.local_variables.len(),
         "resolve_receiver_type"
     );
+
+    if expr == "this" {
+        let r = ctx.enclosing_internal_name.clone();
+        tracing::debug!(?r, "this -> enclosing");
+        return r.map(TypeName::from);
+    }
+
+    if is_super_receiver_expr(expr) {
+        let r = resolve_direct_super_type(ctx, index);
+        tracing::debug!(?r, "super -> direct superclass");
+        return r;
+    }
 
     if expr.trim().is_empty() {
         let r = ctx.enclosing_internal_name.clone();
