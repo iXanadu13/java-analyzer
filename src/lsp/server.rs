@@ -182,6 +182,7 @@ impl Backend {
         let salsa_file = workspace.get_or_update_salsa_file_for_snapshot(source.as_ref());
         let sync_elapsed = started.elapsed();
         let analysis = workspace.analysis_context_for_uri(uri);
+        let index_snapshot = workspace.index.load();
         let uri_str = uri.to_string();
 
         let (
@@ -203,7 +204,14 @@ impl Backend {
             let parse_origin_after =
                 crate::salsa_queries::parse::cached_parse_tree_origin(&*db, salsa_file);
             let materialize_started = Instant::now();
-            let classes = crate::salsa_queries::index::get_extracted_classes(&*db, salsa_file);
+            let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
+            let classes = workspace.extract_salsa_classes_for_index_context(
+                &*db,
+                salsa_file,
+                &origin,
+                index_snapshot.as_ref(),
+                analysis,
+            );
             let extract_materialize_elapsed = materialize_started.elapsed();
             (
                 classes,
@@ -393,7 +401,7 @@ impl LanguageServer for Backend {
             .find(lang_id)
             .expect("resolved language must be registered");
 
-        info!(
+        tracing::info!(
             uri = %td.uri,
             reported_lang = %td.language_id,
             resolved_lang = lang_id,
@@ -411,6 +419,7 @@ impl LanguageServer for Backend {
             )));
 
         let mut parser = lang.make_parser();
+        // the old_tree param is ok to be none since this is the first time parsing the file.
         let tree = parser.parse(&td.text, None);
 
         self.workspace.documents.with_doc_mut(&td.uri, |doc| {

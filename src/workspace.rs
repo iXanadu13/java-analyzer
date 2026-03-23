@@ -478,6 +478,7 @@ impl Workspace {
                 Some(&snapshot),
                 uri.to_file_path().ok().as_deref(),
             );
+            let origin = ClassOrigin::SourceFile(Arc::from(uri.to_string().as_str()));
 
             // Get or create Salsa file for this document
             let salsa_file = self.get_or_create_salsa_file(&uri, &content, &language_id);
@@ -489,11 +490,11 @@ impl Workspace {
                 // Trigger parse query (memoized) - this tracks changes
                 let _result = crate::salsa_queries::index::extract_classes(&*db, salsa_file);
 
-                // Get the actual classes (not memoized, but fast)
-                crate::salsa_queries::index::get_extracted_classes(&*db, salsa_file)
+                self.extract_salsa_classes_for_index_context(
+                    &*db, salsa_file, &origin, &new_index, context,
+                )
             };
 
-            let origin = ClassOrigin::SourceFile(Arc::from(uri.to_string().as_str()));
             tracing::debug!(
                 uri = %uri,
                 module = context.module.0,
@@ -600,6 +601,35 @@ impl Workspace {
     pub fn get_salsa_file(&self, uri: &Url) -> Option<crate::salsa_db::SourceFile> {
         let files = self.salsa_files.read();
         files.get(uri).copied()
+    }
+
+    pub(crate) fn extract_salsa_classes_for_index_context(
+        &self,
+        db: &crate::salsa_db::Database,
+        salsa_file: crate::salsa_db::SourceFile,
+        origin: &ClassOrigin,
+        index: &WorkspaceIndex,
+        context: AnalysisContext,
+    ) -> Vec<ClassMetadata> {
+        if salsa_file.language_id(db).as_ref() != "java" {
+            return crate::salsa_queries::index::get_extracted_classes(db, salsa_file);
+        }
+
+        let view =
+            index.view_for_analysis_context(context.module, context.classpath, context.source_root);
+        let name_table = index.build_name_table_for_analysis_context(
+            context.module,
+            context.classpath,
+            context.source_root,
+        );
+
+        crate::salsa_queries::java::parse_java_classes_with_index_view(
+            db,
+            salsa_file,
+            origin,
+            Some(name_table),
+            Some(&view),
+        )
     }
 
     /// Remove a Salsa SourceFile (e.g., when file is deleted)
@@ -1189,6 +1219,84 @@ mod tests {
         let file = workspace.get_salsa_file(&uri).expect("tracked salsa file");
         let db = workspace.salsa_db.lock();
         assert_eq!(file.content(&*db), "class Demo { String live; }");
+    }
+
+    #[tokio::test]
+    async fn managed_workspace_open_document_reindex_preserves_fully_qualified_super_name() {
+        let workspace = Workspace::new();
+        let dir = tempdir().expect("tempdir");
+        let app_dir = dir.path().join("app");
+        let src_root = app_dir.join("src/main/java");
+        let pkg_dir = src_root.join("org/example");
+        fs::create_dir_all(&pkg_dir).expect("create package dir");
+
+        fs::write(
+            pkg_dir.join("SomeRandomClass.java"),
+            "package org.example; public class SomeRandomClass {}",
+        )
+        .expect("write base source");
+
+        let main_source = "package org.example; public class Main extends SomeRandomClass {}";
+        let main_path = pkg_dir.join("Main.java");
+        fs::write(&main_path, main_source).expect("write main source");
+
+        let main_uri = Url::from_file_path(main_path.canonicalize().expect("canonical path"))
+            .expect("main uri");
+        workspace
+            .documents
+            .open(Document::new(crate::workspace::SourceFile::new(
+                main_uri,
+                "java",
+                1,
+                main_source,
+                None,
+            )));
+
+        workspace
+            .apply_workspace_model(WorkspaceModelSnapshot {
+                generation: 1,
+                root: WorkspaceRoot {
+                    path: dir.path().to_path_buf(),
+                },
+                name: "demo".into(),
+                modules: vec![WorkspaceModule {
+                    id: ModuleId(1),
+                    name: "app".into(),
+                    directory: app_dir,
+                    roots: vec![WorkspaceSourceRoot {
+                        id: SourceRootId(11),
+                        path: src_root,
+                        kind: WorkspaceRootKind::Sources,
+                        classpath: ClasspathId::Main,
+                    }],
+                    compile_classpath: vec![],
+                    test_classpath: vec![],
+                    dependency_modules: vec![],
+                    java: JavaToolchainInfo {
+                        language_version: None,
+                    },
+                }],
+                provenance: WorkspaceModelProvenance {
+                    tool: DetectedBuildToolKind::Gradle,
+                    tool_version: Some("9.2.0".into()),
+                    imported_at: SystemTime::UNIX_EPOCH,
+                },
+                freshness: ModelFreshness::Fresh,
+                fidelity: ModelFidelity::Full,
+            })
+            .await
+            .expect("apply workspace model");
+
+        let index = workspace.index.load();
+        let view =
+            index.view_for_analysis_context(ModuleId(1), ClasspathId::Main, Some(SourceRootId(11)));
+        let main = view.get_class("org/example/Main").expect("indexed Main");
+
+        assert_eq!(
+            main.super_name.as_deref(),
+            Some("org/example/SomeRandomClass"),
+            "open-document reindex should preserve the fully qualified superclass from the analysis view",
+        );
     }
 }
 pub mod source_file;

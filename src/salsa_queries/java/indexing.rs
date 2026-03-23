@@ -1,4 +1,4 @@
-use crate::index::{ClassMetadata, NameTable};
+use crate::index::{ClassMetadata, ClassOrigin, IndexView, NameTable};
 use crate::salsa_db::SourceFile;
 use crate::salsa_queries::Db;
 use std::{sync::Arc, time::Instant};
@@ -17,7 +17,7 @@ pub fn parse_java_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata> {
     let name_table_elapsed = name_table_started.elapsed();
     let origin = crate::index::ClassOrigin::SourceFile(Arc::from(file_id.as_str()));
     let parse_tree_started = Instant::now();
-    let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file) else {
+    let Some(_tree) = crate::salsa_queries::parse::parse_tree(db, file) else {
         tracing::debug!(
             file = %file_id.as_str(),
             source_len = content.len(),
@@ -31,9 +31,7 @@ pub fn parse_java_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata> {
     let parse_tree_elapsed = parse_tree_started.elapsed();
     let extract_started = Instant::now();
 
-    let classes = crate::language::java::class_parser::extract_java_classes_from_tree(
-        content, &tree, &origin, name_table, None,
-    );
+    let classes = parse_java_classes_with_index_view(db, file, &origin, name_table, None);
     tracing::debug!(
         file = %file_id.as_str(),
         source_len = content.len(),
@@ -45,6 +43,32 @@ pub fn parse_java_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata> {
         "tracked java extraction profile"
     );
     classes
+}
+
+pub fn parse_java_classes_with_index_view(
+    db: &dyn Db,
+    file: SourceFile,
+    origin: &ClassOrigin,
+    name_table: Option<Arc<NameTable>>,
+    view: Option<&IndexView>,
+) -> Vec<ClassMetadata> {
+    let content = file.content(db);
+    let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file) else {
+        return vec![];
+    };
+
+    let discovered_names =
+        crate::language::java::class_parser::discover_java_names_from_tree(content, &tree);
+    let name_table = match (name_table, discovered_names.is_empty()) {
+        (Some(existing), false) => Some(existing.extend_with(discovered_names)),
+        (Some(existing), true) => Some(existing),
+        (None, false) => Some(NameTable::from_names(discovered_names)),
+        (None, true) => None,
+    };
+
+    crate::language::java::class_parser::extract_java_classes_from_tree(
+        content, &tree, origin, name_table, view,
+    )
 }
 
 pub(super) fn get_name_table_for_java_file(

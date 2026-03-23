@@ -807,6 +807,13 @@ fn parse_java_error_class(
     let (super_name, interfaces) =
         extract_super_name_and_interfaces(ctx, type_ctx, error_node, Some(kind));
 
+    tracing::debug!(
+        ?internal_name,
+        ?super_name,
+        ?interfaces,
+        "parse super (error rec)"
+    );
+
     Some(ClassMetadata {
         package: package.clone(),
         name,
@@ -940,6 +947,8 @@ fn parse_java_class(
     };
 
     let (super_name, interfaces) = extract_super_name_and_interfaces(ctx, type_ctx, node, None);
+
+    tracing::debug!(?internal_name, ?super_name, ?interfaces, "parse super");
 
     // methods & fields
     let mut methods = Vec::new();

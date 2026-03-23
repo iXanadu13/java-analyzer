@@ -17,6 +17,7 @@ pub use hints::{compute_java_inlay_hints, infer_java_variable_type};
 pub use indexing::{
     extract_java_imports, extract_java_package, extract_java_static_imports,
     extract_java_static_imports_from_source, parse_java_classes,
+    parse_java_classes_with_index_view,
 };
 pub use resolve::{is_java_local_variable, resolve_java_symbol};
 pub use scope::{
