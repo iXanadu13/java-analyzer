@@ -89,6 +89,25 @@ async fn run_completion(
         .expect("completion request should succeed")
 }
 
+fn strip_cursor_marker(content_with_marker: &str) -> (String, Position) {
+    let marker = "/*caret*/";
+    let offset = content_with_marker.find(marker).expect("cursor marker");
+    let content = content_with_marker.replacen(marker, "", 1);
+
+    let mut line = 0u32;
+    let mut character = 0u32;
+    for ch in content[..offset].chars() {
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += 1;
+        }
+    }
+
+    (content, Position { line, character })
+}
+
 #[tokio::test]
 async fn test_completion_after_file_open() {
     let workspace = create_test_workspace();
@@ -346,6 +365,59 @@ public class User {
         name_table.exists("org/example/User"),
         "NameTable should contain 'org/example/User'"
     );
+}
+
+#[tokio::test]
+async fn test_completion_enum_variants_inside_enum_method() {
+    let workspace = create_test_workspace();
+    let engine = Arc::new(CompletionEngine::new());
+    let registry = Arc::new(LanguageRegistry::new());
+
+    let (content, position) = strip_cursor_marker(
+        r#"
+package org.example;
+
+public enum RandomEnum {
+    A, B, C;
+
+    public void test() {
+        A/*caret*/
+    }
+}
+"#,
+    );
+
+    open_document(&workspace, "file:///test/RandomEnum.java", &content).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: Url::parse("file:///test/RandomEnum.java").unwrap(),
+            },
+            position,
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let response = run_completion(
+        Arc::clone(&workspace),
+        Arc::clone(&engine),
+        Arc::clone(&registry),
+        params,
+    )
+    .await;
+
+    assert!(response.is_some(), "Expected completion results, got None");
+
+    if let Some(CompletionResponse::List(list)) = response {
+        let labels: Vec<&str> = list.items.iter().map(|item| item.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|label| *label == "A"),
+            "labels={labels:?}"
+        );
+    }
 }
 
 #[tokio::test]

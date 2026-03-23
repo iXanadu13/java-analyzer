@@ -2053,7 +2053,6 @@ fn parse_class_members(
     // Extract package and imports for type resolution
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
 
     // Find the class node at class_start
     let class_node = find_node_at_offset(
@@ -2071,8 +2070,17 @@ fn parse_class_members(
         return HashMap::new();
     };
 
+    let owner_internal =
+        scope::extract_enclosing_internal_name(&ctx, Some(class_node), package.as_ref());
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+
     // Extract members with synthetics (Lombok, etc.)
-    let members = extract_type_members_with_synthetics(&ctx, class_node, &type_ctx, None);
+    let members = extract_type_members_with_synthetics(
+        &ctx,
+        class_node,
+        &type_ctx,
+        owner_internal.as_deref(),
+    );
 
     // Convert Vec to HashMap keyed by member name
     members.into_iter().map(|m| (m.name(), m)).collect()

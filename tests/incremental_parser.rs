@@ -5,6 +5,7 @@ use java_analyzer::salsa_queries::{
     extract_method_locals_incremental, extract_method_locals_metadata, find_enclosing_class_bounds,
     find_enclosing_method_bounds,
 };
+use java_analyzer::semantic::context::CurrentClassMember;
 use java_analyzer::workspace::Workspace;
 use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
@@ -540,4 +541,63 @@ public class Test {
         count2 > count1,
         "Second version should have more members (added method2)"
     );
+}
+
+#[test]
+fn test_incremental_enum_members_include_constants() {
+    let workspace = Arc::new(Workspace::new());
+
+    let source = r#"
+package org.example;
+
+public enum RandomEnum {
+    A, B, C;
+
+    public void test() {
+        A
+    }
+}
+"#;
+
+    let uri = Url::parse("file:///test/RandomEnum.java").unwrap();
+    let file = {
+        let db = workspace.salsa_db.lock();
+        SourceFile::new(
+            &*db,
+            FileId::new(uri),
+            source.to_string(),
+            Arc::from("java"),
+        )
+    };
+
+    let cursor_offset = source
+        .find("A\n    }")
+        .expect("cursor marker inside enum method");
+    let members = {
+        let db = workspace.salsa_db.lock();
+        extract_class_members_incremental(&*db, file, cursor_offset, &workspace)
+    };
+
+    for constant in ["A", "B", "C"] {
+        let member = members.get(constant).unwrap_or_else(|| {
+            panic!(
+                "missing enum constant {constant}, members={:?}",
+                members.keys().collect::<Vec<_>>()
+            )
+        });
+        match member {
+            CurrentClassMember::Field(field) => {
+                assert!(
+                    field.access_flags & rust_asm::constants::ACC_STATIC != 0,
+                    "{constant} should be static"
+                );
+                assert_eq!(
+                    field.descriptor.as_ref(),
+                    "Lorg/example/RandomEnum;",
+                    "{constant} should use enum owner descriptor"
+                );
+            }
+            CurrentClassMember::Method(_) => panic!("{constant} should be a field"),
+        }
+    }
 }
