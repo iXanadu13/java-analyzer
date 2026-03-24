@@ -7,7 +7,9 @@ use crate::{
         provider::{CompletionProvider, ProviderCompletionResult, ProviderSearchSpace},
     },
     index::{IndexScope, IndexView},
-    language::java::completion::providers::type_lookup::qualified_nested_type_matches,
+    language::java::completion::providers::type_lookup::{
+        qualified_nested_type_matches, visible_direct_inner_classes,
+    },
     semantic::context::{CursorLocation, SemanticContext},
     semantic::types::symbol_resolver::SymbolResolver,
 };
@@ -78,27 +80,27 @@ impl CompletionProvider for ExpressionProvider {
             let mut out = Vec::new();
             let member_prefix_lower =
                 (!member_prefix.is_empty()).then(|| member_prefix.to_lowercase());
-            for (i, inner) in index
-                .direct_inner_classes_of(&owner_internal)
+            for (i, inner) in visible_direct_inner_classes(&owner_internal, ctx, index)
                 .into_iter()
                 .enumerate()
             {
                 maybe_check_cancelled(request, "completion.expression.member_access", i)?;
+                let inner_name = inner.direct_name();
                 let Some(score) =
-                    fuzzy_score_if_matches(member_prefix_lower.as_deref(), inner.name.as_ref())
+                    fuzzy_score_if_matches(member_prefix_lower.as_deref(), inner_name)
                 else {
                     continue;
                 };
                 out.push(
                     CompletionCandidate::new(
-                        Arc::clone(&inner.name),
-                        inner.name.to_string(),
+                        Arc::from(inner_name),
+                        inner_name.to_string(),
                         CandidateKind::ClassName,
                         self.name(),
                     )
                     .with_replacement_mode(ReplacementMode::MemberSegment)
-                    .with_filter_text(inner.name.to_string())
-                    .with_detail(inner.source_name())
+                    .with_filter_text(inner_name.to_string())
+                    .with_detail(source_fqn_of(inner.as_ref(), index))
                     .with_score(88.0 + score),
                 );
             }
@@ -130,27 +132,27 @@ impl CompletionProvider for ExpressionProvider {
             let mut out = Vec::new();
             let member_prefix_lower =
                 (!member_prefix.is_empty()).then(|| member_prefix.to_lowercase());
-            for (i, inner) in index
-                .direct_inner_classes_of(class_internal_name.as_ref())
+            for (i, inner) in visible_direct_inner_classes(class_internal_name.as_ref(), ctx, index)
                 .into_iter()
                 .enumerate()
             {
                 maybe_check_cancelled(request, "completion.expression.static_access", i)?;
+                let inner_name = inner.direct_name();
                 let Some(score) =
-                    fuzzy_score_if_matches(member_prefix_lower.as_deref(), inner.name.as_ref())
+                    fuzzy_score_if_matches(member_prefix_lower.as_deref(), inner_name)
                 else {
                     continue;
                 };
                 out.push(
                     CompletionCandidate::new(
-                        Arc::clone(&inner.name),
-                        inner.name.to_string(),
+                        Arc::from(inner_name),
+                        inner_name.to_string(),
                         CandidateKind::ClassName,
                         self.name(),
                     )
                     .with_replacement_mode(ReplacementMode::MemberSegment)
-                    .with_filter_text(inner.name.to_string())
-                    .with_detail(inner.source_name())
+                    .with_filter_text(inner_name.to_string())
+                    .with_detail(source_fqn_of(inner.as_ref(), index))
                     .with_score(88.0 + score),
                 );
             }
@@ -229,9 +231,9 @@ impl CompletionProvider for ExpressionProvider {
             let score = if prefix.is_empty() {
                 0
             } else {
-                match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
+                match fuzzy::fuzzy_match(&prefix_lower, &meta.direct_name().to_lowercase()) {
                     Some(s) => s,
-                    None => continue,
+                    _ => continue,
                 }
             };
             seeds.push(CandidateSeed {
@@ -284,7 +286,7 @@ impl CompletionProvider for ExpressionProvider {
                 let score = if prefix.is_empty() {
                     0
                 } else {
-                    match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
+                    match fuzzy::fuzzy_match(&prefix_lower, &meta.direct_name().to_lowercase()) {
                         Some(s) => s,
                         None => continue,
                     }
@@ -317,13 +319,14 @@ impl CompletionProvider for ExpressionProvider {
                 if !seen_internals.insert(Arc::clone(&meta.internal_name)) {
                     continue;
                 }
-                let score = match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
-                    Some(s) => s,
-                    None => continue,
-                };
+                let score =
+                    match fuzzy::fuzzy_match(&prefix_lower, &meta.direct_name().to_lowercase()) {
+                        Some(s) => s,
+                        None => continue,
+                    };
                 let boost = calculate_boost(meta.package.as_deref());
                 let base_score = 40.0;
-                let length_penalty = meta.name.len() as f32 * 0.05;
+                let length_penalty = meta.direct_name().len() as f32 * 0.05;
 
                 seeds.push(CandidateSeed {
                     meta,
@@ -339,9 +342,10 @@ impl CompletionProvider for ExpressionProvider {
         for (i, seed) in seeds.into_iter().enumerate() {
             maybe_check_cancelled(request, "completion.expression.decorate", i)?;
             let fqn = source_fqn_of(&seed.meta, index);
+            let direct_name = seed.meta.direct_name();
             let mut candidate = CompletionCandidate::new(
-                Arc::clone(&seed.meta.name),
-                seed.meta.name.to_string(),
+                Arc::from(direct_name),
+                direct_name.to_string(),
                 CandidateKind::ClassName,
                 self.name(),
             )
@@ -419,7 +423,7 @@ impl VisibilityFilter {
         if let Some(enclosing_internal) = ctx.enclosing_internal_name.as_deref() {
             for inner in index.direct_inner_classes_of(enclosing_internal) {
                 visible_inner_by_simple_name
-                    .entry(Arc::clone(&inner.name))
+                    .entry(Arc::from(inner.direct_name()))
                     .or_insert_with(|| Arc::clone(&inner.internal_name));
             }
         }
@@ -442,7 +446,7 @@ impl VisibilityFilter {
             // This includes direct inner classes of the enclosing class
             self.nested_checks += 1;
             self.visible_inner_by_simple_name
-                .get(&meta.name)
+                .get(meta.direct_name())
                 .is_some_and(|internal| internal.as_ref() == meta.internal_name.as_ref())
         };
         self.visibility_ns += start.elapsed().as_nanos();
@@ -469,19 +473,18 @@ fn provide_qualified_type_prefix(
         .enumerate()
     {
         maybe_check_cancelled(request, "completion.expression.qualified", i)?;
-        let Some(score) =
-            fuzzy_score_if_matches(member_prefix_lower.as_deref(), inner.name.as_ref())
-        else {
+        let inner_name = inner.direct_name();
+        let Some(score) = fuzzy_score_if_matches(member_prefix_lower.as_deref(), inner_name) else {
             continue;
         };
         out.push(
             CompletionCandidate::new(
-                Arc::clone(&inner.name),
-                inner.name.to_string(),
+                Arc::from(inner_name),
+                inner_name.to_string(),
                 CandidateKind::ClassName,
                 source,
             )
-            .with_detail(inner.source_name())
+            .with_detail(source_fqn_of(inner.as_ref(), index))
             .with_score(85.0 + score),
         );
     }
@@ -904,6 +907,105 @@ mod tests {
             results.iter().any(|c| c.label.as_ref() == "Box"),
             "{results:?}"
         );
+    }
+
+    #[test]
+    fn test_static_access_uses_direct_name_for_raw_bytecode_nested_type() {
+        let index = WorkspaceIndex::new();
+        index.add_classes(vec![make_cls("java/lang", "Integer"), {
+            let mut c = make_cls("java/lang", "Integer$PublicCache");
+            c.internal_name = Arc::from("java/lang/Integer$PublicCache");
+            c.inner_class_of = Some(Arc::from("Integer"));
+            c
+        }]);
+        let ctx = SemanticContext::new(
+            CursorLocation::StaticAccess {
+                class_internal_name: Arc::from("java/lang/Integer"),
+                member_prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Test")),
+            Some(Arc::from("app/Test")),
+            Some(Arc::from("app")),
+            vec![],
+        );
+
+        let results = ExpressionProvider
+            .provide_test(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
+        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(labels.contains(&"PublicCache"), "{labels:?}");
+        assert!(!labels.contains(&"Integer$PublicCache"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_static_access_hides_non_public_nested_type_from_other_package() {
+        let index = WorkspaceIndex::new();
+        index.add_classes(vec![make_cls("java/lang", "Integer"), {
+            let mut c = make_cls("java/lang", "Integer$IntegerCache");
+            c.internal_name = Arc::from("java/lang/Integer$IntegerCache");
+            c.inner_class_of = Some(Arc::from("Integer"));
+            c.access_flags = 0;
+            c
+        }]);
+        let ctx = SemanticContext::new(
+            CursorLocation::StaticAccess {
+                class_internal_name: Arc::from("java/lang/Integer"),
+                member_prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Test")),
+            Some(Arc::from("app/Test")),
+            Some(Arc::from("app")),
+            vec![],
+        );
+
+        let results = ExpressionProvider
+            .provide_test(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
+        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(!labels.contains(&"IntegerCache"), "{labels:?}");
+        assert!(!labels.contains(&"Integer$IntegerCache"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_qualified_prefix_hides_non_public_nested_type_from_other_package() {
+        let index = WorkspaceIndex::new();
+        index.add_classes(vec![make_cls("java/lang", "Integer"), {
+            let mut c = make_cls("java/lang", "Integer$IntegerCache");
+            c.internal_name = Arc::from("java/lang/Integer$IntegerCache");
+            c.inner_class_of = Some(Arc::from("Integer"));
+            c.access_flags = 0;
+            c
+        }]);
+
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "Integer.".to_string(),
+            },
+            "Integer.",
+            vec![],
+            Some(Arc::from("Test")),
+            Some(Arc::from("app/Test")),
+            Some(Arc::from("app")),
+            vec![Arc::from("java.lang.Integer")],
+        )
+        .with_extension(Arc::new(
+            crate::language::java::type_ctx::SourceTypeCtx::new(
+                Some(Arc::from("app")),
+                vec![Arc::from("java.lang.Integer")],
+                Some(index.view(root_scope()).build_name_table()),
+            ),
+        ));
+
+        let results = ExpressionProvider
+            .provide_test(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
+        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(!labels.contains(&"IntegerCache"), "{labels:?}");
+        assert!(!labels.contains(&"Integer$IntegerCache"), "{labels:?}");
     }
 
     #[test]

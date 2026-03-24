@@ -166,7 +166,7 @@ impl BucketIndex {
     ) -> Option<Arc<ClassMetadata>> {
         self.direct_inner_classes_of(owner_internal)
             .into_iter()
-            .find(|c| c.name.as_ref() == simple_name)
+            .find(|c| c.matches_simple_name(simple_name))
     }
 
     pub fn classes_in_package(&self, pkg: &str) -> Vec<Arc<ClassMetadata>> {

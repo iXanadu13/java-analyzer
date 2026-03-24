@@ -60,18 +60,45 @@ impl ClassMetadata {
 
     /// Get the fully qualified name of the source code that conforms to Java syntax
     pub fn source_name(&self) -> String {
+        if self.inner_class_of.is_some() {
+            return self.internal_name.replace(['/', '$'], ".");
+        }
+
         let mut out = String::new();
         if let Some(ref pkg) = self.package {
             out.push_str(&pkg.replace('/', "."));
             out.push('.');
         }
 
-        if self.inner_class_of.is_some() {
-            out.push_str(&self.name.replace('$', "."));
-        } else {
-            out.push_str(&self.name);
-        }
+        out.push_str(&self.name);
         out
+    }
+
+    /// Returns the direct class name visible from the declaring owner.
+    /// For nested bytecode classes this strips the owner chain prefix from `name`,
+    /// while source metadata already stores the direct name.
+    pub fn direct_name(&self) -> &str {
+        if let Some(owner) = self.inner_class_of.as_deref()
+            && let Some(rest) = self
+                .name
+                .strip_prefix(owner)
+                .and_then(|s| s.strip_prefix('$'))
+        {
+            return rest;
+        }
+        self.name.as_ref()
+    }
+
+    pub fn matches_simple_name(&self, simple_name: &str) -> bool {
+        self.name.as_ref() == simple_name || self.direct_name() == simple_name
+    }
+
+    pub fn matches_internal_name_tail(&self, tail: &str) -> bool {
+        self.name.as_ref() == tail
+            || tail
+                .rsplit('$')
+                .next()
+                .is_some_and(|simple| self.direct_name() == simple)
     }
 
     /// Returns None if no @Target (applicable everywhere).
@@ -1639,14 +1666,39 @@ public class Calc {
         let mut nested = make_class("com/example", "Outer$Inner", ClassOrigin::Unknown);
         nested.inner_class_of = Some(Arc::from("Outer"));
         assert_eq!(nested.source_name(), "com.example.Outer.Inner");
+        assert_eq!(nested.direct_name(), "Inner");
 
         // 场景 2：带 $ 的普通类 (比如混淆后的类 a$b)
         let obfuscated = make_class("com/example", "a$b", ClassOrigin::Unknown);
         // 注意：没有设置 inner_class_of，所以不认为是嵌套类
         assert_eq!(obfuscated.source_name(), "com.example.a$b");
+        assert_eq!(obfuscated.direct_name(), "a$b");
 
         // 场景 3：普通顶层类
         let normal = make_class("java/lang", "String", ClassOrigin::Unknown);
         assert_eq!(normal.source_name(), "java.lang.String");
+        assert_eq!(normal.direct_name(), "String");
+    }
+
+    #[test]
+    fn test_direct_name_strips_owner_chain_using_metadata() {
+        let nested = ClassMetadata {
+            package: Some(Arc::from("com/example")),
+            name: Arc::from("Outer$Middle$Leaf"),
+            internal_name: Arc::from("com/example/Outer$Middle$Leaf"),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: Some(Arc::from("Outer$Middle")),
+            origin: ClassOrigin::Unknown,
+        };
+
+        assert_eq!(nested.direct_name(), "Leaf");
+        assert!(nested.matches_simple_name("Leaf"));
+        assert!(nested.matches_internal_name_tail("Outer$Middle$Leaf"));
     }
 }

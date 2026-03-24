@@ -92,10 +92,11 @@ impl CompletionProvider for ConstructorProvider {
                 &ctx.existing_imports,
                 ctx.enclosing_package.as_deref(),
             );
+            let direct_name = meta.direct_name();
 
             // Score boost when class name matches the expected LHS type
             let type_score_boost = expected_type
-                .map(|et| type_match_score(et, &meta.name))
+                .map(|et| type_match_score(et, direct_name))
                 .unwrap_or(0.0);
 
             let filter = AccessFilter::member_completion();
@@ -116,21 +117,21 @@ impl CompletionProvider for ConstructorProvider {
             if constructors.is_empty() {
                 // Synthesise a default no-arg constructor
                 let candidate = CompletionCandidate::new(
-                    Arc::clone(&meta.name),
-                    format!("{}()", meta.name),
+                    Arc::from(direct_name),
+                    format!("{direct_name}()"),
                     CandidateKind::Constructor {
                         descriptor: Arc::from("()V"),
-                        defining_class: Arc::clone(&meta.name),
+                        defining_class: Arc::from(direct_name),
                     },
                     self.name(),
                 )
-                .with_callable_insert(meta.name.as_ref(), &[], ctx.is_followed_by_opener())
+                .with_callable_insert(direct_name, &[], ctx.is_followed_by_opener())
                 .with_detail(format!("new {}()", fqn))
                 .with_score(type_score_boost);
 
                 let candidate = if is_class_generic {
                     candidate.with_generics_callable_insert(
-                        meta.name.as_ref(),
+                        direct_name,
                         &[],
                         ctx.is_followed_by_opener(),
                     )
@@ -160,16 +161,16 @@ impl CompletionProvider for ConstructorProvider {
                 let readable_params = descriptor_params_to_readable(&ctor.desc());
                 let detail = format!("new {}({})", fqn, readable_params);
                 let candidate = CompletionCandidate::new(
-                    Arc::clone(&meta.name),
-                    meta.name.to_string(),
+                    Arc::from(direct_name),
+                    direct_name.to_string(),
                     CandidateKind::Constructor {
                         descriptor: Arc::clone(&ctor.desc()),
-                        defining_class: Arc::clone(&meta.name),
+                        defining_class: Arc::from(direct_name),
                     },
                     self.name(),
                 )
                 .with_callable_insert(
-                    meta.name.as_ref(),
+                    direct_name,
                     &ctor.params.param_names(),
                     ctx.is_followed_by_opener(),
                 )
@@ -178,7 +179,7 @@ impl CompletionProvider for ConstructorProvider {
 
                 let candidate = if is_class_generic {
                     candidate.with_generics_callable_insert(
-                        meta.name.as_ref(),
+                        direct_name,
                         &[],
                         ctx.is_followed_by_opener(),
                     )
@@ -214,7 +215,7 @@ fn is_constructor_type_visible(
         return false;
     };
     index
-        .resolve_scoped_inner_class(enclosing, meta.name.as_ref())
+        .resolve_scoped_inner_class(enclosing, meta.direct_name())
         .is_some_and(|resolved| resolved.internal_name == meta.internal_name)
 }
 

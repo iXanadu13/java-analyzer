@@ -4,6 +4,7 @@ use std::time::Instant;
 use crate::completion::provider::{CompletionProvider, ProviderCompletionResult};
 use crate::completion::scorer::AccessFilter;
 use crate::completion::{CandidateKind, CompletionCandidate, fuzzy};
+use crate::language::java::completion::providers::type_lookup::visible_direct_inner_classes;
 use crate::language::java::expression_typing;
 use crate::language::java::render;
 use crate::language::java::super_support::{is_super_receiver_expr, resolve_direct_super_type};
@@ -501,19 +502,20 @@ impl MemberProvider {
             );
         }
 
-        for inner in index.direct_inner_classes_of(class_meta.internal_name.as_ref()) {
-            let Some(match_score) = fuzzy::fuzzy_match(member_prefix, inner.name.as_ref()) else {
+        for inner in visible_direct_inner_classes(class_meta.internal_name.as_ref(), ctx, index) {
+            let inner_name = inner.direct_name();
+            let Some(match_score) = fuzzy::fuzzy_match(member_prefix, inner_name) else {
                 continue;
             };
             results.push(
                 CompletionCandidate::new(
-                    Arc::clone(&inner.name),
-                    inner.name.to_string(),
+                    Arc::from(inner_name),
+                    inner_name.to_string(),
                     CandidateKind::ClassName,
                     self.name(),
                 )
                 .with_replacement_mode(crate::completion::candidate::ReplacementMode::MemberSegment)
-                .with_filter_text(inner.name.to_string())
+                .with_filter_text(inner_name.to_string())
                 .with_detail(inner.source_name())
                 .with_score(62.0 + match_score as f32 * 0.1),
             );
@@ -3789,6 +3791,116 @@ mod tests {
             .candidates;
         let labels: Vec<&str> = results.iter().map(|c| candidate_name(c)).collect();
         assert!(labels.contains(&"Box"), "{:?}", labels);
+    }
+
+    #[test]
+    fn test_static_access_uses_direct_name_for_raw_bytecode_nested_type() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Integer"),
+                internal_name: Arc::from("java/lang/Integer"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Integer$PublicCache"),
+                internal_name: Arc::from("java/lang/Integer$PublicCache"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC | ACC_STATIC,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("Integer")),
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let ctx = SemanticContext::new(
+            CursorLocation::StaticAccess {
+                class_internal_name: Arc::from("java/lang/Integer"),
+                member_prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Test")),
+            Some(Arc::from("app/Test")),
+            Some(Arc::from("app")),
+            vec![],
+        );
+
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let labels: Vec<&str> = results.iter().map(|c| candidate_name(c)).collect();
+        assert!(labels.contains(&"PublicCache"), "{labels:?}");
+        assert!(!labels.contains(&"Integer$PublicCache"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_static_access_hides_non_public_nested_type_from_other_package() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Integer"),
+                internal_name: Arc::from("java/lang/Integer"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Integer$IntegerCache"),
+                internal_name: Arc::from("java/lang/Integer$IntegerCache"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: 0,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("Integer")),
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let ctx = SemanticContext::new(
+            CursorLocation::StaticAccess {
+                class_internal_name: Arc::from("java/lang/Integer"),
+                member_prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Test")),
+            Some(Arc::from("app/Test")),
+            Some(Arc::from("app")),
+            vec![],
+        );
+
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let labels: Vec<&str> = results.iter().map(|c| candidate_name(c)).collect();
+        assert!(!labels.contains(&"IntegerCache"), "{labels:?}");
+        assert!(!labels.contains(&"Integer$IntegerCache"), "{labels:?}");
     }
 
     #[test]
