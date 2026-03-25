@@ -86,6 +86,7 @@ pub struct PreparedRequest<'a> {
     lang: &'a dyn Language,
     file: Arc<SourceFile>,
     view: IndexView,
+    overlay_class_count: usize,
     salsa_file: crate::salsa_db::SourceFile,
     inferred_package: Option<Arc<str>>,
     request_analysis: RequestAnalysisState,
@@ -136,12 +137,6 @@ impl<'a> PreparedRequest<'a> {
             )
         };
         request.check_cancelled("request_setup.after_index_view")?;
-        let request_analysis = RequestAnalysisState {
-            analysis,
-            view: view.clone(),
-            workspace_version: index_snapshot.version(),
-        };
-
         let salsa_file = workspace.get_or_update_salsa_file_for_snapshot(file.as_ref());
         {
             let db = workspace.salsa_db.lock();
@@ -151,12 +146,47 @@ impl<'a> PreparedRequest<'a> {
             );
         }
 
+        let (view, overlay_class_count) = if lang.id() == "java" {
+            let origin = crate::index::ClassOrigin::SourceFile(Arc::from(uri.as_str()));
+            let overlay_classes = {
+                let db = workspace.salsa_db.lock();
+                workspace.extract_salsa_classes_for_index_context(
+                    &*db,
+                    salsa_file,
+                    &origin,
+                    index_snapshot.as_ref(),
+                    analysis,
+                )
+            };
+            let overlay_count = overlay_classes.len();
+            let view = view.with_overlay_classes(overlay_classes);
+            tracing::debug!(
+                uri = %uri,
+                module = analysis.module.0,
+                classpath = ?analysis.classpath,
+                source_root = ?analysis.source_root.map(|id| id.0),
+                overlay_class_count = overlay_count,
+                view_layers = view.layer_count(),
+                "prepared request with current-document source overlay"
+            );
+            (view, overlay_count)
+        } else {
+            (view, 0)
+        };
+
+        let request_analysis = RequestAnalysisState {
+            analysis,
+            view: view.clone(),
+            workspace_version: index_snapshot.version(),
+        };
+
         Ok(Some(Self {
             workspace,
             uri: uri.clone(),
             lang,
             file,
             view,
+            overlay_class_count,
             salsa_file,
             inferred_package,
             request_analysis,
@@ -237,6 +267,7 @@ impl<'a> PreparedRequest<'a> {
             module: self.request_analysis.analysis.module,
             classpath: self.request_analysis.analysis.classpath,
             source_root: self.request_analysis.analysis.source_root,
+            overlay_class_count: self.overlay_class_count,
             offset,
             trigger,
         };
@@ -400,8 +431,11 @@ fn token_end_character(content: &str, line: u32, character: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::index::ClassOrigin;
+    use crate::language::java::class_parser::parse_java_source_via_tree_for_test;
     use crate::lsp::request_cancellation::{CancellationToken, RequestFamily};
+    use crate::semantic::LocalVar;
     use crate::semantic::context::CursorLocation;
+    use crate::semantic::types::type_name::TypeName;
     use crate::workspace::document::Document;
     use ropey::Rope;
 
@@ -493,5 +527,214 @@ mod tests {
             }
             other => panic!("expected MemberAccess, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn java_prepared_request_ignores_stale_non_overlay_cached_context() {
+        let workspace = Arc::new(Workspace::new());
+        let registry = LanguageRegistry::new();
+        let uri = Url::parse("file:///workspace/Main.java").expect("uri");
+        let source = indoc::indoc! {r#"
+            package org.example;
+
+            public class Main {
+                public class Test {
+                    private void foo() {
+                        Test t = new Test();
+                        t.new NestedNonStatic();
+                    }
+
+                    public class NestedNonStatic {}
+                }
+            }
+        "#}
+        .to_string();
+
+        let lang = registry.find("java").expect("java language");
+        let tree = lang.parse_tree(&source, None);
+        workspace.documents.open(Document::new(SourceFile::new(
+            uri.clone(),
+            "java",
+            1,
+            source.clone(),
+            tree,
+        )));
+
+        let offset =
+            source.find("NestedNonStatic();").expect("constructor call") + "NestedNonStatic".len();
+        let rope = Rope::from_str(&source);
+        let line = rope.byte_to_line(offset) as u32;
+        let character = (offset - rope.line_to_byte(line as usize)) as u32;
+
+        let stale_ctx = SemanticContext::new(
+            CursorLocation::ConstructorCall {
+                class_prefix: "NestedNonStatic".to_string(),
+                expected_type: Some("Test.NestedNonStatic".to_string()),
+                qualifier_expr: Some("t".to_string()),
+                qualifier_owner_internal: None,
+            },
+            "NestedNonStatic",
+            vec![
+                LocalVar {
+                    name: Arc::from("nns"),
+                    type_internal: TypeName::new("Test/NestedNonStatic"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("t"),
+                    type_internal: TypeName::new("Test"),
+                    init_expr: None,
+                },
+            ],
+            Some(Arc::from("Test")),
+            Some(Arc::from("org/example/Main$Test")),
+            Some(Arc::from("org/example")),
+            vec![],
+        );
+        let stale_key = SemanticContextCacheKey {
+            document_version: 1,
+            workspace_version: workspace.index.load().version(),
+            module: crate::index::ModuleId::ROOT,
+            classpath: crate::index::ClasspathId::Main,
+            source_root: None,
+            overlay_class_count: 0,
+            offset,
+            trigger: None,
+        };
+        workspace.documents.with_doc_mut(&uri, |doc| {
+            doc.cache_semantic_context(stale_key, Arc::new(stale_ctx));
+        });
+
+        let request = PreparedRequest::prepare(
+            Arc::clone(&workspace),
+            &registry,
+            &uri,
+            RequestContext::new(
+                "test_completion",
+                &uri,
+                RequestFamily::Completion,
+                1,
+                CancellationToken::new(),
+            ),
+        )
+        .expect("request result")
+        .expect("prepared request");
+
+        assert!(
+            request.overlay_class_count > 0,
+            "current document overlay should be active for java requests"
+        );
+
+        let ctx = request
+            .semantic_context(Position::new(line, character), None)
+            .expect("request result")
+            .expect("semantic context");
+
+        assert_eq!(
+            ctx.location.constructor_qualifier_owner_internal(),
+            Some("org/example/Main$Test")
+        );
+        let local_t = ctx
+            .local_variables
+            .iter()
+            .find(|local| local.name.as_ref() == "t")
+            .expect("local t");
+        assert_eq!(
+            local_t.type_internal.erased_internal(),
+            "org/example/Main$Test"
+        );
+    }
+
+    #[test]
+    fn java_prepared_request_prefers_enclosing_type_name_over_same_package_top_level() {
+        let workspace = Arc::new(Workspace::new());
+        let registry = LanguageRegistry::new();
+        let uri = Url::parse("file:///workspace/Main.java").expect("uri");
+        let source = indoc::indoc! {r#"
+            package org.example;
+
+            public class Main {
+                public class Test {
+                    private void foo() {
+                        Test t = new Test();
+                        t.new NestedNonStatic();
+                    }
+
+                    public class NestedNonStatic {}
+                }
+            }
+        "#}
+        .to_string();
+
+        let competing_uri = Url::parse("file:///workspace/Test.java").expect("uri");
+        let competing_source = indoc::indoc! {r#"
+            package org.example;
+
+            public class Test {}
+        "#};
+        let competing_classes = parse_java_source_via_tree_for_test(
+            competing_source,
+            ClassOrigin::SourceFile(Arc::from(competing_uri.as_str())),
+            None,
+        );
+        workspace
+            .index
+            .update(|index| index.add_classes(competing_classes));
+
+        let lang = registry.find("java").expect("java language");
+        let tree = lang.parse_tree(&source, None);
+        workspace.documents.open(Document::new(SourceFile::new(
+            uri.clone(),
+            "java",
+            1,
+            source.clone(),
+            tree,
+        )));
+
+        let offset =
+            source.find("NestedNonStatic();").expect("constructor call") + "NestedNonStatic".len();
+        let rope = Rope::from_str(&source);
+        let line = rope.byte_to_line(offset) as u32;
+        let character = (offset - rope.line_to_byte(line as usize)) as u32;
+
+        let request = PreparedRequest::prepare(
+            Arc::clone(&workspace),
+            &registry,
+            &uri,
+            RequestContext::new(
+                "test_completion",
+                &uri,
+                RequestFamily::Completion,
+                1,
+                CancellationToken::new(),
+            ),
+        )
+        .expect("request result")
+        .expect("prepared request");
+
+        let ctx = request
+            .semantic_context(Position::new(line, character), None)
+            .expect("request result")
+            .expect("semantic context");
+
+        assert_eq!(
+            ctx.location.constructor_qualifier_owner_internal(),
+            Some("org/example/Main$Test"),
+            "enclosing_internal={:?} location={:?} locals={:?}",
+            ctx.enclosing_internal_name,
+            ctx.location,
+            ctx.local_variables
+        );
+        let local_t = ctx
+            .local_variables
+            .iter()
+            .find(|local| local.name.as_ref() == "t")
+            .expect("local t");
+        assert_eq!(
+            local_t.type_internal.erased_internal(),
+            "org/example/Main$Test",
+            "locals={:?}",
+            ctx.local_variables
+        );
     }
 }

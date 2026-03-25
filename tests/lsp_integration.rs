@@ -67,6 +67,30 @@ async fn open_document(workspace: &Arc<Workspace>, uri: &str, content: &str) {
     });
 }
 
+async fn update_document_without_reindex(
+    workspace: &Arc<Workspace>,
+    uri: &str,
+    version: i32,
+    content: &str,
+) {
+    let uri = Url::parse(uri).unwrap();
+    let registry = LanguageRegistry::new();
+    let tree = registry.find("java").and_then(|lang| {
+        let mut parser = lang.make_parser();
+        parser.parse(content, None)
+    });
+
+    workspace.documents.with_doc_mut(&uri, |doc| {
+        doc.update_source(java_analyzer::workspace::SourceFile::new(
+            uri.clone(),
+            "java",
+            version,
+            content,
+            tree,
+        ));
+    });
+}
+
 fn completion_request(uri: &Url) -> Arc<RequestContext> {
     RequestContext::new(
         "completion",
@@ -207,6 +231,79 @@ async fn test_completion_with_empty_workspace() {
 
     // Should return None for unopened file
     assert!(response.is_none(), "Expected None for unopened file");
+}
+
+#[tokio::test]
+async fn test_completion_uses_current_document_overlay_for_nested_inner_constructor() {
+    let workspace = create_test_workspace();
+    let engine = Arc::new(CompletionEngine::new());
+    let registry = Arc::new(LanguageRegistry::new());
+    let uri = "file:///test/Main.java";
+
+    let initial = r#"
+package org.example;
+
+public class Main {
+    public class Test {
+        private void foo() {
+            Test t = new Test();
+        }
+    }
+}
+"#;
+
+    let (updated, position) = strip_cursor_marker(
+        r#"
+package org.example;
+
+public class Main {
+    public class Test {
+        private void foo() {
+            Test t = new Test();
+            t.new NestedNonSt/*caret*/();
+        }
+
+        public class NestedNonStatic {}
+    }
+}
+"#,
+    );
+
+    open_document(&workspace, uri, initial).await;
+    update_document_without_reindex(&workspace, uri, 2, &updated).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: Url::parse(uri).unwrap(),
+            },
+            position,
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let response = run_completion(
+        Arc::clone(&workspace),
+        Arc::clone(&engine),
+        Arc::clone(&registry),
+        params,
+    )
+    .await;
+
+    assert!(
+        response.is_some(),
+        "expected completion results from current document overlay"
+    );
+
+    if let Some(CompletionResponse::List(list)) = response {
+        let labels: Vec<&str> = list.items.iter().map(|item| item.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|label| *label == "NestedNonStatic"),
+            "labels={labels:?}"
+        );
+    }
 }
 
 #[tokio::test]

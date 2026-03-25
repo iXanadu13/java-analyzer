@@ -20,6 +20,7 @@ pub struct SemanticContextCacheKey {
     pub module: ModuleId,
     pub classpath: ClasspathId,
     pub source_root: Option<SourceRootId>,
+    pub overlay_class_count: usize,
     pub offset: usize,
     pub trigger: Option<char>,
 }

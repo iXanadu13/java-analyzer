@@ -24,7 +24,9 @@ use crate::semantic::types::{
 };
 use crate::semantic::{LocalVar, SemanticContext};
 use crate::{
-    language::java::completion_context::resolve_source_like_type_with_scope,
+    language::java::completion_context::{
+        resolve_enclosing_owner_type_name, resolve_source_like_type_with_scope,
+    },
     semantic::types::symbol_resolver::SymbolResolver,
     workspace::{Workspace, document::SemanticContextCacheKey},
 };
@@ -271,12 +273,28 @@ impl<'a> JavaSemanticRequestContext<'a> {
             let uri = salsa_file.file_id(&*db).uri().clone();
             let document_version = workspace.documents.with_doc(&uri, |doc| doc.version());
             let analysis = workspace.analysis_context_for_uri(&uri);
+            let index_snapshot = workspace.index.load();
+            let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
+            let overlay_class_count = if salsa_file.language_id(&*db).as_ref() == "java" {
+                workspace
+                    .extract_salsa_classes_for_index_context(
+                        &*db,
+                        salsa_file,
+                        &origin,
+                        index_snapshot.as_ref(),
+                        analysis,
+                    )
+                    .len()
+            } else {
+                0
+            };
             let cache_key = document_version.map(|document_version| SemanticContextCacheKey {
                 document_version,
-                workspace_version: workspace.index.load().version(),
+                workspace_version: index_snapshot.version(),
                 module: analysis.module,
                 classpath: analysis.classpath,
                 source_root: analysis.source_root,
+                overlay_class_count,
                 offset,
                 trigger: None,
             });
@@ -311,6 +329,20 @@ impl<'a> JavaSemanticRequestContext<'a> {
             metrics.record_semantic_context_lookup("inlay_scope_context", offset);
         }
         let db = workspace.salsa_db.lock();
+        let analysis = workspace.analysis_context_for_uri(&uri);
+        let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
+        let overlay_classes = if salsa_file.language_id(&*db).as_ref() == "java" {
+            workspace.extract_salsa_classes_for_index_context(
+                &*db,
+                salsa_file,
+                &origin,
+                workspace.index.load().as_ref(),
+                analysis,
+            )
+        } else {
+            Vec::new()
+        };
+        let view = self.view.with_overlay_classes(overlay_classes);
         if let Some(metrics) = self.metrics() {
             metrics.record_parse_snapshot(
                 "inlay.salsa_context",
@@ -322,7 +354,7 @@ impl<'a> JavaSemanticRequestContext<'a> {
             &*db,
             salsa_file,
             offset,
-            self.view.clone(),
+            view,
             Some(workspace),
         ) else {
             return Ok(None);
@@ -831,6 +863,12 @@ fn expand_local_type_strict(
     let resolved = if ty.contains_slash() || sym.view.get_class(base).is_some() {
         TypeName {
             base_internal: ty.base_internal.clone(),
+            args: expanded_args,
+            array_dims: ty.array_dims,
+        }
+    } else if let Some(internal) = resolve_enclosing_owner_type_name(ctx, sym.view, base) {
+        TypeName {
+            base_internal: internal,
             args: expanded_args,
             array_dims: ty.array_dims,
         }

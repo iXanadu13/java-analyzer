@@ -760,10 +760,39 @@ fn resolve_source_base_with_scope(
     if base_name.contains('.') {
         return Some(Arc::from(base_name.replace('.', "/")));
     }
+    if let Some(enclosing_owner) = resolve_enclosing_owner_type_name(ctx, sym.view, base_name) {
+        return Some(enclosing_owner);
+    }
     if let Some(strict) = type_ctx.resolve_simple_strict(base_name) {
         return Some(Arc::from(strict));
     }
     sym.resolve_type_name(ctx, base_name)
+}
+
+pub(crate) fn resolve_enclosing_owner_type_name(
+    ctx: &SemanticContext,
+    view: &IndexView,
+    simple_name: &str,
+) -> Option<Arc<str>> {
+    let mut current = ctx.enclosing_internal_name.as_deref()?;
+    loop {
+        if internal_simple_name(current) == simple_name {
+            return view
+                .get_class(current)
+                .map(|class| Arc::clone(&class.internal_name))
+                .or_else(|| Some(Arc::from(current)));
+        }
+
+        let Some((owner_internal, _)) = current.rsplit_once('$') else {
+            break;
+        };
+        current = owner_internal;
+    }
+    None
+}
+
+fn internal_simple_name(internal: &str) -> &str {
+    internal.rsplit(['$', '/']).next().unwrap_or(internal)
 }
 
 fn evaluate_functional_compatibility(

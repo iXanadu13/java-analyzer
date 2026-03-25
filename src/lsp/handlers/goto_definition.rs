@@ -177,15 +177,7 @@ fn goto_resolved_symbol_blocking(
     request: &RequestContext,
 ) -> crate::lsp::request_cancellation::RequestResult<GotoPrepared> {
     let (target_internal, member_name, descriptor, decl_kind) = match &symbol {
-        ResolvedSymbol::Class(name) => {
-            let simple_name = name.rsplit('/').next().unwrap_or(name.as_ref());
-            (
-                Arc::clone(name),
-                Some(Arc::from(simple_name)),
-                None,
-                DeclKind::Type,
-            )
-        }
+        ResolvedSymbol::Class(name) => (Arc::clone(name), None, None, DeclKind::Type),
         ResolvedSymbol::Method { owner, summary } => (
             Arc::clone(owner),
             Some(Arc::clone(&summary.name)),
@@ -204,31 +196,35 @@ fn goto_resolved_symbol_blocking(
     let Some(meta) = view.get_class(&target_internal) else {
         return Ok(GotoPrepared::Ready(None));
     };
+    let fallback_name = match decl_kind {
+        DeclKind::Type => Some(Arc::from(meta.direct_name())),
+        DeclKind::Method | DeclKind::Field => member_name.clone(),
+    };
     match &meta.origin {
         ClassOrigin::SourceFile(uri_str) => {
             let Some(target_uri) = Url::parse(uri_str).ok() else {
                 return Ok(GotoPrepared::Ready(None));
             };
 
-            let range = member_name.as_ref().and_then(|name| {
-                let content = workspace
-                    .documents
-                    .with_doc(&target_uri, |d| d.source().text().to_owned())
-                    .or_else(|| {
-                        target_uri
-                            .to_file_path()
-                            .ok()
-                            .and_then(|p| std::fs::read_to_string(p).ok())
-                    })?;
-
-                find_symbol_range(
-                    &content,
+            let content = workspace
+                .documents
+                .with_doc(&target_uri, |d| d.source().text().to_owned())
+                .or_else(|| {
+                    target_uri
+                        .to_file_path()
+                        .ok()
+                        .and_then(|p| std::fs::read_to_string(p).ok())
+                });
+            let range = content.as_deref().and_then(|content| {
+                find_resolved_symbol_range(
+                    content,
                     &target_internal,
-                    Some(name),
+                    member_name.as_deref(),
                     descriptor.as_deref(),
+                    fallback_name.as_deref(),
+                    decl_kind,
                     view,
                 )
-                .or_else(|| find_declaration_range(&content, name, decl_kind))
             });
 
             Ok(GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(
@@ -245,6 +241,7 @@ fn goto_resolved_symbol_blocking(
                 jar_path: Arc::clone(jar_path),
                 target_internal,
                 member_name,
+                fallback_name,
                 descriptor,
                 decl_kind,
                 view: view.clone(),
@@ -274,16 +271,17 @@ fn goto_resolved_symbol_blocking(
             }
 
             request.check_cancelled("goto.after_zip_extract")?;
-            let range = member_name.as_ref().and_then(|name| {
-                let content = std::fs::read_to_string(&cache_path).ok()?;
-                find_symbol_range(
-                    &content,
+            let content = std::fs::read_to_string(&cache_path).ok();
+            let range = content.as_deref().and_then(|content| {
+                find_resolved_symbol_range(
+                    content,
                     &target_internal,
-                    Some(name),
+                    member_name.as_deref(),
                     descriptor.as_deref(),
+                    fallback_name.as_deref(),
+                    decl_kind,
                     view,
                 )
-                .or_else(|| find_declaration_range(&content, name, decl_kind))
             });
 
             let Some(target_uri) = Url::from_file_path(&cache_path).ok() else {
@@ -354,16 +352,17 @@ async fn goto_decompile(
     }
 
     request.check_cancelled("goto.after_decompile")?;
-    let range = plan.member_name.as_ref().and_then(|name| {
-        let content = std::fs::read_to_string(&cache_path).ok()?;
-        find_symbol_range(
-            &content,
+    let content = std::fs::read_to_string(&cache_path).ok();
+    let range = content.as_deref().and_then(|content| {
+        find_resolved_symbol_range(
+            content,
             &plan.target_internal,
-            Some(name),
+            plan.member_name.as_deref(),
             plan.descriptor.as_deref(),
+            plan.fallback_name.as_deref(),
+            plan.decl_kind,
             &plan.view,
         )
-        .or_else(|| find_declaration_range(&content, name, plan.decl_kind))
     });
 
     let Some(target_uri) = Url::from_file_path(&cache_path).ok() else {
@@ -384,9 +383,23 @@ struct DecompilePlan {
     jar_path: Arc<str>,
     target_internal: Arc<str>,
     member_name: Option<Arc<str>>,
+    fallback_name: Option<Arc<str>>,
     descriptor: Option<Arc<str>>,
     decl_kind: DeclKind,
     view: IndexView,
+}
+
+fn find_resolved_symbol_range(
+    content: &str,
+    target_internal: &str,
+    member_name: Option<&str>,
+    descriptor: Option<&str>,
+    fallback_name: Option<&str>,
+    decl_kind: DeclKind,
+    view: &IndexView,
+) -> Option<Range> {
+    find_symbol_range(content, target_internal, member_name, descriptor, view)
+        .or_else(|| fallback_name.and_then(|name| find_declaration_range(content, name, decl_kind)))
 }
 
 // ── 声明类型 ──────────────────────────────────────────────────────────────────
@@ -604,6 +617,14 @@ fn extract_class_bytes(jar: &str, internal: &str) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::ClassOrigin;
+    use crate::language::java::class_parser::parse_java_source_via_tree_for_test;
+    use crate::lsp::request_cancellation::{CancellationToken, RequestFamily};
+    use crate::lsp::request_context::RequestContext;
+    use crate::workspace::document::Document;
+    use crate::workspace::{SourceFile, Workspace};
+    use std::sync::Arc;
+    use tower_lsp::lsp_types::Url;
 
     #[test]
     fn test_find_var_decl_col_supports_varargs_parameter() {
@@ -616,5 +637,77 @@ mod tests {
     fn test_find_var_decl_col_ignores_member_access_usage() {
         let line = "        System.out.println(numbers.length);";
         assert!(find_var_decl_col(line, "length").is_none());
+    }
+
+    #[test]
+    fn test_goto_resolved_nested_class_uses_type_range_not_default_location() {
+        let workspace = Arc::new(Workspace::new());
+        let uri = Url::parse("file:///workspace/Outer.java").expect("uri");
+        let source = indoc::indoc! {r#"
+            package com.example;
+
+            class Outer {
+                class Inner {
+                    class Leaf {}
+                }
+            }
+        "#}
+        .to_string();
+
+        let classes = parse_java_source_via_tree_for_test(
+            &source,
+            ClassOrigin::SourceFile(Arc::from(uri.as_str())),
+            None,
+        );
+        workspace.index.update(|index| index.add_classes(classes));
+        workspace.documents.open(Document::new(SourceFile::new(
+            uri.clone(),
+            "java",
+            1,
+            source.clone(),
+            None,
+        )));
+
+        let view = workspace.index.load().view(crate::index::IndexScope {
+            module: crate::index::ModuleId::ROOT,
+        });
+        let request = RequestContext::new(
+            "test_goto",
+            &uri,
+            RequestFamily::GotoDefinition,
+            1,
+            CancellationToken::new(),
+        );
+
+        let prepared = goto_resolved_symbol_blocking(
+            Arc::clone(&workspace),
+            &view,
+            ResolvedSymbol::Class(Arc::from("com/example/Outer$Inner$Leaf")),
+            &request,
+        )
+        .expect("goto result");
+
+        match prepared {
+            GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(location))) => {
+                assert_eq!(location.uri, uri);
+                let expected_line = source
+                    .lines()
+                    .position(|line| line.contains("Leaf"))
+                    .expect("Leaf declaration line") as u32;
+                assert_eq!(
+                    location.range.start.line, expected_line,
+                    "{:?}",
+                    location.range
+                );
+                let line = source
+                    .lines()
+                    .nth(location.range.start.line as usize)
+                    .expect("target line");
+                let start = location.range.start.character as usize;
+                let end = location.range.end.character as usize;
+                assert_eq!(&line[start..end], "Leaf");
+            }
+            _ => panic!("expected source goto location"),
+        }
     }
 }

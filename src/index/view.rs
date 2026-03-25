@@ -95,6 +95,20 @@ impl IndexView {
         }
     }
 
+    pub fn with_overlay_classes(&self, classes: Vec<ClassMetadata>) -> Self {
+        if classes.is_empty() {
+            return self.clone();
+        }
+
+        let overlay = Arc::new(BucketIndex::new());
+        overlay.add_classes(classes);
+
+        let mut layers = SmallVec::with_capacity(self.layers.len() + 1);
+        layers.push(overlay);
+        layers.extend(self.layers.iter().cloned());
+        Self::new(layers)
+    }
+
     /// Get the number of layers in this view
     pub fn layer_count(&self) -> usize {
         self.layers.len()

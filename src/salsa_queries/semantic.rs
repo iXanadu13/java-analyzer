@@ -9,7 +9,10 @@
 use crate::language::java::{
     JavaContextExtractor, members, scope, synthetic,
     type_ctx::{SourceTypeCtx, extract_param_type},
-    utils::{get_initializer_text, java_type_to_internal},
+    utils::{
+        get_initializer_text, java_type_to_internal, split_java_generic_base,
+        strip_leading_java_type_modifiers,
+    },
 };
 use crate::language::ts_utils::run_query;
 use crate::salsa_db::SourceFile;
@@ -142,7 +145,7 @@ pub fn extract_java_current_class_member_list_from_source(
         scope::extract_enclosing_internal_name(&ctx, cursor_node, package.as_ref()).or_else(|| {
             crate::language::java::utils::build_internal_name(&package, &enclosing_class)
         });
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+    let type_ctx = SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(
         db.workspace_index().view(crate::index::IndexScope {
             module: crate::index::ModuleId::ROOT,
         }),
@@ -326,7 +329,7 @@ pub fn extract_java_flow_type_overrides(
     let cursor_node = ctx.find_cursor_node(root);
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+    let type_ctx = SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(
         db.workspace_index().view(crate::index::IndexScope {
             module: crate::index::ModuleId::ROOT,
         }),
@@ -408,23 +411,30 @@ fn extract_visible_locals_in_tree<'a>(
     cursor_offset: usize,
     type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<LocalVar> {
+    let package = scope::extract_package(ctx, root);
     let mut visible =
         if let Some(method_node) = find_enclosing_method_node_in_tree(root, cursor_offset) {
+            let enclosing_internal_name =
+                scope::extract_enclosing_internal_name(ctx, Some(method_node), package.as_ref());
             filter_visible_locals(
                 &collect_method_locals(
                     ctx,
                     method_node,
                     type_ctx,
+                    enclosing_internal_name.as_ref(),
                     fallback_visibility_scope(method_node.end_byte()),
                 ),
                 cursor_offset,
             )
         } else {
+            let enclosing_internal_name =
+                scope::extract_enclosing_internal_name(ctx, cursor_node, package.as_ref());
             filter_visible_locals(
                 &collect_method_locals(
                     ctx,
                     root,
                     type_ctx,
+                    enclosing_internal_name.as_ref(),
                     fallback_visibility_scope(cursor_offset),
                 ),
                 cursor_offset,
@@ -460,7 +470,7 @@ fn extract_root_recovery_locals(
     );
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+    let type_ctx = SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(
         db.workspace_index().view(crate::index::IndexScope {
             module: crate::index::ModuleId::ROOT,
         }),
@@ -471,6 +481,12 @@ fn extract_root_recovery_locals(
             &ctx,
             root,
             Some(&type_ctx),
+            scope::extract_enclosing_internal_name(
+                &ctx,
+                ctx.find_cursor_node(root),
+                package.as_ref(),
+            )
+            .as_ref(),
             fallback_visibility_scope(cursor_offset),
         ),
         cursor_offset,
@@ -516,7 +532,7 @@ fn parse_method_locals(
 
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+    let type_ctx = SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(
         db.workspace_index().view(crate::index::IndexScope {
             module: crate::index::ModuleId::ROOT,
         }),
@@ -536,10 +552,14 @@ fn parse_method_locals(
         return Vec::new();
     };
 
+    let enclosing_internal_name =
+        scope::extract_enclosing_internal_name(&ctx, Some(method_node), package.as_ref());
+
     collect_method_locals(
         &ctx,
         method_node,
         Some(&type_ctx),
+        enclosing_internal_name.as_ref(),
         fallback_visibility_scope(method_end),
     )
 }
@@ -548,37 +568,49 @@ fn collect_method_locals(
     ctx: &JavaContextExtractor,
     method_node: Node,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) -> Vec<CachedMethodLocal> {
-    let mut locals = extract_declared_locals(ctx, method_node, type_ctx, fallback_scope);
+    let mut locals = extract_declared_locals(
+        ctx,
+        method_node,
+        type_ctx,
+        enclosing_internal_name,
+        fallback_scope,
+    );
     locals.extend(extract_enhanced_for_locals(
         ctx,
         method_node,
         type_ctx,
+        enclosing_internal_name,
         fallback_scope,
     ));
     locals.extend(extract_catch_params(
         ctx,
         method_node,
         type_ctx,
+        enclosing_internal_name,
         fallback_scope,
     ));
     locals.extend(extract_misread_var_decls(
         ctx,
         method_node,
         type_ctx,
+        enclosing_internal_name,
         fallback_scope,
     ));
     locals.extend(extract_locals_from_error_nodes(
         ctx,
         method_node,
         type_ctx,
+        enclosing_internal_name,
         fallback_scope,
     ));
     locals.extend(extract_method_params(
         ctx,
         method_node,
         type_ctx,
+        enclosing_internal_name,
         fallback_scope,
     ));
     locals
@@ -588,6 +620,7 @@ fn extract_enhanced_for_locals(
     ctx: &JavaContextExtractor,
     root: Node,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) -> Vec<CachedMethodLocal> {
     let mut vars = Vec::new();
@@ -606,7 +639,11 @@ fn extract_enhanced_for_locals(
             vars.push(CachedMethodLocal {
                 local: LocalVar {
                     name: Arc::from(ctx.node_text(name_node)),
-                    type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                    type_internal: resolve_declared_source_type(
+                        raw_ty,
+                        type_ctx,
+                        enclosing_internal_name,
+                    ),
                     init_expr: None,
                 },
                 declaration_start: name_node.start_byte(),
@@ -629,6 +666,7 @@ fn extract_catch_params(
     ctx: &JavaContextExtractor,
     root: Node,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) -> Vec<CachedMethodLocal> {
     let mut vars = Vec::new();
@@ -646,7 +684,11 @@ fn extract_catch_params(
             vars.push(CachedMethodLocal {
                 local: LocalVar {
                     name: Arc::from(ctx.node_text(name_node)),
-                    type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                    type_internal: resolve_declared_source_type(
+                        raw_ty,
+                        type_ctx,
+                        enclosing_internal_name,
+                    ),
                     init_expr: None,
                 },
                 declaration_start: name_node.start_byte(),
@@ -669,6 +711,7 @@ fn extract_declared_locals(
     ctx: &JavaContextExtractor,
     root: Node,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) -> Vec<CachedMethodLocal> {
     let query_src = r#"
@@ -720,7 +763,11 @@ fn extract_declared_locals(
             } else {
                 LocalVar {
                     name: Arc::from(name),
-                    type_internal: resolve_declared_source_type(&raw_ty, type_ctx),
+                    type_internal: resolve_declared_source_type(
+                        &raw_ty,
+                        type_ctx,
+                        enclosing_internal_name,
+                    ),
                     init_expr: None,
                 }
             };
@@ -734,7 +781,16 @@ fn extract_declared_locals(
         .collect()
 }
 
-fn resolve_declared_source_type(raw_ty: &str, type_ctx: Option<&SourceTypeCtx>) -> TypeName {
+fn resolve_declared_source_type(
+    raw_ty: &str,
+    type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
+) -> TypeName {
+    if let Some(enclosing_owner_type) =
+        resolve_enclosing_owner_declared_type(raw_ty, enclosing_internal_name)
+    {
+        return enclosing_owner_type;
+    }
     if let Some(type_ctx) = type_ctx
         && let Some(resolved) = type_ctx.resolve_type_name_relaxed(raw_ty.trim())
     {
@@ -750,10 +806,18 @@ fn extract_misread_var_decls(
     ctx: &JavaContextExtractor,
     root: Node,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) -> Vec<CachedMethodLocal> {
     let mut vars = Vec::new();
-    collect_misread_var_decls(ctx, root, &mut vars, type_ctx, fallback_scope);
+    collect_misread_var_decls(
+        ctx,
+        root,
+        &mut vars,
+        type_ctx,
+        enclosing_internal_name,
+        fallback_scope,
+    );
     vars
 }
 
@@ -762,6 +826,7 @@ fn collect_misread_var_decls(
     root: Node,
     vars: &mut Vec<CachedMethodLocal>,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) {
     let mut stack = vec![root];
@@ -792,7 +857,11 @@ fn collect_misread_var_decls(
                     let raw_ty = type_name.as_deref().unwrap_or("Object");
                     LocalVar {
                         name: Arc::from(name),
-                        type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                        type_internal: resolve_declared_source_type(
+                            raw_ty,
+                            type_ctx,
+                            enclosing_internal_name,
+                        ),
                         init_expr: None,
                     }
                 };
@@ -831,6 +900,7 @@ fn extract_method_params(
     ctx: &JavaContextExtractor,
     method_node: Node,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) -> Vec<CachedMethodLocal> {
     let params_node = if method_node.kind() == "compact_constructor_declaration" {
@@ -881,7 +951,11 @@ fn extract_method_params(
         vars.push(CachedMethodLocal {
             local: LocalVar {
                 name: Arc::from(ctx.node_text(name_node)),
-                type_internal: resolve_declared_source_type(raw_ty.as_str(), type_ctx),
+                type_internal: resolve_declared_source_type(
+                    raw_ty.as_str(),
+                    type_ctx,
+                    enclosing_internal_name,
+                ),
                 init_expr: None,
             },
             declaration_start: name_node.start_byte(),
@@ -896,10 +970,18 @@ fn extract_locals_from_error_nodes(
     ctx: &JavaContextExtractor,
     root: Node,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) -> Vec<CachedMethodLocal> {
     let mut vars = Vec::new();
-    collect_locals_in_errors(ctx, root, &mut vars, type_ctx, fallback_scope);
+    collect_locals_in_errors(
+        ctx,
+        root,
+        &mut vars,
+        type_ctx,
+        enclosing_internal_name,
+        fallback_scope,
+    );
     vars
 }
 
@@ -908,6 +990,7 @@ fn collect_locals_in_errors(
     root: Node,
     vars: &mut Vec<CachedMethodLocal>,
     type_ctx: Option<&SourceTypeCtx>,
+    enclosing_internal_name: Option<&Arc<str>>,
     fallback_scope: ScopeRange,
 ) {
     let mut stack = vec![root];
@@ -942,7 +1025,11 @@ fn collect_locals_in_errors(
                         } else {
                             LocalVar {
                                 name: Arc::from(name_node.utf8_text(ctx.bytes()).ok()?),
-                                type_internal: resolve_declared_source_type(&raw_ty, type_ctx),
+                                type_internal: resolve_declared_source_type(
+                                    &raw_ty,
+                                    type_ctx,
+                                    enclosing_internal_name,
+                                ),
                                 init_expr: None,
                             }
                         };
@@ -1305,7 +1392,57 @@ fn extract_lambda_formal_param_type(
     if raw_ty.is_empty() || raw_ty == "var" {
         return TypeName::new("unknown");
     }
-    resolve_declared_source_type(&raw_ty, type_ctx)
+    resolve_declared_source_type(&raw_ty, type_ctx, None)
+}
+
+fn resolve_enclosing_owner_declared_type(
+    raw_ty: &str,
+    enclosing_internal_name: Option<&Arc<str>>,
+) -> Option<TypeName> {
+    let raw_ty = strip_leading_java_type_modifiers(raw_ty.trim());
+    if raw_ty.is_empty() {
+        return None;
+    }
+
+    let (raw_ty, extra_dims) = if let Some(stripped) = raw_ty.strip_suffix("...") {
+        (stripped.trim(), 1usize)
+    } else {
+        (raw_ty, 0usize)
+    };
+
+    let mut dims = extra_dims;
+    let mut base = raw_ty;
+    while let Some(stripped) = base.strip_suffix("[]") {
+        dims += 1;
+        base = stripped.trim();
+    }
+
+    let (base_name, args) = split_java_generic_base(base)?;
+    if args.is_some() || base_name.contains('.') || base_name.contains('/') {
+        return None;
+    }
+
+    let mut current = enclosing_internal_name?.as_ref();
+    loop {
+        if internal_simple_name(current) == base_name {
+            let mut ty = TypeName::new(current);
+            if dims > 0 {
+                ty = ty.with_array_dims(dims);
+            }
+            return Some(ty);
+        }
+
+        let Some((owner_internal, _)) = current.rsplit_once('$') else {
+            break;
+        };
+        current = owner_internal;
+    }
+
+    None
+}
+
+fn internal_simple_name(internal: &str) -> &str {
+    internal.rsplit(['$', '/']).next().unwrap_or(internal)
 }
 
 fn filter_visible_locals(
@@ -1662,6 +1799,7 @@ fn count_method_locals(root: Node, source: &str, method_start: usize, method_end
     collect_method_locals(
         &ctx,
         method_node,
+        None,
         None,
         fallback_visibility_scope(method_end),
     )

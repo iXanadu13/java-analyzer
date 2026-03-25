@@ -434,6 +434,9 @@ impl<'a> SymbolResolver<'a> {
                 return Some(Arc::clone(&cls.internal_name));
             }
         }
+        if let Some(resolved) = self.resolve_enclosing_owner_type(ctx, head) {
+            return Some(resolved);
+        }
         if let Some(type_ctx) = ctx.extension::<SourceTypeCtx>() {
             if let Some(resolved) = type_ctx.resolve_simple_strict(head) {
                 return Some(Arc::from(resolved));
@@ -449,6 +452,33 @@ impl<'a> SymbolResolver<'a> {
         }
         None
     }
+
+    fn resolve_enclosing_owner_type(
+        &self,
+        ctx: &SemanticContext,
+        simple_name: &str,
+    ) -> Option<Arc<str>> {
+        let mut current = ctx.enclosing_internal_name.as_deref()?;
+        loop {
+            if internal_simple_name(current) == simple_name {
+                return self
+                    .view
+                    .get_class(current)
+                    .map(|class| Arc::clone(&class.internal_name))
+                    .or_else(|| Some(Arc::from(current)));
+            }
+
+            let Some((owner_internal, _)) = current.rsplit_once('$') else {
+                break;
+            };
+            current = owner_internal;
+        }
+        None
+    }
+}
+
+fn internal_simple_name(internal: &str) -> &str {
+    internal.rsplit(['$', '/']).next().unwrap_or(internal)
 }
 
 /// `Ljava/io/PrintStream;` -> `java/io/PrintStream`
