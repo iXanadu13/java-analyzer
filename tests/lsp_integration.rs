@@ -283,6 +283,85 @@ public class User {
 }
 
 #[tokio::test]
+async fn test_completion_member_access_lombok_delegate() {
+    let workspace = create_test_workspace();
+    let engine = Arc::new(CompletionEngine::new());
+    let registry = Arc::new(LanguageRegistry::new());
+
+    let (content, position) = strip_cursor_marker(
+        r#"
+package org.example;
+
+import lombok.experimental.Delegate;
+
+interface Service {
+    void doSomething();
+    String getName();
+}
+
+class ServiceImpl implements Service {
+    @Override
+    public void doSomething() {}
+
+    @Override
+    public String getName() {
+        return "ServiceImpl";
+    }
+}
+
+public class Wrapper {
+    @Delegate
+    private final Service service = new ServiceImpl();
+
+    public static void main(String[] args) {
+        Wrapper wrapper = new Wrapper();
+        wrapper./*caret*/
+    }
+}
+"#,
+    );
+
+    open_document(&workspace, "file:///test/Wrapper.java", &content).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: Url::parse("file:///test/Wrapper.java").unwrap(),
+            },
+            position,
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: Some(CompletionContext {
+            trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+            trigger_character: Some(".".to_string()),
+        }),
+    };
+
+    let response = run_completion(
+        Arc::clone(&workspace),
+        Arc::clone(&engine),
+        Arc::clone(&registry),
+        params,
+    )
+    .await;
+
+    assert!(response.is_some(), "Expected completion results, got None");
+
+    if let Some(CompletionResponse::List(list)) = response {
+        let labels: Vec<&str> = list.items.iter().map(|item| item.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|label| label.starts_with("doSomething")),
+            "labels={labels:?}"
+        );
+        assert!(
+            labels.iter().any(|label| label.starts_with("getName")),
+            "labels={labels:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_name_table_not_empty_after_indexing() {
     let workspace = create_test_workspace();
 

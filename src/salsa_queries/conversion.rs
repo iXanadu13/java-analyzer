@@ -775,6 +775,56 @@ mod tests {
     }
 
     #[test]
+    fn test_java_completion_context_conversion_materializes_delegate_members_from_source() {
+        let db = Database::default();
+        let uri = Url::parse("file:///test/Wrapper.java").unwrap();
+        let marked_source = indoc::indoc! {r#"
+            import lombok.experimental.Delegate;
+
+            interface Service {
+                void doSomething();
+                String getName();
+            }
+
+            class ServiceImpl implements Service {
+                public void doSomething() {}
+                public String getName() { return "ServiceImpl"; }
+            }
+
+            class Wrapper {
+                @Delegate
+                private final Service service = new ServiceImpl();
+
+                void demo() {
+                    doS|
+                }
+            }
+        "#};
+        let marker = marked_source.find('|').expect("cursor marker");
+        let source = marked_source.replacen('|', "", 1);
+        let rope = Rope::from_str(&source);
+        let line = rope.byte_to_line(marker) as u32;
+        let character = (marker - rope.line_to_byte(line as usize)) as u32;
+        let file = SourceFile::new(&db, FileId::new(uri), source.clone(), Arc::from("java"));
+
+        let data = crate::salsa_queries::java::extract_java_completion_context(
+            &db, file, line, character, None,
+        );
+        let ctx = SemanticContext::from_salsa_data(data.as_ref().clone(), &db, file, None);
+
+        assert!(
+            ctx.current_class_members.contains_key("doSomething"),
+            "expected doSomething() to be materialized from plain @Delegate, got {:?}",
+            ctx.current_class_members.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            ctx.current_class_members.contains_key("getName"),
+            "expected getName() to be materialized from plain @Delegate, got {:?}",
+            ctx.current_class_members.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_java_completion_context_conversion_recovers_class_members_from_error_source() {
         let db = Database::default();
         let uri = Url::parse("file:///test/Test.java").unwrap();

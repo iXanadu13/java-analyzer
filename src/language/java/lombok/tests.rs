@@ -4250,6 +4250,93 @@ mod delegate_tests {
     }
 
     #[test]
+    fn test_delegate_without_types_uses_field_type_methods() {
+        let src = indoc::indoc! {"
+            import lombok.experimental.Delegate;
+
+            interface Service {
+                void doSomething();
+                String getName();
+            }
+
+            class ServiceImpl implements Service {
+                public void doSomething() {}
+                public String getName() { return \"ServiceImpl\"; }
+            }
+
+            public class Wrapper {
+                @Delegate
+                private final Service service = new ServiceImpl();
+            }
+        "};
+
+        let classes = parse_classes(src);
+        let wrapper = classes
+            .iter()
+            .find(|class| class.name.as_ref() == "Wrapper")
+            .expect("Should find Wrapper class");
+
+        assert!(
+            wrapper
+                .methods
+                .iter()
+                .any(|method| method.name.as_ref() == "doSomething"),
+            "plain @Delegate should synthesize methods from the field type"
+        );
+        assert!(
+            wrapper
+                .methods
+                .iter()
+                .any(|method| method.name.as_ref() == "getName"),
+            "plain @Delegate should synthesize inherited interface methods from the field type"
+        );
+    }
+
+    #[test]
+    fn test_delegate_alias_import_matches_resolved_lombok_delegate() {
+        let src = indoc::indoc! {"
+            import lombok.Delegate;
+
+            interface Service {
+                void doSomething();
+            }
+
+            public class Wrapper {
+                @Delegate
+                private final Service service = null;
+            }
+        "};
+
+        let classes = parse_java_source_with_test_jdk(
+            src,
+            ClassOrigin::Unknown,
+            &["java/lang/Object", "lombok/Delegate"],
+        );
+        let wrapper = classes
+            .iter()
+            .find(|class| class.name.as_ref() == "Wrapper")
+            .expect("Should find Wrapper class");
+
+        assert!(
+            wrapper
+                .methods
+                .iter()
+                .any(|method| method.name.as_ref() == "doSomething"),
+            "resolved lombok.Delegate import should still trigger delegate synthesis"
+        );
+        assert!(
+            wrapper.fields.iter().any(|field| {
+                field.name.as_ref() == "service"
+                    && field
+                        .annotations
+                        .iter()
+                        .any(|annotation| annotation.internal_name.as_ref() == "lombok/Delegate")
+            }),
+            "fixture should resolve @Delegate to lombok/Delegate for this regression test"
+        );
+    }
+
+    #[test]
     fn test_delegate_not_generated_for_static_field() {
         let src = indoc::indoc! {"
             import lombok.experimental.Delegate;

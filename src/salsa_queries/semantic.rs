@@ -142,7 +142,11 @@ pub fn extract_java_current_class_member_list_from_source(
         scope::extract_enclosing_internal_name(&ctx, cursor_node, package.as_ref()).or_else(|| {
             crate::language::java::utils::build_internal_name(&package, &enclosing_class)
         });
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+        db.workspace_index().view(crate::index::IndexScope {
+            module: crate::index::ModuleId::ROOT,
+        }),
+    );
 
     let members = cursor_node
         .and_then(scope::nearest_type_declaration)
@@ -322,7 +326,11 @@ pub fn extract_java_flow_type_overrides(
     let cursor_node = ctx.find_cursor_node(root);
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+        db.workspace_index().view(crate::index::IndexScope {
+            module: crate::index::ModuleId::ROOT,
+        }),
+    );
     let locals =
         extract_visible_locals_in_tree(root, &ctx, cursor_node, cursor_offset, Some(&type_ctx));
 
@@ -452,7 +460,11 @@ fn extract_root_recovery_locals(
     );
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+        db.workspace_index().view(crate::index::IndexScope {
+            module: crate::index::ModuleId::ROOT,
+        }),
+    );
 
     let mut visible = filter_visible_locals(
         &collect_method_locals(
@@ -504,7 +516,11 @@ fn parse_method_locals(
 
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+        db.workspace_index().view(crate::index::IndexScope {
+            module: crate::index::ModuleId::ROOT,
+        }),
+    );
 
     let method_node = find_node_at_offset(
         root,
@@ -2092,7 +2108,11 @@ fn parse_class_members(
 
     let owner_internal =
         scope::extract_enclosing_internal_name(&ctx, Some(class_node), package.as_ref());
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
+        db.workspace_index().view(crate::index::IndexScope {
+            module: crate::index::ModuleId::ROOT,
+        }),
+    );
 
     // Extract members with synthetics (Lombok, etc.)
     let members = extract_type_members_with_synthetics(

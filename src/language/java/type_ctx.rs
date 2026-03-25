@@ -114,6 +114,10 @@ impl SourceTypeCtx {
         self
     }
 
+    pub fn view(&self) -> Option<&IndexView> {
+        self.view.as_ref()
+    }
+
     pub fn with_current_class_methods(
         mut self,
         methods: std::collections::HashMap<Arc<str>, Arc<MethodSummary>>,

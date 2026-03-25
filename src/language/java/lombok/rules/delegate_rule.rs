@@ -14,7 +14,7 @@ use crate::{
             SyntheticMemberSet, SyntheticOrigin,
         },
     },
-    semantic::context::CurrentClassMember,
+    semantic::{context::CurrentClassMember, types::parse_single_type_to_internal},
 };
 
 pub struct DelegateRule;
@@ -37,9 +37,7 @@ impl SyntheticMemberRule for DelegateRule {
 
         // Process each field with @Delegate annotation
         for field in explicit_fields {
-            if let Some(delegate_anno) =
-                find_lombok_annotation(&field.annotations, annotations::DELEGATE)
-            {
+            if let Some(delegate_anno) = find_delegate_annotation(&field.annotations) {
                 // Skip static fields
                 if (field.access_flags & rust_asm::constants::ACC_STATIC) != 0 {
                     continue;
@@ -61,19 +59,19 @@ fn generate_delegate_methods(
 ) {
     // Parse types parameter (which interfaces/classes to delegate)
     let types_to_delegate = get_types_parameter(annotation);
+    let delegate_targets: Vec<Arc<str>> = if types_to_delegate.is_empty() {
+        vec![Arc::clone(&field.descriptor)]
+    } else {
+        types_to_delegate
+    };
 
-    // Parse excludes parameter (which types to exclude)
+    // Parse excludes parameter (currently reserved for future filtering support)
     let _types_to_exclude = get_excludes_parameter(annotation);
 
-    // If types are explicitly specified, try to find and parse them
-    if !types_to_delegate.is_empty() {
-        for type_name in &types_to_delegate {
-            // Try to find the interface/class in the same file
-            if let Some(methods) = find_type_methods(input, type_name) {
-                // Generate delegate methods for each method in the interface
-                for method in methods {
-                    generate_delegate_method(field, &method, explicit_methods, out);
-                }
+    for type_name in &delegate_targets {
+        if let Some(methods) = find_type_methods(input, type_name) {
+            for method in methods {
+                generate_delegate_method(field, &method, explicit_methods, out);
             }
         }
     }
@@ -91,6 +89,14 @@ fn generate_delegate_methods(
 
 /// Find methods in a type (interface or class) within the same source file
 fn find_type_methods(input: &SyntheticInput<'_>, type_name: &str) -> Option<Vec<MethodSummary>> {
+    find_type_methods_in_source(input, type_name)
+        .or_else(|| find_type_methods_in_index(input, type_name))
+}
+
+fn find_type_methods_in_source(
+    input: &SyntheticInput<'_>,
+    type_name: &str,
+) -> Option<Vec<MethodSummary>> {
     // Extract simple name from type descriptor (e.g., "LFilter;" -> "Filter")
     let simple_name = type_name
         .trim_start_matches('L')
@@ -135,6 +141,50 @@ fn find_type_methods(input: &SyntheticInput<'_>, type_name: &str) -> Option<Vec<
     None
 }
 
+fn find_type_methods_in_index(
+    input: &SyntheticInput<'_>,
+    type_name: &str,
+) -> Option<Vec<MethodSummary>> {
+    let view = input.type_ctx.view()?;
+    let internal = resolve_delegate_type_internal(input, type_name)?;
+    let (methods, _) = view.collect_inherited_members(&internal);
+    if methods.is_empty() {
+        return None;
+    }
+    Some(
+        methods
+            .into_iter()
+            .map(|method| (*method).clone())
+            .collect(),
+    )
+}
+
+fn resolve_delegate_type_internal(input: &SyntheticInput<'_>, type_name: &str) -> Option<String> {
+    if let Some(ty) = parse_single_type_to_internal(type_name) {
+        return Some(ty.erased_internal().to_string());
+    }
+
+    let trimmed = type_name.trim();
+    if trimmed.contains('/') {
+        return Some(trimmed.to_string());
+    }
+
+    input
+        .type_ctx
+        .resolve_type_name_strict(trimmed)
+        .map(|ty| ty.erased_internal().to_string())
+}
+
+fn find_delegate_annotation<'a>(
+    annotations: &'a [crate::index::AnnotationSummary],
+) -> Option<&'a crate::index::AnnotationSummary> {
+    find_lombok_annotation(annotations, annotations::DELEGATE).or_else(|| {
+        annotations
+            .iter()
+            .find(|annotation| annotation.internal_name.as_ref() == "lombok/Delegate")
+    })
+}
+
 /// Extract methods from a type declaration
 fn extract_methods_from_type(
     input: &SyntheticInput<'_>,
@@ -165,7 +215,9 @@ fn generate_delegate_method(
     let method_name = source_method.name.as_ref();
     let method_descriptor = source_method.desc();
 
-    if has_method(explicit_methods, method_name, method_descriptor.as_ref()) {
+    if has_method(explicit_methods, method_name, method_descriptor.as_ref())
+        || has_method(&out.methods, method_name, method_descriptor.as_ref())
+    {
         return;
     }
 
