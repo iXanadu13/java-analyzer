@@ -30,7 +30,6 @@ impl CompletionProvider for LocalVarProvider {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::MethodArgument { prefix } => prefix.as_str(),
-            CursorLocation::TypeAnnotation { prefix } => prefix.as_str(),
             _ => return Ok(ProviderCompletionResult::default()),
         };
         let resolver = ContextualResolver::new(index, ctx);
