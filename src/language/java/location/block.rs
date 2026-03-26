@@ -1,8 +1,8 @@
 use crate::language::java::JavaContextExtractor;
 use crate::language::java::location::heuristics::{
-    detect_new_keyword_before_cursor, detect_variable_name_after_type_text,
-    detect_variable_name_position, detect_variable_name_position_in_error,
-    scoped_type_to_member_access,
+    detect_new_keyword_before_cursor, detect_trailing_dot_in_text,
+    detect_variable_name_after_type_text, detect_variable_name_position,
+    detect_variable_name_position_in_error, scoped_type_to_member_access,
 };
 use crate::semantic::CursorLocation;
 use tree_sitter::Node;
@@ -38,6 +38,20 @@ pub(super) fn handle_block_as_cursor(
     // Text fallback: trailing whitespace after a type-like token in a block.
     if let Some(type_name) = detect_variable_name_after_type_text(ctx) {
         return (CursorLocation::VariableName { type_name }, String::new());
+    }
+
+    let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
+    if let Some((receiver_expr, member_prefix)) = detect_trailing_dot_in_text(before) {
+        return (
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: member_prefix.clone(),
+                receiver_expr,
+                arguments: None,
+            },
+            member_prefix,
+        );
     }
 
     // Empty block or cursor after complete statement → Expression

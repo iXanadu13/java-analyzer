@@ -56,6 +56,10 @@ pub(super) fn detect_trailing_dot_in_text(before_cursor: &str) -> Option<(String
         return None;
     }
     let last_line = s.rsplit('\n').next().unwrap_or(s);
+    let last_line = strip_trailing_line_comment(last_line).trim_end();
+    if last_line.is_empty() {
+        return None;
+    }
     let bytes = last_line.as_bytes();
     let len = bytes.len();
 
@@ -85,6 +89,35 @@ pub(super) fn detect_trailing_dot_in_text(before_cursor: &str) -> Option<(String
     }
 
     Some((receiver_expr, member_prefix))
+}
+
+fn strip_trailing_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\\' if in_string || in_char => {
+                escaped = true;
+            }
+            b'"' if !in_char => in_string = !in_string,
+            b'\'' if !in_string => in_char = !in_char,
+            b'/' if !in_string && !in_char && i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                return &line[..i];
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    line
 }
 
 /// Extract the last complete expression from the end of a string.
@@ -1538,6 +1571,14 @@ mod tests {
         assert_eq!(
             detect_trailing_dot_in_text("class A { void f() { RealMain.getInstance()."),
             Some(("RealMain.getInstance()".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn test_detect_trailing_dot_ignores_trailing_line_comment() {
+        assert_eq!(
+            detect_trailing_dot_in_text("class A { void f() { list. // trailing comment"),
+            Some(("list".to_string(), String::new()))
         );
     }
 

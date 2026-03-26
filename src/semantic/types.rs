@@ -11,6 +11,7 @@ use crate::{
 use rust_asm::constants::{ACC_ABSTRACT, ACC_STATIC, ACC_VARARGS};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tree_sitter::Node;
 
 pub mod generics;
 pub mod symbol_resolver;
@@ -675,14 +676,14 @@ impl<'idx> TypeResolver<'idx> {
             return Some(box_primitive_jvm_type(ret));
         }
 
-        if let Some(body) = parse_lambda_expression_body(text) {
+        if let Some(body) = extract_lambda_return_expression_text(text) {
             let lambda_locals = self
                 .build_lambda_param_locals_from_target(text, target_param_ty)
                 .unwrap_or_default();
             let mut merged_locals = lambda_locals;
             merged_locals.extend_from_slice(locals);
-            let chain = crate::completion::parser::parse_chain_from_expr(body);
-            let body_ty = self.resolve(body, &merged_locals, enclosing).or_else(|| {
+            let chain = crate::completion::parser::parse_chain_from_expr(&body);
+            let body_ty = self.resolve(&body, &merged_locals, enclosing).or_else(|| {
                 if chain.is_empty() {
                     None
                 } else {
@@ -2191,6 +2192,90 @@ fn parse_lambda_expression_body(text: &str) -> Option<&str> {
     Some(body)
 }
 
+fn extract_lambda_return_expression_text(text: &str) -> Option<String> {
+    if let Some(body) = parse_lambda_expression_body(text) {
+        return Some(body.to_string());
+    }
+
+    parse_single_return_expression_from_lambda_block(text)
+}
+
+fn parse_single_return_expression_from_lambda_block(text: &str) -> Option<String> {
+    let wrapped = format!("class __LambdaInfer {{ Object __m() {{ return {text}; }} }}");
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_java::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(&wrapped, None)?;
+    let root = tree.root_node();
+    let lambda = find_first_node_of_kind(root, "lambda_expression")?;
+    let body = lambda.child_by_field_name("body")?;
+    if body.kind() != "block" {
+        return None;
+    }
+
+    let mut returns = Vec::new();
+    collect_lambda_block_return_expressions(body, wrapped.as_bytes(), &mut returns)?;
+    (returns.len() == 1).then(|| returns.pop()).flatten()
+}
+
+fn collect_lambda_block_return_expressions(
+    node: Node<'_>,
+    bytes: &[u8],
+    returns: &mut Vec<String>,
+) -> Option<()> {
+    if node.kind() == "return_statement" {
+        let value = node.child_by_field_name("value").or_else(|| {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor).next()
+        })?;
+        let text = value.utf8_text(bytes).ok()?.trim();
+        if text.is_empty() {
+            return None;
+        }
+        returns.push(text.to_string());
+        return Some(());
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if should_skip_nested_lambda_return_scope(child.kind()) {
+            continue;
+        }
+        collect_lambda_block_return_expressions(child, bytes, returns)?;
+    }
+
+    Some(())
+}
+
+fn should_skip_nested_lambda_return_scope(kind: &str) -> bool {
+    matches!(
+        kind,
+        "lambda_expression"
+            | "class_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "record_declaration"
+            | "annotation_type_declaration"
+            | "anonymous_class_body"
+    )
+}
+
+fn find_first_node_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = find_first_node_of_kind(child, kind) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
 fn parse_lambda_text_parts(text: &str) -> Option<(Vec<String>, &str)> {
     let idx = text.find("->")?;
     let params_text = text[..idx].trim();
@@ -3137,6 +3222,35 @@ mod tests {
                 )
                 .map(|t| t.to_signature_string()),
             Some("Ljava/lang/StringBuilder;".to_string())
+        );
+        assert_eq!(
+            resolver
+                .infer_functional_arg_return_shallow(
+                    "s -> { return s.length(); }",
+                    EvalContext::default(),
+                    Some(&target)
+                )
+                .map(|t| t.to_signature_string()),
+            Some("Ljava/lang/Integer;".to_string())
+        );
+        assert_eq!(
+            resolver
+                .infer_functional_arg_return_shallow(
+                    "s -> { return new StringBuilder(s); }",
+                    EvalContext::default(),
+                    Some(&target)
+                )
+                .map(|t| t.to_signature_string()),
+            Some("Ljava/lang/StringBuilder;".to_string())
+        );
+        assert_eq!(
+            resolver.infer_functional_arg_return_shallow(
+                "s -> { if (true) return s.length(); return s.length(); }",
+                EvalContext::default(),
+                Some(&target)
+            ),
+            None,
+            "multiple returns should stay conservative until block-body solving is implemented"
         );
     }
 

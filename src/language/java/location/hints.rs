@@ -15,17 +15,29 @@ pub(crate) fn infer_functional_target_hint(
     cursor_node: Option<Node>,
 ) -> Option<FunctionalTargetHint> {
     let node = cursor_node?;
-    let (expected_type_source, mut expected_type_context) = infer_expected_type_source(ctx, node);
+    let (mut expected_type_source, mut expected_type_context) =
+        infer_expected_type_source(ctx, node);
     let assignment_lhs_expr = infer_assignment_rhs_lhs_expr(ctx, node);
     if expected_type_context.is_none() && assignment_lhs_expr.is_some() {
         expected_type_context = Some(ExpectedTypeSource::AssignmentRhs);
     }
     let method_call = infer_method_argument_target_hint(ctx, node);
-    let expr_shape = infer_functional_expr_shape(ctx, node);
+    let mut expr_shape = infer_functional_expr_shape(ctx, node);
+    if expected_type_source.is_none() || expr_shape.is_none() {
+        if let Some(recovered) = infer_functional_target_hint_from_error_arrow(ctx, node) {
+            if expected_type_source.is_none() {
+                expected_type_source = recovered.expected_type_source;
+            }
+            if expected_type_context.is_none() {
+                expected_type_context = recovered.expected_type_context;
+            }
+            if expr_shape.is_none() {
+                expr_shape = recovered.expr_shape;
+            }
+        }
+    }
     if expected_type_source.is_none() && assignment_lhs_expr.is_none() && method_call.is_none() {
-        // Fallback: when the cursor is inside an ERROR node that contains `->`,
-        // try to recover the expected type from `Type name = ... -> ...` pattern.
-        return infer_functional_target_hint_from_error_arrow(ctx, node);
+        return None;
     }
     Some(FunctionalTargetHint {
         expected_type_source,
@@ -79,42 +91,36 @@ fn infer_functional_target_hint_from_error_arrow(
         return None;
     }
 
-    let params_node = &children[arrow_idx - 1];
+    let params_idx = (0..arrow_idx).rev().find(|&i| {
+        matches!(
+            children[i].kind(),
+            "identifier" | "inferred_parameters" | "formal_parameters"
+        )
+    })?;
+    let params_node = &children[params_idx];
     // Validate params_node looks like lambda parameters
-    if !matches!(
-        params_node.kind(),
-        "identifier" | "inferred_parameters" | "formal_parameters"
-    ) {
-        return None;
-    }
-
     // Find `=` before params
-    let eq_idx = (0..arrow_idx - 1)
+    let eq_idx = (0..params_idx).rev().find(|&i| children[i].kind() == "=")?;
+
+    let name_idx = (0..eq_idx)
         .rev()
-        .find(|&i| children[i].kind() == "=")?;
+        .find(|&i| matches!(children[i].kind(), "identifier" | "type_identifier"))?;
 
-    // The identifier (variable name) should be right before `=`
-    if eq_idx == 0 {
-        return None;
-    }
-    let _name_node = &children[eq_idx - 1];
+    let type_node = (0..name_idx).rev().map(|i| &children[i]).find(|node| {
+        matches!(
+            node.kind(),
+            "generic_type"
+                | "type_identifier"
+                | "scoped_type_identifier"
+                | "array_type"
+                | "integral_type"
+                | "floating_point_type"
+                | "boolean_type"
+                | "void_type"
+        )
+    })?;
 
-    // The type node should be before the name
-    if eq_idx < 2 {
-        return None;
-    }
-
-    // Collect the type: it could be a generic_type, type_identifier, etc.
-    // Take the named node just before the variable name.
-    let type_node = &children[eq_idx - 2];
-    if !matches!(
-        type_node.kind(),
-        "generic_type" | "type_identifier" | "scoped_type_identifier" | "array_type"
-    ) {
-        return None;
-    }
-
-    let expected_type = ctx.node_text(*type_node).trim().to_string();
+    let expected_type = normalize_recovered_expected_type_text(ctx.node_text(*type_node));
     if expected_type.is_empty() {
         return None;
     }
@@ -168,6 +174,46 @@ fn infer_functional_target_hint_from_error_arrow(
         method_call: None,
         expr_shape,
     })
+}
+
+fn normalize_recovered_expected_type_text(raw: &str) -> String {
+    let tail = raw
+        .lines()
+        .rev()
+        .map(strip_trailing_line_comment)
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| raw.trim());
+    tail.rsplit(';').next().unwrap_or(tail).trim().to_string()
+}
+
+fn strip_trailing_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\\' if in_string || in_char => {
+                escaped = true;
+            }
+            b'"' if !in_char => in_string = !in_string,
+            b'\'' if !in_string => in_char = !in_char,
+            b'/' if !in_string && !in_char && i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                return &line[..i];
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    line
 }
 
 fn infer_expected_type_source(
@@ -440,9 +486,46 @@ fn extract_type_from_decl(ctx: &JavaContextExtractor, decl_node: Node) -> String
         if child.kind() == "modifiers" {
             continue;
         }
-        return ctx.node_text(child).trim().to_string();
+        if child.kind() == "variable_declarator" {
+            break;
+        }
+        if is_decl_type_node(child.kind()) {
+            return normalize_recovered_expected_type_text(ctx.node_text(child));
+        }
+        if child.kind() == "ERROR"
+            && let Some(type_node) = find_first_type_like_descendant(child)
+        {
+            return normalize_recovered_expected_type_text(ctx.node_text(type_node));
+        }
     }
     String::new()
+}
+
+fn is_decl_type_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "generic_type"
+            | "type_identifier"
+            | "scoped_type_identifier"
+            | "array_type"
+            | "integral_type"
+            | "floating_point_type"
+            | "boolean_type"
+            | "void_type"
+    )
+}
+
+fn find_first_type_like_descendant(node: Node) -> Option<Node> {
+    if is_decl_type_node(node.kind()) {
+        return Some(node);
+    }
+    let mut walker = node.walk();
+    for child in node.named_children(&mut walker) {
+        if let Some(found) = find_first_type_like_descendant(child) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 // ── statement label detection ─────────────────────────────────────────────────

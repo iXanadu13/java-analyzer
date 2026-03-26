@@ -599,7 +599,7 @@ mod tests {
             types::{CallArgs, EvalContext, type_name::TypeName},
         },
     };
-    use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC};
+    use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC, ACC_STATIC};
     use std::sync::Arc;
 
     fn at(src: &str, line: u32, col: u32) -> SemanticContext {
@@ -1838,6 +1838,63 @@ mod tests {
                         is_synthetic: false,
                         generic_signature: Some(Arc::from("()Ljava/util/stream/Stream<TE;>;")),
                         return_type: Some(Arc::from("Ljava/util/stream/Stream;")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util")),
+                name: Arc::from("Collections"),
+                internal_name: Arc::from("java/util/Collections"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("emptyList"),
+                    params: MethodParams::empty(),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from(
+                        "<T:Ljava/lang/Object;>()Ljava/util/List<TT;>;",
+                    )),
+                    return_type: Some(Arc::from("Ljava/util/List;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util")),
+                name: Arc::from("List"),
+                internal_name: Arc::from("java/util/List"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("get"),
+                        params: MethodParams::from([("I", "index")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("(I)TE;")),
+                        return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("size"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("I")),
                     },
                 ],
                 fields: vec![],
@@ -3340,7 +3397,7 @@ mod tests {
     }
 
     #[test]
-    fn test_var_initializer_keeps_generic_lambda_return_type_conservative_when_unsupported() {
+    fn test_var_initializer_infers_generic_lambda_return_type_from_single_return_block_body() {
         let idx = make_lambda_scope_index();
         let view = idx.view(root_scope());
         let src = indoc::indoc! {r#"
@@ -3367,12 +3424,84 @@ mod tests {
             .iter()
             .find(|lv| lv.name.as_ref() == "n")
             .expect("expected local n");
-        assert!(
-            matches!(n.type_internal.erased_internal(), "var" | "R"),
-            "unsupported block-bodied return inference should stay conservative: {}",
-            n.type_internal.erased_internal()
-        );
+        assert_eq!(n.type_internal.erased_internal(), "java/lang/Integer");
         assert!(labels.iter().any(|l| l == "n"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_trailing_dot_before_inline_comment_keeps_member_access_location() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.Collections;
+            import java.util.List;
+            import java.util.function.Predicate;
+
+            public class Example {
+                public void doWork() {
+                    List<String> list = Collections.emptyList();
+                    list./*caret*/ // no completion
+
+                    Predicate<String> isLong = s -> s.length() > 5;
+                }
+            }
+        "#};
+
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            matches!(
+                ctx.location,
+                CursorLocation::MemberAccess {
+                    ref receiver_expr,
+                    ref member_prefix,
+                    ..
+                } if receiver_expr == "list" && member_prefix.is_empty()
+            ),
+            "location={:?}",
+            ctx.location
+        );
+        assert!(labels.iter().any(|label| label == "get"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_predicate_lambda_param_stays_typed_after_prior_trailing_dot_error() {
+        let idx = make_lambda_scope_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            import java.util.Collections;
+            import java.util.List;
+            import java.util.function.Predicate;
+
+            public class Example {
+                public void doWork() {
+                    List<String> list = Collections.emptyList();
+                    list. // no completion
+
+                    Predicate<String> isLong = s -> s.len/*caret*/ > 5;
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let s = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "s")
+            .expect("expected lambda param s");
+        assert_eq!(
+            s.type_internal.erased_internal(),
+            "java/lang/String",
+            "active_lambda_param_names={:?} functional_target_hint={:?} expected_type={:?} expected_sam={:?} location={:?}",
+            ctx.active_lambda_param_names,
+            ctx.functional_target_hint,
+            ctx.typed_expr_ctx
+                .as_ref()
+                .and_then(|typed| typed.expected_type.as_ref()),
+            ctx.expected_sam,
+            ctx.location
+        );
+        assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
     }
 
     #[test]

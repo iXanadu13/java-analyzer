@@ -34,6 +34,32 @@ fn determine_location_impl(
 ) -> (CursorLocation, String) {
     let Some(node) = cursor_node else {
         // cursor is in blank area (e.g., after comment, at end of file)
+        let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
+        if let Some((receiver_expr, member_prefix)) =
+            heuristics::detect_trailing_dot_in_text(before)
+        {
+            return (
+                CursorLocation::MemberAccess {
+                    receiver_semantic_type: None,
+                    receiver_type: None,
+                    member_prefix: member_prefix.clone(),
+                    receiver_expr,
+                    arguments: None,
+                },
+                member_prefix,
+            );
+        }
+        if let Some(detected) = heuristics::detect_new_keyword_before_cursor(before) {
+            return (
+                CursorLocation::ConstructorCall {
+                    class_prefix: detected.class_prefix.clone(),
+                    expected_type: None,
+                    qualifier_expr: detected.qualifier_expr,
+                    qualifier_owner_internal: None,
+                },
+                detected.class_prefix,
+            );
+        }
         if let Some(type_name) = heuristics::detect_variable_name_after_type_text(ctx) {
             return (CursorLocation::VariableName { type_name }, String::new());
         }
@@ -229,6 +255,20 @@ fn determine_location_impl(
                 prefix: clean.clone(),
             },
             clean,
+        );
+    }
+
+    let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
+    if let Some((receiver_expr, member_prefix)) = heuristics::detect_trailing_dot_in_text(before) {
+        return (
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: member_prefix.clone(),
+                receiver_expr,
+                arguments: None,
+            },
+            member_prefix,
         );
     }
 
