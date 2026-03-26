@@ -3334,6 +3334,135 @@ mod tests {
     }
 
     #[test]
+    fn test_overloaded_lambda_target_typing_prefers_unique_arity_match() {
+        let idx = make_lambda_scope_index();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("Util"),
+            internal_name: Arc::from("Util"),
+            super_name: Some(Arc::from("java/lang/Object")),
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![
+                MethodSummary {
+                    name: Arc::from("test"),
+                    params: MethodParams::from([("Ljava/util/function/BiFunction;", "f")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from(
+                        "(Ljava/util/function/BiFunction<Ljava/lang/String;Ljava/lang/Integer;Ljava/lang/Integer;>;)V",
+                    )),
+                    return_type: Some(Arc::from("V")),
+                },
+                MethodSummary {
+                    name: Arc::from("test"),
+                    params: MethodParams::from([("Ljava/util/function/Function;", "f")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from(
+                        "(Ljava/util/function/Function<Ljava/lang/String;Ljava/lang/Integer;>;)V",
+                    )),
+                    return_type: Some(Arc::from("V")),
+                },
+            ],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    Util.test(s -> s.subs|);
+                }
+            }
+        "#};
+
+        let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let s = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "s")
+            .expect("expected lambda param s");
+        assert_eq!(s.type_internal.erased_internal(), "java/lang/String");
+        assert_eq!(
+            ctx.expected_functional_interface
+                .as_ref()
+                .map(|ty| ty.erased_internal()),
+            Some("java/util/function/Function")
+        );
+        assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_overloaded_method_reference_target_typing_prefers_unique_arity_match() {
+        let idx = make_lambda_scope_index();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("Util"),
+            internal_name: Arc::from("Util"),
+            super_name: Some(Arc::from("java/lang/Object")),
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![
+                MethodSummary {
+                    name: Arc::from("test"),
+                    params: MethodParams::from([("Ljava/util/function/BiFunction;", "f")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from(
+                        "(Ljava/util/function/BiFunction<Ljava/lang/String;Ljava/lang/Integer;Ljava/lang/String;>;)V",
+                    )),
+                    return_type: Some(Arc::from("V")),
+                },
+                MethodSummary {
+                    name: Arc::from("test"),
+                    params: MethodParams::from([("Ljava/util/function/Function;", "f")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from(
+                        "(Ljava/util/function/Function<Ljava/lang/String;Ljava/lang/String;>;)V",
+                    )),
+                    return_type: Some(Arc::from("V")),
+                },
+            ],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    Util.test(String::tri|);
+                }
+            }
+        "#};
+
+        let (mut ctx, _labels) = ctx_and_labels_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        assert_eq!(
+            ctx.expected_functional_interface
+                .as_ref()
+                .map(|ty| ty.erased_internal()),
+            Some("java/util/function/Function")
+        );
+        assert_eq!(
+            ctx.expected_sam.as_ref().map(|sam| sam.param_types.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn test_var_initializer_infers_generic_lambda_object_return_type() {
         let idx = make_lambda_scope_index();
         let view = idx.view(root_scope());

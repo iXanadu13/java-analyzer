@@ -3,12 +3,12 @@ use self::generics::{
     parse_method_type_parameters, split_internal_name, substitute_type, substitute_type_vars,
 };
 use self::type_name::TypeName;
-use super::context::{LocalVar, SemanticContext};
+use super::context::{FunctionalCompatStatus, LocalVar, SemanticContext};
 use crate::{
-    index::{IndexView, MethodSummary},
+    index::{ClassMetadata, IndexView, MethodSummary},
     jvm::descriptor::{consume_one_descriptor_type, split_param_descriptors},
 };
-use rust_asm::constants::{ACC_ABSTRACT, ACC_STATIC, ACC_VARARGS};
+use rust_asm::constants::{ACC_ABSTRACT, ACC_INTERFACE, ACC_STATIC, ACC_VARARGS};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tree_sitter::Node;
@@ -60,6 +60,19 @@ pub struct OverloadMatch<'a> {
     pub method: &'a MethodSummary,
     pub mode: OverloadInvocationMode,
     pub score: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CallsiteOverloadRank {
+    exact_functional_args: usize,
+    partial_functional_args: usize,
+    binding_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CallsiteOverloadMatch<'a> {
+    overload: OverloadMatch<'a>,
+    rank: CallsiteOverloadRank,
 }
 
 type QualifierResolver<'a> = &'a dyn Fn(&str) -> Option<TypeName>;
@@ -341,7 +354,12 @@ impl<'idx> TypeResolver<'idx> {
             .lookup_methods_in_hierarchy(base_receiver, method_name);
         let candidates: Vec<&MethodSummary> = overloads.iter().map(|m| m.as_ref()).collect();
         if !candidates.is_empty() {
-            let selected = self.select_overload_match(&candidates, arg_count, arg_types)?;
+            let selected = self.select_overload_match_with_callsite(
+                receiver_internal,
+                &candidates,
+                args,
+                ctx,
+            )?;
             let owner = self.view.find_declaring_method_owner(
                 base_receiver,
                 selected.method.name.as_ref(),
@@ -742,19 +760,32 @@ impl<'idx> TypeResolver<'idx> {
             .iter()
             .map(type_name_to_jvm_type)
             .collect::<Option<Vec<_>>>()?;
-        let methods = self.view.collect_inherited_members(owner).0;
-        let mut abstract_methods = methods.iter().filter(|m| {
-            let flags = m.access_flags;
-            (flags & ACC_ABSTRACT) != 0
-                && (flags & ACC_STATIC) == 0
-                && m.name.as_ref() != "equals"
-                && m.name.as_ref() != "hashCode"
-                && m.name.as_ref() != "toString"
-        });
-        let method = abstract_methods.next()?;
-        if abstract_methods.next().is_some() {
-            return None;
+        let mut seen = HashSet::new();
+        let mut functional_candidates = Vec::new();
+        for method in self.view.collect_inherited_members(owner).0 {
+            if (method.access_flags & ACC_STATIC) != 0 {
+                continue;
+            }
+            if is_object_method(method.name.as_ref(), method.desc().as_ref()) {
+                continue;
+            }
+            let key = format!("{}#{}", method.name, method.desc());
+            if seen.insert(key) {
+                functional_candidates.push(method);
+            }
         }
+
+        let mut abstract_methods = functional_candidates
+            .iter()
+            .filter(|method| (method.access_flags & ACC_ABSTRACT) != 0);
+        let method = if let Some(method) = abstract_methods.next() {
+            if abstract_methods.next().is_some() {
+                return None;
+            }
+            method.clone()
+        } else {
+            fallback_missing_abstract_sam_method(owner, &class, &functional_candidates)?
+        };
         let fallback_desc = method.desc();
         let sig = method
             .generic_signature
@@ -908,6 +939,449 @@ impl<'idx> TypeResolver<'idx> {
             }
         }
         best
+    }
+
+    pub fn select_overload_match_with_callsite<'a>(
+        &self,
+        receiver_internal: &str,
+        candidates: &[&'a MethodSummary],
+        args: CallArgs,
+        ctx: EvalContext,
+    ) -> Option<OverloadMatch<'a>> {
+        let functional_arg_indexes = functional_argument_indexes(args.texts);
+        if functional_arg_indexes.is_empty() {
+            return self.select_overload_match(candidates, args.count, args.types);
+        }
+
+        let mut normalized_args = normalize_arg_types(args.count, args.types);
+        for arg_index in functional_arg_indexes.iter().copied() {
+            if let Some(arg_ty) = normalized_args.get_mut(arg_index) {
+                *arg_ty = TypeName::unknown();
+            }
+        }
+        let mut scored = Vec::new();
+        for method in candidates.iter().copied() {
+            if let Some(score) = self.score_fixed_applicability(method, &normalized_args)
+                && let Some(candidate) = self.build_callsite_overload_match(
+                    receiver_internal,
+                    method,
+                    OverloadInvocationMode::Fixed,
+                    score,
+                    args,
+                    &normalized_args,
+                    &functional_arg_indexes,
+                    ctx,
+                )
+            {
+                scored.push(candidate);
+            }
+            if let Some(score) = self.score_varargs_applicability(method, &normalized_args)
+                && let Some(candidate) = self.build_callsite_overload_match(
+                    receiver_internal,
+                    method,
+                    OverloadInvocationMode::Varargs,
+                    score,
+                    args,
+                    &normalized_args,
+                    &functional_arg_indexes,
+                    ctx,
+                )
+            {
+                scored.push(candidate);
+            }
+        }
+
+        let best = scored
+            .iter()
+            .copied()
+            .max_by(|left, right| compare_callsite_overload_match(*left, *right))?;
+        let is_ambiguous = scored.iter().any(|candidate| {
+            candidate.overload.method.name != best.overload.method.name
+                || candidate.overload.method.desc() != best.overload.method.desc()
+                || candidate.overload.mode != best.overload.mode
+        }) && scored
+            .iter()
+            .filter(|candidate| {
+                compare_callsite_overload_match(**candidate, best) == std::cmp::Ordering::Equal
+            })
+            .count()
+            > 1;
+        if is_ambiguous {
+            return None;
+        }
+        Some(best.overload)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_callsite_overload_match<'a>(
+        &self,
+        receiver_internal: &str,
+        method: &'a MethodSummary,
+        mode: OverloadInvocationMode,
+        score: i32,
+        args: CallArgs,
+        normalized_args: &[TypeName],
+        functional_arg_indexes: &[usize],
+        ctx: EvalContext,
+    ) -> Option<CallsiteOverloadMatch<'a>> {
+        let sig = method
+            .generic_signature
+            .clone()
+            .unwrap_or_else(|| method.desc());
+        let sig = sig.as_ref();
+        let (param_jvm_types, ret_jvm_type) = parse_method_signature_types(sig)?;
+        let mut bindings = self.infer_method_type_bindings_from_non_lambda_args(
+            sig,
+            &param_jvm_types,
+            receiver_internal,
+            method,
+            usize::MAX,
+            mode,
+            CallArgs::new(args.count, normalized_args, args.texts),
+        );
+        let (class_type_params, receiver_args) = {
+            let (receiver_owner, receiver_args) = split_internal_name(receiver_internal);
+            self.find_declaring_class_generic_signature(receiver_owner, method)
+                .map(|sig| (parse_class_type_parameters(sig.as_ref()), receiver_args))
+                .unwrap_or_else(|| (Vec::new(), Vec::new()))
+        };
+        let mut return_type_vars = HashSet::new();
+        collect_type_vars(&ret_jvm_type, &mut return_type_vars);
+        let mut conflicted = HashSet::new();
+        let mut exact_functional_args = 0usize;
+        let mut partial_functional_args = 0usize;
+
+        for arg_index in functional_arg_indexes.iter().copied() {
+            let arg_text = args.texts.get(arg_index).map(|s| s.as_str()).unwrap_or("");
+            let Some(mut formal) = self.resolve_formal_param_jvm_for_argument(
+                method,
+                &param_jvm_types,
+                arg_index,
+                mode,
+                &bindings,
+                &class_type_params,
+                &receiver_args,
+            ) else {
+                return None;
+            };
+            if !bindings.is_empty() {
+                formal = substitute_type_vars(&formal, &bindings);
+            }
+            let compat = self.evaluate_functional_arg_compatibility(arg_text, &formal, ctx);
+            match compat {
+                FunctionalCompatStatus::Exact => exact_functional_args += 1,
+                FunctionalCompatStatus::Partial => partial_functional_args += 1,
+                FunctionalCompatStatus::Incompatible => return None,
+            }
+            if !return_type_vars.is_empty() {
+                self.bind_return_type_var_from_functional_param(
+                    method.name.as_ref(),
+                    arg_index,
+                    &formal,
+                    Some(arg_text),
+                    normalized_args.get(arg_index),
+                    ctx,
+                    &return_type_vars,
+                    &mut bindings,
+                    &mut conflicted,
+                );
+                if !conflicted.is_empty() {
+                    return None;
+                }
+            }
+        }
+
+        Some(CallsiteOverloadMatch {
+            overload: OverloadMatch {
+                method,
+                mode,
+                score,
+            },
+            rank: CallsiteOverloadRank {
+                exact_functional_args,
+                partial_functional_args,
+                binding_count: bindings.len(),
+            },
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_formal_param_jvm_for_argument(
+        &self,
+        method: &MethodSummary,
+        param_jvm_types: &[JvmType],
+        arg_index: usize,
+        mode: OverloadInvocationMode,
+        bindings: &HashMap<String, JvmType>,
+        class_type_params: &[String],
+        receiver_args: &[JvmType],
+    ) -> Option<JvmType> {
+        let (mapped_index, vararg_element) =
+            map_argument_index_to_parameter(method, arg_index, mode, param_jvm_types.len())?;
+        let mut formal = param_jvm_types.get(mapped_index)?.clone();
+        if vararg_element {
+            let JvmType::Array(inner) = formal else {
+                return None;
+            };
+            formal = *inner;
+        }
+        if !class_type_params.is_empty() && !receiver_args.is_empty() {
+            formal = formal.substitute(class_type_params, receiver_args);
+        }
+        if !bindings.is_empty() {
+            formal = substitute_type_vars(&formal, bindings);
+        }
+        Some(formal)
+    }
+
+    fn evaluate_functional_arg_compatibility(
+        &self,
+        arg_text: &str,
+        target_param_ty: &JvmType,
+        ctx: EvalContext,
+    ) -> FunctionalCompatStatus {
+        let text = arg_text.trim();
+        if text.contains("->") {
+            return self.evaluate_lambda_arg_compatibility(text, target_param_ty, ctx);
+        }
+        if text.contains("::") {
+            return self.evaluate_method_reference_arg_compatibility(text, target_param_ty, ctx);
+        }
+        FunctionalCompatStatus::Partial
+    }
+
+    fn evaluate_lambda_arg_compatibility(
+        &self,
+        text: &str,
+        target_param_ty: &JvmType,
+        ctx: EvalContext,
+    ) -> FunctionalCompatStatus {
+        let Some((param_names, _)) = parse_lambda_text_parts(text) else {
+            return FunctionalCompatStatus::Partial;
+        };
+        let Some((sam_params, sam_ret)) =
+            self.extract_sam_signature_from_functional_jvm_type(target_param_ty)
+        else {
+            return self.unknown_or_non_functional_target_status(target_param_ty);
+        };
+        if param_names.len() != sam_params.len() {
+            return FunctionalCompatStatus::Incompatible;
+        }
+        let Some(actual_ret) =
+            self.infer_functional_arg_return_shallow(text, ctx, Some(target_param_ty))
+        else {
+            return FunctionalCompatStatus::Partial;
+        };
+        self.functional_return_compatibility_status(&actual_ret, &sam_ret)
+    }
+
+    fn evaluate_method_reference_arg_compatibility(
+        &self,
+        text: &str,
+        target_param_ty: &JvmType,
+        ctx: EvalContext,
+    ) -> FunctionalCompatStatus {
+        let Some((sam_params, sam_ret)) =
+            self.extract_sam_signature_from_functional_jvm_type(target_param_ty)
+        else {
+            return self.unknown_or_non_functional_target_status(target_param_ty);
+        };
+        let Some((qualifier, member_name, is_constructor)) = parse_method_reference_text(text)
+        else {
+            return FunctionalCompatStatus::Partial;
+        };
+
+        let mut saw_partial = false;
+        let mut saw_candidate = false;
+        let mut saw_resolved_owner = false;
+
+        if is_constructor {
+            let Some(owner) =
+                self.resolve_owner_from_text_with_context(qualifier, ctx.qualifier_resolver)
+            else {
+                return FunctionalCompatStatus::Partial;
+            };
+            saw_resolved_owner = true;
+            let Some(class_meta) = self.view.get_class(&owner) else {
+                return FunctionalCompatStatus::Partial;
+            };
+            for ctor in &class_meta.methods {
+                if ctor.name.as_ref() != "<init>" || !method_accepts_arity(ctor, sam_params.len()) {
+                    continue;
+                }
+                saw_candidate = true;
+                let specialized = extract_functional_input_type(target_param_ty)
+                    .filter(is_concrete_jvm_type)
+                    .and_then(|input| self.specialize_constructor_owner_return(&owner, input));
+                let ret = specialized.unwrap_or_else(|| JvmType::Object(owner.clone(), vec![]));
+                match self.functional_return_compatibility_status(&ret, &sam_ret) {
+                    FunctionalCompatStatus::Exact => return FunctionalCompatStatus::Exact,
+                    FunctionalCompatStatus::Partial => saw_partial = true,
+                    FunctionalCompatStatus::Incompatible => {}
+                }
+            }
+        } else {
+            let type_owner =
+                self.resolve_owner_from_text_with_context(qualifier, ctx.qualifier_resolver);
+            let expr_owner =
+                self.resolve(qualifier, ctx.locals, ctx.enclosing)
+                    .and_then(|owner_ty| {
+                        if owner_ty.is_exact_class() {
+                            Some(owner_ty.erased_internal().to_string())
+                        } else {
+                            self.resolve_owner_from_text(owner_ty.erased_internal())
+                        }
+                    });
+
+            if let Some(owner) = type_owner {
+                saw_resolved_owner = true;
+                let owner_ty = TypeName::new(owner.as_str());
+                let specialized_input = extract_functional_input_type(target_param_ty)
+                    .filter(is_concrete_jvm_type)
+                    .map(|ty| ty.to_type_name());
+                let (methods, _) = self.view.collect_inherited_members(&owner);
+                for method in methods {
+                    if !method_reference_member_matches(method.name.as_ref(), member_name) {
+                        continue;
+                    }
+                    let static_form = (method.access_flags & ACC_STATIC) != 0
+                        && method_accepts_arity(method.as_ref(), sam_params.len());
+                    let unbound_form = (method.access_flags & ACC_STATIC) == 0
+                        && !sam_params.is_empty()
+                        && method_accepts_arity(method.as_ref(), sam_params.len() - 1);
+                    if !static_form && !unbound_form {
+                        continue;
+                    }
+                    let mut force_partial = false;
+                    if unbound_form {
+                        if let Some(input_ty) = specialized_input.as_ref() {
+                            let compat = self.type_compatibility(input_ty, &owner_ty);
+                            if matches!(
+                                compat.kind,
+                                ConversionKind::Incompatible | ConversionKind::NarrowingPrimitive
+                            ) {
+                                continue;
+                            }
+                        } else {
+                            // Raw/non-specialized functional targets do not prove the receiver type.
+                            force_partial = true;
+                        }
+                    }
+                    saw_candidate = true;
+                    if let Some(ret) = self.method_return_jvm_type(method.as_ref()) {
+                        match self.functional_return_compatibility_status(
+                            &box_primitive_jvm_type(ret),
+                            &sam_ret,
+                        ) {
+                            FunctionalCompatStatus::Exact => {
+                                if force_partial {
+                                    saw_partial = true;
+                                } else {
+                                    return FunctionalCompatStatus::Exact;
+                                }
+                            }
+                            FunctionalCompatStatus::Partial => saw_partial = true,
+                            FunctionalCompatStatus::Incompatible => {}
+                        }
+                    } else {
+                        saw_partial = true;
+                    }
+                }
+            }
+
+            if let Some(owner) = expr_owner {
+                saw_resolved_owner = true;
+                let (methods, _) = self.view.collect_inherited_members(&owner);
+                for method in methods {
+                    if !method_reference_member_matches(method.name.as_ref(), member_name) {
+                        continue;
+                    }
+                    if (method.access_flags & ACC_STATIC) != 0
+                        || !method_accepts_arity(method.as_ref(), sam_params.len())
+                    {
+                        continue;
+                    }
+                    saw_candidate = true;
+                    if let Some(ret) = self.method_return_jvm_type(method.as_ref()) {
+                        match self.functional_return_compatibility_status(
+                            &box_primitive_jvm_type(ret),
+                            &sam_ret,
+                        ) {
+                            FunctionalCompatStatus::Exact => return FunctionalCompatStatus::Exact,
+                            FunctionalCompatStatus::Partial => saw_partial = true,
+                            FunctionalCompatStatus::Incompatible => {}
+                        }
+                    } else {
+                        saw_partial = true;
+                    }
+                }
+            }
+        }
+
+        if saw_candidate {
+            if saw_partial {
+                FunctionalCompatStatus::Partial
+            } else {
+                FunctionalCompatStatus::Incompatible
+            }
+        } else if saw_resolved_owner {
+            FunctionalCompatStatus::Incompatible
+        } else {
+            FunctionalCompatStatus::Partial
+        }
+    }
+
+    fn method_return_jvm_type(&self, method: &MethodSummary) -> Option<JvmType> {
+        let sig = method
+            .generic_signature
+            .clone()
+            .unwrap_or_else(|| method.desc());
+        let sig = sig.as_ref();
+        let (_, ret) = parse_method_signature_types(sig)?;
+        (ret != JvmType::Primitive('V')).then_some(ret)
+    }
+
+    fn functional_return_compatibility_status(
+        &self,
+        actual_ret: &JvmType,
+        sam_ret: &JvmType,
+    ) -> FunctionalCompatStatus {
+        if matches!(sam_ret, JvmType::Primitive('V')) {
+            return FunctionalCompatStatus::Partial;
+        }
+        if matches!(
+            sam_ret,
+            JvmType::TypeVar(_) | JvmType::Wildcard | JvmType::WildcardBound(_, _)
+        ) {
+            return FunctionalCompatStatus::Partial;
+        }
+        let compat = self.type_compatibility(&actual_ret.to_type_name(), &sam_ret.to_type_name());
+        match compat.kind {
+            ConversionKind::Incompatible | ConversionKind::NarrowingPrimitive => {
+                FunctionalCompatStatus::Incompatible
+            }
+            ConversionKind::Unknown => FunctionalCompatStatus::Partial,
+            _ => FunctionalCompatStatus::Exact,
+        }
+    }
+
+    fn unknown_or_non_functional_target_status(
+        &self,
+        target_param_ty: &JvmType,
+    ) -> FunctionalCompatStatus {
+        match target_param_ty {
+            JvmType::Primitive(_) | JvmType::Array(_) => FunctionalCompatStatus::Incompatible,
+            JvmType::TypeVar(_) | JvmType::Wildcard | JvmType::WildcardBound(_, _) => {
+                FunctionalCompatStatus::Partial
+            }
+            JvmType::Object(owner, _) => {
+                if self.view.get_class(owner).is_some() {
+                    FunctionalCompatStatus::Incompatible
+                } else {
+                    FunctionalCompatStatus::Partial
+                }
+            }
+        }
     }
 
     pub fn resolve_chain(
@@ -1663,6 +2137,43 @@ fn is_varargs_method(method: &MethodSummary) -> bool {
         .is_some_and(|p| p.descriptor.starts_with('['))
 }
 
+fn method_accepts_arity(method: &MethodSummary, arg_count: usize) -> bool {
+    let param_len = method.params.len();
+    if !is_varargs_method(method) {
+        return param_len == arg_count;
+    }
+    if param_len == 0 {
+        return false;
+    }
+    let fixed_prefix = param_len - 1;
+    arg_count >= fixed_prefix
+}
+
+fn fallback_missing_abstract_sam_method(
+    owner: &str,
+    class: &ClassMetadata,
+    candidates: &[Arc<MethodSummary>],
+) -> Option<Arc<MethodSummary>> {
+    if candidates.len() != 1 {
+        return None;
+    }
+
+    let has_functional_annotation = class
+        .annotations
+        .iter()
+        .any(|ann| ann.internal_name.as_ref() == "java/lang/FunctionalInterface");
+    let metadata_suggests_functional = (class.access_flags & ACC_INTERFACE) != 0
+        || has_functional_annotation
+        // Some lightweight jar-backed fixtures omit interface / abstract bits entirely.
+        || owner.starts_with("java/util/function/")
+        || matches!(
+            owner,
+            "java/lang/Runnable" | "java/util/concurrent/Callable" | "java/util/Comparator"
+        );
+
+    metadata_suggests_functional.then(|| candidates[0].clone())
+}
+
 fn better_overload_match(current: Option<OverloadMatch<'_>>, candidate: OverloadMatch<'_>) -> bool {
     let Some(current) = current else {
         return true;
@@ -1675,6 +2186,39 @@ fn better_overload_match(current: Option<OverloadMatch<'_>>, candidate: Overload
         return mode_rank(candidate.mode) > mode_rank(current.mode);
     }
     candidate.score > current.score
+}
+
+fn compare_callsite_overload_match(
+    left: CallsiteOverloadMatch<'_>,
+    right: CallsiteOverloadMatch<'_>,
+) -> std::cmp::Ordering {
+    callsite_overload_sort_key(left).cmp(&callsite_overload_sort_key(right))
+}
+
+fn callsite_overload_sort_key(
+    candidate: CallsiteOverloadMatch<'_>,
+) -> (usize, usize, usize, usize, i32) {
+    (
+        candidate.rank.exact_functional_args,
+        candidate.rank.partial_functional_args,
+        candidate.rank.binding_count,
+        match candidate.overload.mode {
+            OverloadInvocationMode::Fixed => 1,
+            OverloadInvocationMode::Varargs => 0,
+        },
+        candidate.overload.score,
+    )
+}
+
+fn functional_argument_indexes(arg_texts: &[String]) -> Vec<usize> {
+    arg_texts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, text)| {
+            let trimmed = text.trim();
+            (trimmed.contains("->") || trimmed.contains("::")).then_some(idx)
+        })
+        .collect()
 }
 
 fn map_argument_index_to_parameter(
@@ -2181,6 +2725,19 @@ fn parse_method_reference_text(text: &str) -> Option<(&str, &str, bool)> {
     }
     let is_constructor = member == "new";
     Some((qualifier, member, is_constructor))
+}
+
+fn method_reference_member_matches(candidate_name: &str, typed_member: &str) -> bool {
+    candidate_name == typed_member || candidate_name.starts_with(typed_member)
+}
+
+fn is_object_method(name: &str, desc: &str) -> bool {
+    matches!(
+        (name, desc),
+        ("equals", "(Ljava/lang/Object;)Z")
+            | ("hashCode", "()I")
+            | ("toString", "()Ljava/lang/String;")
+    )
 }
 
 fn parse_lambda_expression_body(text: &str) -> Option<&str> {
@@ -2741,6 +3298,174 @@ mod tests {
         (idx.view(root_scope()), locals)
     }
 
+    fn make_callsite_functional_overload_fixture() -> IndexView {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::{ACC_ABSTRACT, ACC_INTERFACE, ACC_PUBLIC, ACC_STATIC};
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/util/function")),
+                name: Arc::from("Function"),
+                internal_name: Arc::from("java/util/function/Function"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("apply"),
+                    params: MethodParams::from_method_descriptor(
+                        "(Ljava/lang/Object;)Ljava/lang/Object;",
+                    ),
+                    access_flags: ACC_PUBLIC | ACC_ABSTRACT,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: Some(Arc::from("(TT;)TR;")),
+                    return_type: Some(Arc::from("Ljava/lang/Object;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from(
+                    "<T:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;",
+                )),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util/function")),
+                name: Arc::from("BiFunction"),
+                internal_name: Arc::from("java/util/function/BiFunction"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("apply"),
+                    params: MethodParams::from_method_descriptor(
+                        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                    ),
+                    access_flags: ACC_PUBLIC | ACC_ABSTRACT,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: Some(Arc::from("(TT;TU;)TR;")),
+                    return_type: Some(Arc::from("Ljava/lang/Object;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from(
+                    "<T:Ljava/lang/Object;U:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;",
+                )),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Mapper"),
+                internal_name: Arc::from("Mapper"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("map"),
+                    params: MethodParams::from_method_descriptor(
+                        "(Ljava/lang/Object;)Ljava/lang/Object;",
+                    ),
+                    access_flags: ACC_PUBLIC | ACC_ABSTRACT,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: Some(Arc::from("(TT;)TR;")),
+                    return_type: Some(Arc::from("Ljava/lang/Object;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from(
+                    "<T:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;",
+                )),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Str"),
+                internal_name: Arc::from("Str"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("trim"),
+                    params: MethodParams::empty(),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Ljava/lang/String;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Util"),
+                internal_name: Arc::from("Util"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("test"),
+                        params: MethodParams::from([("Ljava/util/function/BiFunction;", "f")]),
+                        access_flags: ACC_PUBLIC | ACC_STATIC,
+                        is_synthetic: false,
+                        annotations: vec![],
+                        generic_signature: Some(Arc::from(
+                            "(Ljava/util/function/BiFunction<LStr;Ljava/lang/Integer;Ljava/lang/String;>;)V",
+                        )),
+                        return_type: Some(Arc::from("V")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("test"),
+                        params: MethodParams::from([("Ljava/util/function/Function;", "f")]),
+                        access_flags: ACC_PUBLIC | ACC_STATIC,
+                        is_synthetic: false,
+                        annotations: vec![],
+                        generic_signature: Some(Arc::from(
+                            "(Ljava/util/function/Function<LStr;Ljava/lang/String;>;)V",
+                        )),
+                        return_type: Some(Arc::from("V")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("choose"),
+                        params: MethodParams::from([("Ljava/util/function/Function;", "f")]),
+                        access_flags: ACC_PUBLIC | ACC_STATIC,
+                        is_synthetic: false,
+                        annotations: vec![],
+                        generic_signature: Some(Arc::from(
+                            "(Ljava/util/function/Function<LStr;Ljava/lang/String;>;)V",
+                        )),
+                        return_type: Some(Arc::from("V")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("choose"),
+                        params: MethodParams::from([("LMapper;", "m")]),
+                        access_flags: ACC_PUBLIC | ACC_STATIC,
+                        is_synthetic: false,
+                        annotations: vec![],
+                        generic_signature: Some(Arc::from("(LMapper<LStr;Ljava/lang/String;>;)V")),
+                        return_type: Some(Arc::from("V")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        idx.view(root_scope())
+    }
+
     struct SnapshotProvider;
     impl SymbolProvider for SnapshotProvider {
         fn resolve_source_name(&self, internal_name: &str) -> Option<String> {
@@ -2979,6 +3704,218 @@ mod tests {
             result2.as_ref().map(|t| t.erased_internal()),
             Some("RandomClass"),
             "int arg should select RandomClass overload"
+        );
+    }
+
+    #[test]
+    fn test_callsite_overload_match_prefers_unique_lambda_arity_candidate() {
+        let view = make_callsite_functional_overload_fixture();
+        let resolver = TypeResolver::new(&view);
+        let util = view.get_class("Util").expect("Util class");
+        let candidates: Vec<&MethodSummary> = util
+            .methods
+            .iter()
+            .filter(|method| method.name.as_ref() == "test")
+            .collect();
+        let arg_types = vec![TypeName::unknown()];
+        let arg_texts = vec!["s -> s.tri".to_string()];
+
+        let selected = resolver
+            .select_overload_match_with_callsite(
+                "Util",
+                &candidates,
+                CallArgs::new(arg_texts.len(), &arg_types, &arg_texts),
+                EvalContext::new(&[], None),
+            )
+            .expect("lambda callsite should select Function overload");
+
+        assert_eq!(
+            selected.method.desc().as_ref(),
+            "(Ljava/util/function/Function;)V"
+        );
+        assert_eq!(selected.mode, OverloadInvocationMode::Fixed);
+    }
+
+    #[test]
+    fn test_callsite_overload_match_prefers_method_reference_prefix_candidate() {
+        let view = make_callsite_functional_overload_fixture();
+        let resolver = TypeResolver::new(&view);
+        let util = view.get_class("Util").expect("Util class");
+        let candidates: Vec<&MethodSummary> = util
+            .methods
+            .iter()
+            .filter(|method| method.name.as_ref() == "test")
+            .collect();
+        let arg_types = vec![TypeName::unknown()];
+        let arg_texts = vec!["Str::tri".to_string()];
+
+        let selected = resolver
+            .select_overload_match_with_callsite(
+                "Util",
+                &candidates,
+                CallArgs::new(arg_texts.len(), &arg_types, &arg_texts),
+                EvalContext::new(&[], None),
+            )
+            .expect("method reference callsite should select Function overload");
+
+        assert_eq!(
+            selected.method.desc().as_ref(),
+            "(Ljava/util/function/Function;)V"
+        );
+        assert_eq!(selected.mode, OverloadInvocationMode::Fixed);
+    }
+
+    #[test]
+    fn test_callsite_overload_match_tolerates_incomplete_std_functional_metadata() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            root_scope(),
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/Box"),
+                    super_name: Some(Arc::from("java/lang/Object")),
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("map"),
+                        params: MethodParams::from([("Ljava/util/function/Function;", "fn")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from(
+                            "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)Lorg/cubewhy/Box<TR;>;",
+                        )),
+                        return_type: Some(Arc::from("Lorg/cubewhy/Box;")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    inner_class_of: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("Object"),
+                    internal_name: Arc::from("java/lang/Object"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    generic_signature: None,
+                    inner_class_of: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("String"),
+                    internal_name: Arc::from("java/lang/String"),
+                    super_name: Some(Arc::from("java/lang/Object")),
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("trim"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Ljava/lang/String;")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    generic_signature: None,
+                    inner_class_of: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/util/function")),
+                    name: Arc::from("Function"),
+                    internal_name: Arc::from("java/util/function/Function"),
+                    super_name: Some(Arc::from("java/lang/Object")),
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("apply"),
+                        params: MethodParams::from([("Ljava/lang/Object;", "t")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("(TT;)TR;")),
+                        return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    generic_signature: Some(Arc::from(
+                        "<T:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;",
+                    )),
+                    inner_class_of: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
+        let candidates = view.lookup_methods_in_hierarchy("org/cubewhy/Box", "map");
+        let candidate_refs: Vec<&MethodSummary> = candidates.iter().map(|m| m.as_ref()).collect();
+        let arg_types = Vec::<TypeName>::new();
+        let arg_texts = vec!["String::trim".to_string()];
+
+        let selected = resolver.select_overload_match_with_callsite(
+            "org/cubewhy/Box<Ljava/lang/String;>",
+            &candidate_refs,
+            CallArgs::new(arg_texts.len(), &arg_types, &arg_texts),
+            EvalContext::new(&[], None),
+        );
+        let resolved = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
+            "org/cubewhy/Box<Ljava/lang/String;>",
+            "map",
+            CallArgs::new(arg_texts.len(), &arg_types, &arg_texts),
+            EvalContext::new(&[], None),
+        );
+
+        assert_eq!(
+            selected.as_ref().map(|m| m.method.desc().to_string()),
+            Some("(Ljava/util/function/Function;)Lorg/cubewhy/Box;".to_string()),
+            "standard functional targets should survive missing abstract/interface flags"
+        );
+        assert_eq!(
+            resolved.map(|ty| ty.to_internal_with_generics()),
+            Some("org/cubewhy/Box<Ljava/lang/String;>".to_string()),
+            "callsite-aware return binding should still materialize Box<String>"
+        );
+    }
+
+    #[test]
+    fn test_callsite_overload_match_stays_conservative_when_functional_targets_tie() {
+        let view = make_callsite_functional_overload_fixture();
+        let resolver = TypeResolver::new(&view);
+        let util = view.get_class("Util").expect("Util class");
+        let candidates: Vec<&MethodSummary> = util
+            .methods
+            .iter()
+            .filter(|method| method.name.as_ref() == "choose")
+            .collect();
+        let arg_types = vec![TypeName::unknown()];
+        let arg_texts = vec!["s -> s.tri".to_string()];
+
+        let selected = resolver.select_overload_match_with_callsite(
+            "Util",
+            &candidates,
+            CallArgs::new(arg_texts.len(), &arg_types, &arg_texts),
+            EvalContext::new(&[], None),
+        );
+
+        assert!(
+            selected.is_none(),
+            "equally compatible functional interface targets should stay ambiguous"
         );
     }
 

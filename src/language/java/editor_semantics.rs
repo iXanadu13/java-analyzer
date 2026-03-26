@@ -627,10 +627,12 @@ fn resolve_selected_call(
         .map(|candidate| candidate.method.as_ref())
         .collect();
     let (selected_name, selected_desc, selected_mode) = {
-        let selected = resolver.select_overload_match(
+        let selection_args = CallArgs::new(arg_texts.len(), &selection_arg_types, arg_texts);
+        let selected = resolver.select_overload_match_with_callsite(
+            &receiver.to_internal_with_generics_for_substitution(),
             &candidate_refs,
-            arg_texts.len(),
-            &selection_arg_types,
+            selection_args,
+            EvalContext::new(&ctx.local_variables, ctx.enclosing_internal_name.as_ref()),
         )?;
         (
             selected.method.name.clone(),

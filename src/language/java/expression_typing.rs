@@ -1570,6 +1570,100 @@ mod tests {
         }
     }
 
+    fn make_packaged_box_map_index() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            root_scope(),
+            vec![
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Box"),
+                internal_name: Arc::from("org/cubewhy/Box"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("map"),
+                    params: MethodParams::from([("Ljava/util/function/Function;", "fn")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from(
+                        "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)Lorg/cubewhy/Box<TR;>;",
+                    )),
+                    return_type: Some(Arc::from("Lorg/cubewhy/Box;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("trim"),
+                    params: MethodParams::empty(),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Ljava/lang/String;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util/function")),
+                name: Arc::from("Function"),
+                internal_name: Arc::from("java/util/function/Function"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("apply"),
+                    params: MethodParams::from([("Ljava/lang/Object;", "t")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: Some(Arc::from("(TT;)TR;")),
+                    return_type: Some(Arc::from("Ljava/lang/Object;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: Some(Arc::from(
+                    "<T:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;",
+                )),
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ],
+        );
+        idx
+    }
+
     #[test]
     fn test_var_init_expr_cast_and_numeric_promotion_infers_double() {
         let idx = make_index();
@@ -1652,6 +1746,89 @@ mod tests {
         .expect("resolved type");
 
         assert_eq!(ty.erased_internal(), "java/lang/String");
+    }
+
+    #[test]
+    fn test_var_init_expr_functional_method_reference_materializes_packaged_box() {
+        let idx = make_packaged_box_map_index();
+        let view = idx.view(root_scope());
+        let type_ctx = SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.lang.*".into(), "java.util.function.*".into()],
+            Some(view.build_name_table()),
+        );
+        let resolver = TypeResolver::new(&view);
+        let resolve_qualifier = |q: &str| type_ctx.resolve_type_name_strict(q);
+        let locals = vec![
+            LocalVar {
+                name: Arc::from("strBox"),
+                type_internal: TypeName::with_args(
+                    "org/cubewhy/Box",
+                    vec![TypeName::new("java/lang/String")],
+                ),
+                decl_kind: crate::semantic::LocalVarDeclKind::Explicit,
+                init_expr: None,
+            },
+            LocalVar {
+                name: Arc::from("a"),
+                type_internal: TypeName::unknown(),
+                decl_kind: crate::semantic::LocalVarDeclKind::VarSyntax,
+                init_expr: Some("strBox.map(String::trim)".to_string()),
+            },
+        ];
+
+        let candidates = view.lookup_methods_in_hierarchy("org/cubewhy/Box", "map");
+        let candidate_refs: Vec<&MethodSummary> = candidates.iter().map(|m| m.as_ref()).collect();
+        let selected = resolver.select_overload_match_with_callsite(
+            "org/cubewhy/Box<Ljava/lang/String;>",
+            &candidate_refs,
+            CallArgs::new(1, &[], &["String::trim".to_string()]),
+            EvalContext::new(&locals, Some(&Arc::from("org/cubewhy/Demo")))
+                .with_qualifier(Some(&resolve_qualifier)),
+        );
+        let owner = selected.as_ref().and_then(|selected| {
+            view.find_declaring_method_owner(
+                "org/cubewhy/Box",
+                selected.method.name.as_ref(),
+                selected.method.desc().as_ref(),
+            )
+        });
+        let direct_map = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
+            "org/cubewhy/Box<Ljava/lang/String;>",
+            "map",
+            CallArgs::new(1, &[], &["String::trim".to_string()]),
+            EvalContext::new(&locals, Some(&Arc::from("org/cubewhy/Demo")))
+                .with_qualifier(Some(&resolve_qualifier)),
+        );
+        let ty = resolve_var_init_expr(
+            "strBox.map(String::trim)",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Demo")),
+            &resolver,
+            &type_ctx,
+            &view,
+        );
+
+        assert_eq!(
+            selected.as_ref().map(|m| m.method.desc().to_string()),
+            Some("(Ljava/util/function/Function;)Lorg/cubewhy/Box;".to_string()),
+            "callsite selector should still pick the single map overload"
+        );
+        assert_eq!(
+            owner.as_ref().map(|o| o.internal_name.to_string()),
+            Some("org/cubewhy/Box".to_string()),
+            "declaring owner lookup should find the packaged Box class"
+        );
+        assert_eq!(
+            direct_map.as_ref().map(TypeName::to_internal_with_generics),
+            Some("org/cubewhy/Box<Ljava/lang/String;>".to_string()),
+            "direct resolver path should materialize map(String::trim)"
+        );
+        assert_eq!(
+            ty.as_ref().map(TypeName::to_internal_with_generics),
+            Some("org/cubewhy/Box<Ljava/lang/String;>".to_string()),
+            "resolve_var_init_expr should match direct resolver path"
+        );
     }
 
     #[test]
