@@ -31,28 +31,7 @@ pub fn server_capabilities() -> ServerCapabilities {
             SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
                 SemanticTokensRegistrationOptions {
                     text_document_registration_options: TextDocumentRegistrationOptions {
-                        document_selector: Some(vec![
-                            DocumentFilter {
-                                language: Some("java".into()),
-                                scheme: Some("file".into()),
-                                pattern: None,
-                            },
-                            DocumentFilter {
-                                language: Some("kotlin".into()),
-                                scheme: Some("file".into()),
-                                pattern: None,
-                            },
-                            DocumentFilter {
-                                language: None,
-                                scheme: Some("file".into()),
-                                pattern: Some("**/*.kt".into()),
-                            },
-                            DocumentFilter {
-                                language: None,
-                                scheme: Some("file".into()),
-                                pattern: Some("**/*.kts".into()),
-                            },
-                        ]),
+                        document_selector: Some(crate::language::semantic_token_document_filters()),
                     },
                     semantic_tokens_options: SemanticTokensOptions {
                         legend: SemanticTokensLegend {

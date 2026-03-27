@@ -7,6 +7,7 @@ use super::Language;
 use super::ts_utils::{capture_text, run_query};
 use crate::completion::CompletionCandidate;
 use crate::completion::provider::CompletionProvider;
+use crate::index::{ClassMetadata, ClassOrigin, IndexView, NameTable};
 use crate::semantic::{CursorLocation, LocalVar, SemanticContext, types::type_name::TypeName};
 
 #[derive(Debug)]
@@ -29,6 +30,14 @@ impl Language for KotlinLanguage {
             .set_language(&tree_sitter_kotlin::LANGUAGE.into())
             .expect("failed to load kotlin grammar");
         parser
+    }
+
+    fn file_extensions(&self) -> &[&str] {
+        &["kt", "kts"]
+    }
+
+    fn top_level_type_kinds(&self) -> &[&str] {
+        &["class_declaration", "object_declaration"]
     }
 
     fn completion_providers(&self) -> &[&'static dyn CompletionProvider] {
@@ -55,6 +64,60 @@ impl Language for KotlinLanguage {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         candidates
+    }
+
+    fn extract_package_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+    ) -> Option<Arc<str>> {
+        crate::salsa_queries::kotlin::extract_kotlin_package(db, file)
+    }
+
+    fn extract_imports_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+    ) -> Vec<Arc<str>> {
+        crate::salsa_queries::kotlin::extract_kotlin_imports(db, file)
+    }
+
+    fn extract_classes_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+    ) -> Vec<ClassMetadata> {
+        crate::salsa_queries::kotlin::parse_kotlin_classes(db, file)
+    }
+
+    fn extract_classes_with_index_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        _origin: &ClassOrigin,
+        _name_table: Option<Arc<NameTable>>,
+        _view: Option<&IndexView>,
+    ) -> Vec<ClassMetadata> {
+        self.extract_classes_salsa(db, file)
+    }
+
+    fn discover_internal_names(
+        &self,
+        source: &str,
+        _tree: Option<&tree_sitter::Tree>,
+    ) -> Vec<Arc<str>> {
+        crate::index::source::discover_kotlin_names(source)
+    }
+
+    fn extract_classes_from_source(
+        &self,
+        source: &str,
+        origin: &ClassOrigin,
+        _tree: Option<&tree_sitter::Tree>,
+        _name_table: Option<Arc<NameTable>>,
+        _view: Option<&IndexView>,
+    ) -> Vec<ClassMetadata> {
+        crate::index::source::parse_kotlin_source(source, origin.clone())
     }
 
     // ========================================================================
@@ -104,6 +167,25 @@ impl Language for KotlinLanguage {
             range.end.line,
             range.end.character,
         ))
+    }
+
+    fn is_local_variable_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        symbol_name: Arc<str>,
+        offset: usize,
+    ) -> bool {
+        crate::salsa_queries::kotlin::is_kotlin_local_variable(db, file, symbol_name, offset)
+    }
+
+    fn infer_variable_type_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        decl_offset: usize,
+    ) -> Option<Arc<str>> {
+        crate::salsa_queries::kotlin::infer_kotlin_variable_type(db, file, decl_offset)
     }
 }
 

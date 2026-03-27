@@ -39,8 +39,9 @@ pub fn compute_java_inlay_hints(
             &view,
             start_offset..end_offset,
             None,
+            Some(db),
             None,
-            None,
+            Some(file),
         )
         .unwrap_or_default()
         .into_iter()

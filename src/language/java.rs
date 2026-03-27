@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::Language;
 use crate::completion::provider::CompletionProvider;
-use crate::index::{IndexScope, IndexView, NameTable};
+use crate::index::{ClassMetadata, ClassOrigin, IndexScope, IndexView, NameTable};
 use crate::language::java::completion::providers::{
     annotation::AnnotationProvider, constructor::ConstructorProvider,
     expression::ExpressionProvider, import::ImportProvider, import_static::ImportStaticProvider,
@@ -13,7 +13,7 @@ use crate::language::java::completion::providers::{
 };
 use crate::language::java::inlay_hints::{JavaInlayHintKind, collect_java_inlay_hints};
 use crate::language::java::symbols::collect_java_symbols;
-use crate::language::rope_utils::rope_line_col_to_offset;
+use crate::language::rope_utils::{rope_byte_offset_to_line_col, rope_line_col_to_offset};
 use crate::language::{ClassifiedToken, ParseEnv};
 use crate::request_metrics::RequestMetrics;
 use crate::semantic::SemanticContext;
@@ -24,7 +24,7 @@ use tower_lsp::lsp_types::{
     InlayHint, InlayHintKind, InlayHintLabel, Position, Range, SemanticTokenModifier,
     SemanticTokenType,
 };
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 pub mod class_parser;
 pub mod completion;
@@ -107,6 +107,20 @@ impl Language for JavaLanguage {
 
     fn make_parser(&self) -> Parser {
         make_java_parser()
+    }
+
+    fn file_extensions(&self) -> &[&str] {
+        &["java"]
+    }
+
+    fn top_level_type_kinds(&self) -> &[&str] {
+        &[
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "record_declaration",
+            "annotation_type_declaration",
+        ]
     }
 
     fn completion_providers(&self) -> &[&'static dyn CompletionProvider] {
@@ -268,6 +282,7 @@ impl Language for JavaLanguage {
             index,
             byte_range,
             env.request.clone(),
+            None,
             env.workspace.as_deref(),
             env.workspace
                 .as_ref()
@@ -294,6 +309,94 @@ impl Language for JavaLanguage {
         ))
     }
 
+    fn extract_package_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+    ) -> Option<Arc<str>> {
+        let content = file.content(db);
+        let tree = crate::salsa_queries::parse::parse_tree(db, file)?;
+        crate::language::java::class_parser::extract_package_from_root(content, tree.root_node())
+    }
+
+    fn extract_imports_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+    ) -> Vec<Arc<str>> {
+        let content = file.content(db);
+        let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file) else {
+            return vec![];
+        };
+        crate::language::java::class_parser::extract_imports_from_root(content, tree.root_node())
+    }
+
+    fn extract_static_imports_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+    ) -> Vec<Arc<str>> {
+        crate::salsa_queries::java::extract_java_static_imports(db, file)
+    }
+
+    fn extract_classes_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+    ) -> Vec<ClassMetadata> {
+        crate::salsa_queries::java::parse_java_classes(db, file)
+    }
+
+    fn extract_classes_with_index_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        origin: &ClassOrigin,
+        name_table: Option<Arc<NameTable>>,
+        view: Option<&IndexView>,
+    ) -> Vec<ClassMetadata> {
+        crate::salsa_queries::java::parse_java_classes_with_index_view(
+            db, file, origin, name_table, view,
+        )
+    }
+
+    fn discover_internal_names(&self, source: &str, tree: Option<&Tree>) -> Vec<Arc<str>> {
+        if let Some(tree) = tree {
+            return crate::language::java::class_parser::discover_java_names_from_tree(
+                source, tree,
+            );
+        }
+
+        let mut parser = self.make_parser();
+        let Some(tree) = parser.parse(source, None) else {
+            return vec![];
+        };
+        crate::language::java::class_parser::discover_java_names_from_tree(source, &tree)
+    }
+
+    fn extract_classes_from_source(
+        &self,
+        source: &str,
+        origin: &ClassOrigin,
+        tree: Option<&Tree>,
+        name_table: Option<Arc<NameTable>>,
+        view: Option<&IndexView>,
+    ) -> Vec<ClassMetadata> {
+        if let Some(tree) = tree {
+            return crate::language::java::class_parser::extract_java_classes_from_tree(
+                source, tree, origin, name_table, view,
+            );
+        }
+
+        let mut parser = self.make_parser();
+        let Some(tree) = parser.parse(source, None) else {
+            return vec![];
+        };
+        crate::language::java::class_parser::extract_java_classes_from_tree(
+            source, &tree, origin, name_table, view,
+        )
+    }
+
     // ========================================================================
     // Salsa-based methods for incremental computation
     // ========================================================================
@@ -313,6 +416,23 @@ impl Language for JavaLanguage {
             character,
             trigger_char,
         ))
+    }
+
+    fn extract_completion_context_salsa_at_offset(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        offset: usize,
+        trigger_char: Option<char>,
+    ) -> Option<Arc<crate::salsa_queries::CompletionContextData>> {
+        Some(
+            crate::salsa_queries::java::extract_java_completion_context_at_offset(
+                db,
+                file,
+                offset,
+                trigger_char,
+            ),
+        )
     }
 
     fn resolve_symbol_salsa(
@@ -339,6 +459,77 @@ impl Language for JavaLanguage {
             range.end.line,
             range.end.character,
         ))
+    }
+
+    fn find_method_calls_in_range_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        start_offset: usize,
+        end_offset: usize,
+    ) -> Vec<crate::salsa_queries::MethodCallMetadata> {
+        let content = file.content(db);
+        let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file) else {
+            return vec![];
+        };
+
+        let mut calls = Vec::new();
+        let root = tree.root_node();
+        let rope = Rope::from_str(content);
+        let view = crate::salsa_queries::hints::root_index_view(db);
+        crate::salsa_queries::hints::collect_java_method_calls(
+            root,
+            root,
+            content,
+            &rope,
+            &view,
+            Some(db),
+            Some(file),
+            start_offset,
+            end_offset,
+            &mut calls,
+        );
+        calls
+    }
+
+    fn is_local_variable_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        symbol_name: Arc<str>,
+        offset: usize,
+    ) -> bool {
+        crate::salsa_queries::java::is_java_local_variable(db, file, symbol_name, offset)
+    }
+
+    fn infer_variable_type_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        decl_offset: usize,
+    ) -> Option<Arc<str>> {
+        crate::salsa_queries::java::infer_java_variable_type(db, file, decl_offset)
+    }
+
+    fn enrich_semantic_context_salsa(
+        &self,
+        ctx: SemanticContext,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        workspace: Option<&crate::workspace::Workspace>,
+        data: &crate::salsa_queries::CompletionContextData,
+        existing_imports: Vec<Arc<str>>,
+        analysis: Option<&crate::salsa_queries::conversion::RequestAnalysisState>,
+    ) -> SemanticContext {
+        crate::salsa_queries::conversion::enrich_java_semantic_context(
+            ctx,
+            db,
+            file,
+            workspace,
+            data,
+            existing_imports,
+            analysis,
+        )
     }
 }
 
@@ -438,18 +629,8 @@ fn lsp_range_to_byte_range(
 }
 
 fn byte_offset_to_position(rope: &Rope, offset: usize) -> Position {
-    let char_idx = rope.byte_to_char(offset.min(rope.len_bytes()));
-    let line_idx = rope.char_to_line(char_idx);
-    let line_char_start = rope.line_to_char(line_idx);
-    let character = rope
-        .slice(line_char_start..char_idx)
-        .chars()
-        .map(char::len_utf16)
-        .sum::<usize>() as u32;
-    Position {
-        line: line_idx as u32,
-        character,
-    }
+    let (line, character) = rope_byte_offset_to_line_col(rope, offset);
+    Position { line, character }
 }
 
 // TODO: rename or remove the JavaContextExtractor struct.

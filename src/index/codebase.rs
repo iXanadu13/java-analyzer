@@ -20,10 +20,10 @@ pub struct CodebaseIndex {
     pub file_count: usize,
 }
 
-/// Stateful codebase indexer that preserves Java Salsa parse snapshots across rescans.
+/// Stateful codebase indexer that preserves source parse snapshots across rescans.
 #[derive(Default)]
 pub struct CodebaseIndexSession {
-    java_session: SourceParseSession,
+    source_session: SourceParseSession,
 }
 
 impl CodebaseIndexSession {
@@ -58,26 +58,23 @@ impl CodebaseIndexSession {
         name_table: Option<Arc<crate::index::NameTable>>,
     ) -> Vec<ClassMetadata> {
         let origin = ClassOrigin::SourceFile(Arc::from(uri));
-        match lang {
-            "java" => {
-                let input = SourceTextInput::new(
-                    Arc::from(uri),
-                    Arc::from("java"),
-                    content.to_owned(),
-                    origin,
-                );
-                let Some(prepared) = self.java_session.prepare_source(input) else {
-                    return vec![];
-                };
-                prepared.extract_classes(name_table)
-            }
-            // TODO: use incremental parsing for kotlin
-            _ => super::source::parse_source_str(content, lang, origin, name_table),
-        }
+        let Some(language) = crate::language::lookup_language(lang) else {
+            return vec![];
+        };
+        let input = SourceTextInput::new(
+            Arc::from(uri),
+            Arc::from(language.id()),
+            content.to_owned(),
+            origin,
+        );
+        let Some(prepared) = self.source_session.prepare_source(input) else {
+            return vec![];
+        };
+        prepared.extract_classes(name_table)
     }
 
     pub fn java_parse_origin(&self, uri: &str) -> Option<crate::salsa_db::ParseTreeOrigin> {
-        self.java_session.parse_tree_origin_for_uri(uri)
+        self.source_session.parse_tree_origin_for_uri(uri)
     }
 
     fn index_source_files(
@@ -106,15 +103,14 @@ impl CodebaseIndexSession {
         source_inputs: Vec<SourceTextInput>,
         name_table: Option<Arc<crate::index::NameTable>>,
     ) -> Vec<ClassMetadata> {
-        let current_java_uris = source_inputs
+        let current_source_uris = source_inputs
             .iter()
-            .filter(|source| source.language_id.as_ref() == "java")
             .map(|source| Arc::clone(&source.uri))
             .collect::<HashSet<_>>();
-        self.java_session.prune_sources(&current_java_uris);
+        self.source_session.prune_sources(&current_source_uris);
 
         tracing::debug!("discovering stubs...");
-        let prepared_sources = self.java_session.prepare_sources(source_inputs);
+        let prepared_sources = self.source_session.prepare_sources(source_inputs);
 
         let discovered_names: Vec<Arc<str>> = prepared_sources
             .par_iter()
@@ -216,10 +212,7 @@ pub(crate) fn should_index_source_path(path: &Path, mode: SourceScanMode) -> boo
         return false;
     }
 
-    matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("java") | Some("kt")
-    )
+    crate::language::infer_language_id_from_path(path).is_some()
 }
 
 pub(crate) fn load_source_inputs(source_files: Vec<PathBuf>) -> Vec<SourceTextInput> {
@@ -233,11 +226,7 @@ pub(crate) fn load_source_input(path: PathBuf) -> Option<SourceTextInput> {
     let content = std::fs::read_to_string(&path).ok()?;
     let uri = path_to_uri_str(&path);
     let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-    let language_id: Arc<str> = if path.extension().and_then(|s| s.to_str()) == Some("kt") {
-        Arc::from("kotlin")
-    } else {
-        Arc::from("java")
-    };
+    let language_id: Arc<str> = Arc::from(crate::language::infer_language_id_from_path(&path)?);
     Some(SourceTextInput::new(
         Arc::from(uri.as_str()),
         language_id,

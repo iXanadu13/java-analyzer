@@ -3,6 +3,7 @@
 /// This module provides incremental, cached context extraction for code completion.
 /// All queries are memoized by Salsa and automatically invalidated when inputs change.
 use super::Db;
+use crate::language::rope_utils;
 use crate::salsa_db::SourceFile;
 use std::sync::Arc;
 
@@ -212,40 +213,32 @@ pub fn extract_completion_context(
 ) -> Arc<CompletionContextData> {
     let language_id = file.language_id(db);
 
-    match language_id.as_ref() {
-        "java" => {
-            super::java::extract_java_completion_context(db, file, line, character, trigger_char)
-        }
-        "kotlin" => super::kotlin::extract_kotlin_completion_context(
-            db,
-            file,
-            line,
-            character,
-            trigger_char,
-        ),
-        _ => {
-            // Unknown language - return empty context
-            Arc::new(CompletionContextData {
-                location: CursorLocationData::Unknown,
-                query: Arc::from(""),
-                cursor_offset: 0,
-                enclosing_class: None,
-                enclosing_internal_name: None,
-                enclosing_class_chain: vec![],
-                enclosing_package: None,
-                local_var_count: 0,
-                import_count: 0,
-                static_import_count: 0,
-                statement_labels: vec![],
-                char_after_cursor: None,
-                is_class_member_position: false,
-                functional_target_hint: None,
-                content_hash: 0,
-                file_uri: Arc::from(file.file_id(db).as_str()),
-                language_id: Arc::clone(&language_id),
-            })
-        }
+    if let Some(language) = crate::language::lookup_language(language_id.as_ref())
+        && let Some(context) =
+            language.extract_completion_context_salsa(db, file, line, character, trigger_char)
+    {
+        return context;
     }
+
+    Arc::new(CompletionContextData {
+        location: CursorLocationData::Unknown,
+        query: Arc::from(""),
+        cursor_offset: 0,
+        enclosing_class: None,
+        enclosing_internal_name: None,
+        enclosing_class_chain: vec![],
+        enclosing_package: None,
+        local_var_count: 0,
+        import_count: 0,
+        static_import_count: 0,
+        statement_labels: vec![],
+        char_after_cursor: None,
+        is_class_member_position: false,
+        functional_target_hint: None,
+        content_hash: 0,
+        file_uri: Arc::from(file.file_id(db).as_str()),
+        language_id: Arc::clone(&language_id),
+    })
 }
 
 /// Find the AST node at a specific position (CACHED)
@@ -350,30 +343,7 @@ fn find_enclosing_scope_range(
 
 /// Convert line/column to byte offset
 pub fn line_col_to_offset(content: &str, line: u32, character: u32) -> Option<usize> {
-    let mut current_line = 0u32;
-    let mut current_col = 0u32;
-    let mut offset = 0usize;
-
-    for ch in content.chars() {
-        if current_line == line && current_col == character {
-            return Some(offset);
-        }
-
-        if ch == '\n' {
-            current_line += 1;
-            current_col = 0;
-        } else {
-            current_col += ch.len_utf16() as u32;
-        }
-
-        offset += ch.len_utf8();
-    }
-
-    if current_line == line && current_col == character {
-        Some(offset)
-    } else {
-        None
-    }
+    rope_utils::line_col_to_offset(content, line, character)
 }
 
 #[cfg(test)]

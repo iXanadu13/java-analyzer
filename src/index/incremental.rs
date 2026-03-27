@@ -28,64 +28,34 @@ impl SourceTextInput {
     }
 }
 
-pub enum PreparedSource {
-    Java(PreparedJavaSource),
-    Kotlin(PreparedKotlinSource),
+pub struct PreparedSource {
+    language_id: Arc<str>,
+    content: String,
+    origin: ClassOrigin,
+    tree: Option<Tree>,
 }
 
 impl PreparedSource {
     pub fn discover_internal_names(&self) -> Vec<Arc<str>> {
-        match self {
-            Self::Java(source) => source.discover_internal_names(),
-            Self::Kotlin(source) => source.discover_internal_names(),
-        }
+        crate::language::lookup_language(self.language_id.as_ref())
+            .map(|language| {
+                language.discover_internal_names(self.content.as_str(), self.tree.as_ref())
+            })
+            .unwrap_or_default()
     }
 
     pub fn extract_classes(&self, name_table: Option<Arc<NameTable>>) -> Vec<ClassMetadata> {
-        match self {
-            Self::Java(source) => source.extract_classes(name_table),
-            Self::Kotlin(source) => source.extract_classes(),
-        }
-    }
-}
-
-pub struct PreparedJavaSource {
-    content: String,
-    origin: ClassOrigin,
-    tree: Tree,
-}
-
-impl PreparedJavaSource {
-    pub fn discover_internal_names(&self) -> Vec<Arc<str>> {
-        crate::language::java::class_parser::discover_java_names_from_tree(
-            self.content.as_str(),
-            &self.tree,
-        )
-    }
-
-    pub fn extract_classes(&self, name_table: Option<Arc<NameTable>>) -> Vec<ClassMetadata> {
-        crate::language::java::class_parser::extract_java_classes_from_tree(
-            self.content.as_str(),
-            &self.tree,
-            &self.origin,
-            name_table,
-            None,
-        )
-    }
-}
-
-pub struct PreparedKotlinSource {
-    content: String,
-    origin: ClassOrigin,
-}
-
-impl PreparedKotlinSource {
-    pub fn discover_internal_names(&self) -> Vec<Arc<str>> {
-        super::source::discover_kotlin_names(self.content.as_str())
-    }
-
-    pub fn extract_classes(&self) -> Vec<ClassMetadata> {
-        super::source::parse_kotlin_source(self.content.as_str(), self.origin.clone())
+        crate::language::lookup_language(self.language_id.as_ref())
+            .map(|language| {
+                language.extract_classes_from_source(
+                    self.content.as_str(),
+                    &self.origin,
+                    self.tree.as_ref(),
+                    name_table,
+                    None,
+                )
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -97,25 +67,16 @@ pub struct SourceParseSession {
 
 impl SourceParseSession {
     pub fn prepare_source(&mut self, input: SourceTextInput) -> Option<PreparedSource> {
-        match input.language_id.as_ref() {
-            "java" => self.prepare_java_source(input).map(PreparedSource::Java),
-            "kotlin" => Some(PreparedSource::Kotlin(PreparedKotlinSource {
-                content: input.content,
-                origin: input.origin,
-            })),
-            _ => None,
-        }
-    }
-
-    fn prepare_java_source(&mut self, input: SourceTextInput) -> Option<PreparedJavaSource> {
+        crate::language::lookup_language(input.language_id.as_ref())?;
         let file = self.get_or_create_source_file(
             Arc::clone(&input.uri),
             input.content.as_str(),
             Arc::clone(&input.language_id),
         )?;
-        let tree = crate::salsa_queries::parse::parse_tree(&self.db, file)?;
+        let tree = crate::salsa_queries::parse::parse_tree(&self.db, file);
 
-        Some(PreparedJavaSource {
+        Some(PreparedSource {
+            language_id: input.language_id,
             content: input.content,
             origin: input.origin,
             tree,
@@ -201,7 +162,7 @@ pub fn parse_java_source_text(
 ) -> Vec<ClassMetadata> {
     let uri = source_uri_for_origin(&origin, "java");
     let mut session = SourceParseSession::default();
-    let Some(PreparedSource::Java(prepared)) = session.prepare_source(SourceTextInput::new(
+    let Some(prepared) = session.prepare_source(SourceTextInput::new(
         uri,
         Arc::from("java"),
         source.to_owned(),
@@ -224,7 +185,7 @@ pub fn discover_java_names_text(source: &str) -> Vec<Arc<str>> {
         .as_str(),
     );
     let mut session = SourceParseSession::default();
-    let Some(PreparedSource::Java(prepared)) = session.prepare_source(SourceTextInput::new(
+    let Some(prepared) = session.prepare_source(SourceTextInput::new(
         uri,
         Arc::from("java"),
         source.to_owned(),
@@ -243,11 +204,9 @@ pub fn source_uri_for_origin(origin: &ClassOrigin, language_id: &str) -> Arc<str
 
     let mut hasher = DefaultHasher::new();
     origin.hash(&mut hasher);
-    let ext = match language_id {
-        "java" => "java",
-        "kotlin" => "kt",
-        _ => "txt",
-    };
+    let ext = crate::language::lookup_language(language_id)
+        .and_then(|language| language.file_extensions().first().copied())
+        .unwrap_or("txt");
 
     Arc::from(
         format!(

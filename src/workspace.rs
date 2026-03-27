@@ -866,9 +866,10 @@ impl Workspace {
         index: &WorkspaceIndex,
         context: AnalysisContext,
     ) -> Vec<ClassMetadata> {
-        if salsa_file.language_id(db).as_ref() != "java" {
+        let Some(language) = crate::language::lookup_language(salsa_file.language_id(db).as_ref())
+        else {
             return crate::salsa_queries::index::get_extracted_classes(db, salsa_file);
-        }
+        };
 
         let view =
             index.view_for_analysis_context(context.module, context.classpath, context.source_root);
@@ -878,7 +879,7 @@ impl Workspace {
             context.source_root,
         );
 
-        crate::salsa_queries::java::parse_java_classes_with_index_view(
+        language.extract_classes_with_index_salsa(
             db,
             salsa_file,
             origin,
@@ -996,15 +997,16 @@ impl Workspace {
                 continue;
             };
             indexed_uris.insert(uri.clone());
-            let salsa_file = if source.language_id.as_ref() == "java" {
-                Some(self.get_or_create_salsa_file(
-                    &uri,
-                    source.content.as_str(),
-                    source.language_id.as_ref(),
-                ))
-            } else {
-                None
-            };
+            let salsa_file =
+                if crate::language::lookup_language(source.language_id.as_ref()).is_some() {
+                    Some(self.get_or_create_salsa_file(
+                        &uri,
+                        source.content.as_str(),
+                        source.language_id.as_ref(),
+                    ))
+                } else {
+                    None
+                };
             prepared.push(IndexedWorkspaceSource {
                 language_id: source.language_id,
                 content: source.content,
@@ -1183,11 +1185,7 @@ fn scan_mode_for_root_kind(kind: WorkspaceRootKind) -> SourceScanMode {
 }
 
 fn language_id_for_path(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("java") => Some("java"),
-        Some("kt") => Some("kotlin"),
-        _ => None,
-    }
+    crate::language::infer_language_id_from_path(path)
 }
 
 fn file_url_from_path(path: &Path) -> Option<Url> {
@@ -1225,19 +1223,17 @@ struct IndexedWorkspaceSource {
 
 impl IndexedWorkspaceSource {
     fn discover_internal_names(&self, db: &crate::salsa_db::Database) -> Vec<Arc<str>> {
+        let Some(language) = crate::language::lookup_language(self.language_id.as_ref()) else {
+            return vec![];
+        };
+
         if let Some(file) = self.salsa_file
             && let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file)
         {
-            return crate::language::java::class_parser::discover_java_names_from_tree(
-                self.content.as_str(),
-                &tree,
-            );
+            return language.discover_internal_names(self.content.as_str(), Some(&tree));
         }
 
-        crate::index::source::discover_internal_names_str(
-            self.content.as_str(),
-            self.language_id.as_ref(),
-        )
+        language.discover_internal_names(self.content.as_str(), None)
     }
 
     fn extract_classes(
@@ -1245,23 +1241,28 @@ impl IndexedWorkspaceSource {
         db: &crate::salsa_db::Database,
         name_table: Option<Arc<crate::index::NameTable>>,
     ) -> Vec<ClassMetadata> {
+        let Some(language) = crate::language::lookup_language(self.language_id.as_ref()) else {
+            return vec![];
+        };
+
         if let Some(file) = self.salsa_file
             && let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file)
         {
-            return crate::language::java::class_parser::extract_java_classes_from_tree(
+            return language.extract_classes_from_source(
                 self.content.as_str(),
-                &tree,
                 &self.origin,
+                Some(&tree),
                 name_table,
                 None,
             );
         }
 
-        crate::index::source::parse_source_str(
+        language.extract_classes_from_source(
             self.content.as_str(),
-            self.language_id.as_ref(),
-            self.origin,
+            &self.origin,
+            None,
             name_table,
+            None,
         )
     }
 }

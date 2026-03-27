@@ -1690,14 +1690,14 @@ pub fn extract_file_structure(
     let package = crate::salsa_queries::extract_package(db, file);
     let imports = crate::salsa_queries::extract_imports(db, file);
     let language_id = file.language_id(db);
+    let language = crate::language::lookup_language(language_id.as_ref());
 
-    let static_import_count = match language_id.as_ref() {
-        "java" => crate::salsa_queries::java::extract_java_static_imports(db, file).len(),
-        _ => 0,
-    };
+    let static_import_count = language
+        .map(|language| language.extract_static_imports_salsa(db, file).len())
+        .unwrap_or(0);
 
     let class_count = if let Some(tree) = parse_file_tree(db, file) {
-        count_top_level_type_declarations(tree.root_node(), language_id.as_ref())
+        count_top_level_type_declarations(tree.root_node(), language)
     } else {
         0
     };
@@ -1720,17 +1720,13 @@ pub fn extract_file_structure(
     }
 }
 
-fn count_top_level_type_declarations(root: Node, language_id: &str) -> usize {
-    let target_kinds: &[&str] = match language_id {
-        "java" => &[
-            "class_declaration",
-            "interface_declaration",
-            "enum_declaration",
-            "record_declaration",
-            "annotation_type_declaration",
-        ],
-        "kotlin" => &["class_declaration", "object_declaration"],
-        _ => &[],
+fn count_top_level_type_declarations(
+    root: Node,
+    language: Option<&dyn crate::language::Language>,
+) -> usize {
+    let target_kinds = language.map(crate::language::Language::top_level_type_kinds);
+    let Some(target_kinds) = target_kinds else {
+        return 0;
     };
 
     let mut cursor = root.walk();

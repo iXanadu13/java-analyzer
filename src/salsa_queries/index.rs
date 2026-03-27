@@ -13,13 +13,9 @@ fn compute_extracted_classes(
     file: SourceFile,
     language_id: &str,
 ) -> Vec<ClassMetadata> {
-    if language_id == "java" {
-        crate::salsa_queries::java::parse_java_classes(db, file)
-    } else if language_id == "kotlin" {
-        crate::salsa_queries::kotlin::parse_kotlin_classes(db, file)
-    } else {
-        vec![]
-    }
+    crate::language::lookup_language(language_id)
+        .map(|language| language.extract_classes_salsa(db, file))
+        .unwrap_or_default()
 }
 
 /// A wrapper for class extraction results that can be used with Salsa

@@ -864,12 +864,7 @@ fn resolve_supported_language_id<'a>(
 
 fn infer_language_id_from_uri(uri: &Url) -> Option<&'static str> {
     let path = uri.to_file_path().ok()?;
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    match extension.as_str() {
-        "java" => Some("java"),
-        "kt" | "kts" => Some("kotlin"),
-        _ => None,
-    }
+    crate::language::infer_language_id_from_path(&path)
 }
 
 #[cfg(test)]

@@ -22,14 +22,12 @@ pub(crate) fn parse_source_str(
     origin: ClassOrigin,
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> Vec<ClassMetadata> {
-    match lang {
-        "java" => super::incremental::parse_java_source_text(source, origin, name_table),
-        "kotlin" => parse_kotlin_source(source, origin),
-        other => {
-            debug!("unsupported source lang: {}", other);
-            vec![]
-        }
-    }
+    let Some(language) = crate::language::lookup_language(lang) else {
+        debug!("unsupported source lang: {}", lang);
+        return vec![];
+    };
+
+    language.extract_classes_from_source(source, &origin, None, name_table, None)
 }
 
 /// Parse from file path (automatically determines language)
@@ -45,20 +43,16 @@ pub fn parse_source_file(
             return vec![];
         }
     };
-    let lang = match path.extension().and_then(|e| e.to_str()) {
-        Some("java") => "java",
-        Some("kt") => "kotlin",
-        _ => return vec![],
+    let Some(lang) = crate::language::infer_language_id_from_path(path) else {
+        return vec![];
     };
     parse_source_str(&content, lang, origin, name_table)
 }
 
 pub fn discover_internal_names_str(source: &str, lang: &str) -> Vec<Arc<str>> {
-    match lang {
-        "java" => super::incremental::discover_java_names_text(source),
-        "kotlin" => discover_kotlin_names(source),
-        _ => vec![],
-    }
+    crate::language::lookup_language(lang)
+        .map(|language| language.discover_internal_names(source, None))
+        .unwrap_or_default()
 }
 
 pub(crate) fn discover_kotlin_names(source: &str) -> Vec<Arc<str>> {

@@ -32,11 +32,18 @@ pub fn collect_java_inlay_hints(
     view: &IndexView,
     byte_range: Range<usize>,
     request: Option<Arc<crate::lsp::request_context::RequestContext>>,
+    salsa_db: Option<&dyn crate::salsa_queries::Db>,
     workspace: Option<&Workspace>,
     salsa_file: Option<crate::salsa_db::SourceFile>,
 ) -> crate::lsp::request_cancellation::RequestResult<Vec<JavaInlayHint>> {
     let collect_started = std::time::Instant::now();
-    let semantic = JavaSemanticRequestContext::new(source, rope, root, view, request);
+    let semantic = if salsa_db.is_some() || salsa_file.is_some() {
+        JavaSemanticRequestContext::new_with_salsa(
+            source, rope, root, view, request, salsa_db, salsa_file,
+        )
+    } else {
+        JavaSemanticRequestContext::new(source, rope, root, view, request)
+    };
     let mut hints = Vec::new();
     semantic.check_cancelled("inlay.collect.before_var_hints")?;
     collect_var_hints(

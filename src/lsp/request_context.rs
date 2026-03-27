@@ -10,7 +10,7 @@ use crate::lsp::request_cancellation::{
     CancellationToken, Cancelled, RequestFamily, RequestResult,
 };
 use crate::request_metrics::RequestMetrics;
-use crate::salsa_queries::conversion::{FromSalsaDataWithAnalysis, RequestAnalysisState};
+use crate::salsa_queries::conversion::RequestAnalysisState;
 use crate::semantic::SemanticContext;
 use crate::workspace::document::SemanticContextCacheKey;
 use crate::workspace::{AnalysisContext, SourceFile, Workspace};
@@ -146,33 +146,28 @@ impl<'a> PreparedRequest<'a> {
             );
         }
 
-        let (view, overlay_class_count) = if lang.id() == "java" {
-            let origin = crate::index::ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-            let overlay_classes = {
-                let db = workspace.salsa_db.lock();
-                workspace.extract_salsa_classes_for_index_context(
-                    &*db,
-                    salsa_file,
-                    &origin,
-                    index_snapshot.as_ref(),
-                    analysis,
-                )
-            };
-            let overlay_count = overlay_classes.len();
-            let view = view.with_overlay_classes(overlay_classes);
-            tracing::debug!(
-                uri = %uri,
-                module = analysis.module.0,
-                classpath = ?analysis.classpath,
-                source_root = ?analysis.source_root.map(|id| id.0),
-                overlay_class_count = overlay_count,
-                view_layers = view.layer_count(),
-                "prepared request with current-document source overlay"
-            );
-            (view, overlay_count)
-        } else {
-            (view, 0)
+        let origin = crate::index::ClassOrigin::SourceFile(Arc::from(uri.as_str()));
+        let overlay_classes = {
+            let db = workspace.salsa_db.lock();
+            workspace.extract_salsa_classes_for_index_context(
+                &*db,
+                salsa_file,
+                &origin,
+                index_snapshot.as_ref(),
+                analysis,
+            )
         };
+        let overlay_class_count = overlay_classes.len();
+        let view = view.with_overlay_classes(overlay_classes);
+        tracing::debug!(
+            uri = %uri,
+            module = analysis.module.0,
+            classpath = ?analysis.classpath,
+            source_root = ?analysis.source_root.map(|id| id.0),
+            overlay_class_count,
+            view_layers = view.layer_count(),
+            "prepared request with current-document source overlay"
+        );
 
         let request_analysis = RequestAnalysisState {
             analysis,
@@ -306,24 +301,12 @@ impl<'a> PreparedRequest<'a> {
                 "semantic_context.before_extract",
                 crate::salsa_queries::parse::cached_parse_tree_origin(&*db, self.salsa_file),
             );
-            if self.lang.id() == "java" {
-                Some(
-                    crate::salsa_queries::java::extract_java_completion_context_at_offset(
-                        &*db,
-                        self.salsa_file,
-                        offset,
-                        trigger,
-                    ),
-                )
-            } else {
-                self.lang.extract_completion_context_salsa(
-                    &*db,
-                    self.salsa_file,
-                    position.line,
-                    position.character,
-                    trigger,
-                )
-            }
+            self.lang.extract_completion_context_salsa_at_offset(
+                &*db,
+                self.salsa_file,
+                offset,
+                trigger,
+            )
         }) else {
             return Ok(None);
         };
@@ -341,26 +324,13 @@ impl<'a> PreparedRequest<'a> {
         );
         self.request
             .check_cancelled("semantic_context.before_build")?;
-        let mut ctx = if self.lang.id() == "java" {
-            crate::salsa_queries::java::build_java_semantic_context(
-                &*db,
-                self.salsa_file,
-                context_data.as_ref().clone(),
-                Some(&*self.workspace),
-                &self.request_analysis,
-            )
-        } else {
-            let mut ctx = SemanticContext::from_salsa_data_with_analysis(
-                context_data.as_ref().clone(),
-                &*db,
-                self.salsa_file,
-                Some(&*self.workspace),
-                Some(&self.request_analysis),
-            );
-            self.lang
-                .enrich_completion_context(&mut ctx, self.scope(), &self.view);
-            ctx
-        };
+        let mut ctx = self.lang.build_semantic_context_salsa(
+            &*db,
+            self.salsa_file,
+            context_data.as_ref().clone(),
+            Some(&*self.workspace),
+            &self.request_analysis,
+        );
         self.request
             .metrics()
             .record_phase_duration("semantic_context.build", build_started.elapsed());

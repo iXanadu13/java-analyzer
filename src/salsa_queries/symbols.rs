@@ -44,12 +44,8 @@ pub fn resolve_symbol_at_position(
     character: u32,
 ) -> Option<Arc<ResolvedSymbolData>> {
     let language_id = file.language_id(db);
-
-    match language_id.as_ref() {
-        "java" => super::java::resolve_java_symbol(db, file, line, character),
-        "kotlin" => super::kotlin::resolve_kotlin_symbol(db, file, line, character),
-        _ => None,
-    }
+    crate::language::lookup_language(language_id.as_ref())
+        .and_then(|language| language.resolve_symbol_salsa(db, file, line, character))
 }
 
 /// Check if a symbol name is a local variable in the current scope (CACHED)
@@ -61,12 +57,9 @@ pub fn is_local_variable(
     offset: usize,
 ) -> bool {
     let language_id = file.language_id(db);
-
-    match language_id.as_ref() {
-        "java" => super::java::is_java_local_variable(db, file, symbol_name, offset),
-        "kotlin" => super::kotlin::is_kotlin_local_variable(db, file, symbol_name, offset),
-        _ => false,
-    }
+    crate::language::lookup_language(language_id.as_ref())
+        .map(|language| language.is_local_variable_salsa(db, file, symbol_name, offset))
+        .unwrap_or(false)
 }
 
 /// Find the declaration offset of a local variable (CACHED)

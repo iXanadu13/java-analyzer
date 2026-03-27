@@ -64,16 +64,18 @@ pub fn compute_inlay_hints(
     end_char: u32,
 ) -> Arc<Vec<InlayHintData>> {
     let language_id = file.language_id(db);
-
-    match language_id.as_ref() {
-        "java" => super::java::compute_java_inlay_hints(
-            db, file, start_line, start_char, end_line, end_char,
-        ),
-        "kotlin" => super::kotlin::compute_kotlin_inlay_hints(
-            db, file, start_line, start_char, end_line, end_char,
-        ),
-        _ => Arc::new(Vec::new()),
-    }
+    crate::language::lookup_language(language_id.as_ref())
+        .and_then(|language| {
+            language.compute_inlay_hints_salsa(
+                db,
+                file,
+                tower_lsp::lsp_types::Range {
+                    start: tower_lsp::lsp_types::Position::new(start_line, start_char),
+                    end: tower_lsp::lsp_types::Position::new(end_line, end_char),
+                },
+            )
+        })
+        .unwrap_or_else(|| Arc::new(Vec::new()))
 }
 
 /// Find variable declarations in a range (CACHED)
@@ -117,41 +119,14 @@ pub fn find_method_calls_in_range(
     start_offset: usize,
     end_offset: usize,
 ) -> Arc<Vec<MethodCallMetadata>> {
-    let content = file.content(db);
     let language_id = file.language_id(db);
-
-    // Parse tree
-    let Some(tree) = super::parse::parse_tree(db, file) else {
-        return Arc::new(Vec::new());
-    };
-
-    let root = tree.root_node();
-    let mut calls = Vec::new();
-    match language_id.as_ref() {
-        "java" => {
-            let view = root_index_view(db);
-            let rope = Rope::from_str(content);
-            collect_java_method_calls(
-                root,
-                root,
-                content,
-                &rope,
-                &view,
-                start_offset,
-                end_offset,
-                &mut calls,
-            );
-        }
-        _ => collect_method_calls(
-            root,
-            content.as_bytes(),
-            start_offset,
-            end_offset,
-            &mut calls,
-        ),
-    }
-
-    Arc::new(calls)
+    Arc::new(
+        crate::language::lookup_language(language_id.as_ref())
+            .map(|language| {
+                language.find_method_calls_in_range_salsa(db, file, start_offset, end_offset)
+            })
+            .unwrap_or_default(),
+    )
 }
 
 /// Infer the type of a variable at a declaration (CACHED)
@@ -160,12 +135,8 @@ pub fn find_method_calls_in_range(
 #[salsa::tracked]
 pub fn infer_variable_type(db: &dyn Db, file: SourceFile, decl_offset: usize) -> Option<Arc<str>> {
     let language_id = file.language_id(db);
-
-    match language_id.as_ref() {
-        "java" => super::java::infer_java_variable_type(db, file, decl_offset),
-        "kotlin" => super::kotlin::infer_kotlin_variable_type(db, file, decl_offset),
-        _ => None,
-    }
+    crate::language::lookup_language(language_id.as_ref())
+        .and_then(|language| language.infer_variable_type_salsa(db, file, decl_offset))
 }
 
 // ============================================================================
@@ -222,7 +193,7 @@ fn has_var_keyword(node: tree_sitter::Node, _source: &[u8]) -> bool {
     false
 }
 
-fn collect_method_calls(
+pub(crate) fn collect_method_calls(
     node: tree_sitter::Node,
     source: &[u8],
     start: usize,
@@ -274,12 +245,14 @@ fn count_arguments(args_node: tree_sitter::Node) -> usize {
         .count()
 }
 
-fn collect_java_method_calls(
+pub(crate) fn collect_java_method_calls(
     root: tree_sitter::Node,
     node: tree_sitter::Node,
     source: &str,
     rope: &Rope,
     view: &IndexView,
+    db: Option<&dyn Db>,
+    file: Option<SourceFile>,
     start: usize,
     end: usize,
     calls: &mut Vec<MethodCallMetadata>,
@@ -308,6 +281,8 @@ fn collect_java_method_calls(
                 rope,
                 root,
                 view,
+                db,
+                file,
                 name_node.start_byte(),
                 receiver_expr,
             ),
@@ -317,7 +292,7 @@ fn collect_java_method_calls(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_java_method_calls(root, child, source, rope, view, start, end, calls);
+        collect_java_method_calls(root, child, source, rope, view, db, file, start, end, calls);
     }
 }
 
@@ -337,10 +312,18 @@ fn infer_java_receiver_type_for_call(
     rope: &Rope,
     root: tree_sitter::Node,
     view: &IndexView,
+    db: Option<&dyn Db>,
+    file: Option<SourceFile>,
     offset: usize,
     receiver_expr: Option<&str>,
 ) -> Option<Arc<str>> {
-    let ctx = semantic_context_at_offset(source, rope, root, offset, view)?;
+    let ctx = if db.is_some() && file.is_some() {
+        crate::language::java::editor_semantics::semantic_context_at_offset_with_salsa(
+            source, rope, root, offset, view, db, file,
+        )
+    } else {
+        semantic_context_at_offset(source, rope, root, offset, view)
+    }?;
 
     if let Some(owner) = ctx.location.member_access_receiver_owner_internal() {
         return Some(Arc::from(owner));
@@ -387,7 +370,7 @@ fn infer_java_receiver_type_for_call(
     infer_receiver_type_from_text(receiver_expr)
 }
 
-fn root_index_view(db: &dyn Db) -> IndexView {
+pub(crate) fn root_index_view(db: &dyn Db) -> IndexView {
     let index = db.workspace_index();
     index.view(IndexScope {
         module: ModuleId::ROOT,

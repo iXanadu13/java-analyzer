@@ -83,8 +83,8 @@ impl FromSalsaDataWithAnalysis<CompletionContextData> for SemanticContext {
         .with_file_uri(data.file_uri.clone())
         .with_language_id(crate::language::LanguageId::new(data.language_id.clone()));
 
-        if data.language_id.as_ref() == "java" {
-            ctx = enrich_java_semantic_context(
+        if let Some(language) = crate::language::lookup_language(data.language_id.as_ref()) {
+            ctx = language.enrich_semantic_context_salsa(
                 ctx,
                 db,
                 file,
@@ -99,7 +99,7 @@ impl FromSalsaDataWithAnalysis<CompletionContextData> for SemanticContext {
     }
 }
 
-fn enrich_java_semantic_context(
+pub(crate) fn enrich_java_semantic_context(
     ctx: SemanticContext,
     db: &dyn Db,
     file: SourceFile,
@@ -207,10 +207,9 @@ fn enrich_java_semantic_context(
 }
 
 fn fetch_static_imports(db: &dyn Db, file: SourceFile) -> Vec<Arc<str>> {
-    match file.language_id(db).as_ref() {
-        "java" => crate::salsa_queries::java::extract_java_static_imports(db, file),
-        _ => Vec::new(),
-    }
+    crate::language::lookup_language(file.language_id(db).as_ref())
+        .map(|language| language.extract_static_imports_salsa(db, file))
+        .unwrap_or_default()
 }
 
 fn convert_cursor_location(data: &CursorLocationData) -> CursorLocation {

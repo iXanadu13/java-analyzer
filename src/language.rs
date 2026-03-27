@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use crate::{
     completion::{CompletionCandidate, provider::CompletionProvider},
-    index::{IndexScope, IndexView, NameTable},
+    index::{ClassMetadata, ClassOrigin, IndexScope, IndexView, NameTable},
+    language::rope_utils::byte_offset_to_line_col,
     lsp::{
         request_cancellation::RequestResult,
         request_context::RequestContext,
@@ -14,7 +15,8 @@ use crate::{
 use ropey::Rope;
 use smallvec::SmallVec;
 use tower_lsp::lsp_types::{
-    DocumentSymbol, InlayHint, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType,
+    DocumentFilter, DocumentSymbol, InlayHint, Range, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType,
 };
 use tree_sitter::{Node, Parser, Tree};
 
@@ -29,6 +31,9 @@ pub mod kotlin;
 pub use java::JavaLanguage;
 pub use kotlin::KotlinLanguage;
 pub use salsa_context::SalsaContext;
+
+static JAVA_LANGUAGE: JavaLanguage = JavaLanguage;
+static KOTLIN_LANGUAGE: KotlinLanguage = KotlinLanguage;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LanguageId(pub Arc<str>);
@@ -49,11 +54,59 @@ pub struct ClassifiedToken {
     pub modifiers: TokenMods,
 }
 
+pub fn builtin_languages() -> [&'static dyn Language; 2] {
+    [&JAVA_LANGUAGE, &KOTLIN_LANGUAGE]
+}
+
+pub fn lookup_language(language_id: &str) -> Option<&'static dyn Language> {
+    builtin_languages()
+        .into_iter()
+        .find(|language| language.supports(language_id))
+}
+
+pub fn infer_language_id_from_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    builtin_languages().into_iter().find_map(|language| {
+        language
+            .file_extensions()
+            .iter()
+            .any(|candidate| *candidate == extension)
+            .then_some(language.id())
+    })
+}
+
+pub fn semantic_token_document_filters() -> Vec<DocumentFilter> {
+    let mut filters = Vec::new();
+    for language in builtin_languages() {
+        filters.push(DocumentFilter {
+            language: Some(language.id().into()),
+            scheme: Some("file".into()),
+            pattern: None,
+        });
+        for extension in language.file_extensions() {
+            filters.push(DocumentFilter {
+                language: None,
+                scheme: Some("file".into()),
+                pattern: Some(format!("**/*.{}", extension)),
+            });
+        }
+    }
+    filters
+}
+
 pub trait Language: Send + Sync + std::fmt::Debug {
     fn id(&self) -> &'static str;
     fn supports(&self, language_id: &str) -> bool;
 
     fn make_parser(&self) -> Parser;
+
+    fn file_extensions(&self) -> &[&str] {
+        &[]
+    }
+
+    fn top_level_type_kinds(&self) -> &[&str] {
+        &[]
+    }
 
     /// parse a syntax tree (optionally incrementally, if old_tree is provided)
     fn parse_tree(&self, source: &str, old_tree: Option<&Tree>) -> Option<Tree> {
@@ -150,6 +203,18 @@ pub trait Language: Send + Sync + std::fmt::Debug {
         ))
     }
 
+    fn extract_completion_context_salsa_at_offset(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        offset: usize,
+        trigger_char: Option<char>,
+    ) -> Option<Arc<crate::salsa_queries::CompletionContextData>> {
+        let content = file.content(db);
+        let (line, character) = byte_offset_to_line_col(content, offset);
+        self.extract_completion_context_salsa(db, file, line, character, trigger_char)
+    }
+
     /// Resolve symbol at position using Salsa queries (CACHED)
     ///
     /// This is the new Salsa-based method for goto definition.
@@ -180,6 +245,140 @@ pub trait Language: Send + Sync + std::fmt::Debug {
             range.end.line,
             range.end.character,
         ))
+    }
+
+    fn find_method_calls_in_range_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        start_offset: usize,
+        end_offset: usize,
+    ) -> Vec<crate::salsa_queries::MethodCallMetadata> {
+        let content = file.content(db);
+        let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file) else {
+            return vec![];
+        };
+
+        let mut calls = Vec::new();
+        crate::salsa_queries::hints::collect_method_calls(
+            tree.root_node(),
+            content.as_bytes(),
+            start_offset,
+            end_offset,
+            &mut calls,
+        );
+        calls
+    }
+
+    fn is_local_variable_salsa(
+        &self,
+        _db: &dyn crate::salsa_queries::Db,
+        _file: crate::salsa_db::SourceFile,
+        _symbol_name: Arc<str>,
+        _offset: usize,
+    ) -> bool {
+        false
+    }
+
+    fn infer_variable_type_salsa(
+        &self,
+        _db: &dyn crate::salsa_queries::Db,
+        _file: crate::salsa_db::SourceFile,
+        _decl_offset: usize,
+    ) -> Option<Arc<str>> {
+        None
+    }
+
+    fn extract_package_salsa(
+        &self,
+        _db: &dyn crate::salsa_queries::Db,
+        _file: crate::salsa_db::SourceFile,
+    ) -> Option<Arc<str>> {
+        None
+    }
+
+    fn extract_imports_salsa(
+        &self,
+        _db: &dyn crate::salsa_queries::Db,
+        _file: crate::salsa_db::SourceFile,
+    ) -> Vec<Arc<str>> {
+        vec![]
+    }
+
+    fn extract_static_imports_salsa(
+        &self,
+        _db: &dyn crate::salsa_queries::Db,
+        _file: crate::salsa_db::SourceFile,
+    ) -> Vec<Arc<str>> {
+        vec![]
+    }
+
+    fn extract_classes_salsa(
+        &self,
+        _db: &dyn crate::salsa_queries::Db,
+        _file: crate::salsa_db::SourceFile,
+    ) -> Vec<ClassMetadata> {
+        vec![]
+    }
+
+    fn extract_classes_with_index_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        _origin: &ClassOrigin,
+        _name_table: Option<Arc<NameTable>>,
+        _view: Option<&IndexView>,
+    ) -> Vec<ClassMetadata> {
+        self.extract_classes_salsa(db, file)
+    }
+
+    fn discover_internal_names(&self, _source: &str, _tree: Option<&Tree>) -> Vec<Arc<str>> {
+        vec![]
+    }
+
+    fn extract_classes_from_source(
+        &self,
+        _source: &str,
+        _origin: &ClassOrigin,
+        _tree: Option<&Tree>,
+        _name_table: Option<Arc<NameTable>>,
+        _view: Option<&IndexView>,
+    ) -> Vec<ClassMetadata> {
+        vec![]
+    }
+
+    fn enrich_semantic_context_salsa(
+        &self,
+        ctx: SemanticContext,
+        _db: &dyn crate::salsa_queries::Db,
+        _file: crate::salsa_db::SourceFile,
+        _workspace: Option<&crate::workspace::Workspace>,
+        _data: &crate::salsa_queries::CompletionContextData,
+        _existing_imports: Vec<Arc<str>>,
+        _analysis: Option<&crate::salsa_queries::conversion::RequestAnalysisState>,
+    ) -> SemanticContext {
+        ctx
+    }
+
+    fn build_semantic_context_salsa(
+        &self,
+        db: &dyn crate::salsa_queries::Db,
+        file: crate::salsa_db::SourceFile,
+        data: crate::salsa_queries::CompletionContextData,
+        workspace: Option<&crate::workspace::Workspace>,
+        analysis: &crate::salsa_queries::conversion::RequestAnalysisState,
+    ) -> SemanticContext {
+        use crate::salsa_queries::conversion::FromSalsaDataWithAnalysis;
+
+        let mut ctx = SemanticContext::from_salsa_data_with_analysis(
+            data,
+            db,
+            file,
+            workspace,
+            Some(analysis),
+        );
+        self.enrich_completion_context(&mut ctx, analysis.analysis.scope(), &analysis.view);
+        ctx
     }
 }
 

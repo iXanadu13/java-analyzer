@@ -119,17 +119,8 @@ pub fn seed_parse_tree(db: &dyn Db, file: SourceFile, tree: &Tree) {
 #[salsa::tracked]
 pub fn extract_package(db: &dyn Db, file: SourceFile) -> Option<Arc<str>> {
     let lang_id = file.language_id(db);
-
-    // For Java files, extract package
-    if lang_id.as_ref() == "java" {
-        let content = file.content(db);
-        let tree = parse_tree(db, file)?;
-        crate::language::java::class_parser::extract_package_from_root(content, tree.root_node())
-    } else if lang_id.as_ref() == "kotlin" {
-        super::kotlin::extract_kotlin_package(db, file)
-    } else {
-        None
-    }
+    crate::language::lookup_language(lang_id.as_ref())
+        .and_then(|language| language.extract_package_salsa(db, file))
 }
 
 /// Extract import declarations from a source file
@@ -138,24 +129,11 @@ pub fn extract_package(db: &dyn Db, file: SourceFile) -> Option<Arc<str>> {
 #[salsa::tracked]
 pub fn extract_imports(db: &dyn Db, file: SourceFile) -> Arc<Vec<Arc<str>>> {
     let lang_id = file.language_id(db);
-
-    let imports = if lang_id.as_ref() == "java" {
-        let content = file.content(db);
-        if let Some(tree) = parse_tree(db, file) {
-            crate::language::java::class_parser::extract_imports_from_root(
-                content,
-                tree.root_node(),
-            )
-        } else {
-            vec![]
-        }
-    } else if lang_id.as_ref() == "kotlin" {
-        super::kotlin::extract_kotlin_imports(db, file)
-    } else {
-        vec![]
-    };
-
-    Arc::new(imports)
+    Arc::new(
+        crate::language::lookup_language(lang_id.as_ref())
+            .map(|language| language.extract_imports_salsa(db, file))
+            .unwrap_or_default(),
+    )
 }
 
 /// Helper: Parse a tree for a given language (not cached - used by other queries)
@@ -193,23 +171,7 @@ fn parse_tree_from_snapshot(
 }
 
 fn parser_for_language(language_id: &str) -> Option<Parser> {
-    let mut parser = Parser::new();
-
-    match language_id {
-        "java" => {
-            parser
-                .set_language(&tree_sitter_java::LANGUAGE.into())
-                .ok()?;
-        }
-        "kotlin" => {
-            parser
-                .set_language(&tree_sitter_kotlin::LANGUAGE.into())
-                .ok()?;
-        }
-        _ => return None,
-    }
-
-    Some(parser)
+    crate::language::lookup_language(language_id).map(crate::language::Language::make_parser)
 }
 
 fn compute_input_edit(old_content: &str, new_content: &str) -> InputEdit {

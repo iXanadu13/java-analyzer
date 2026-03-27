@@ -135,11 +135,33 @@ impl ResolvedJavaCall {
 
 pub(crate) fn semantic_context_at_offset(
     source: &str,
+    rope: &Rope,
+    root: Node,
+    offset: usize,
+    view: &IndexView,
+) -> Option<SemanticContext> {
+    semantic_context_at_offset_with_salsa(source, rope, root, offset, view, None, None)
+}
+
+pub(crate) fn semantic_context_at_offset_with_salsa(
+    source: &str,
     _rope: &Rope,
     _root: Node,
     offset: usize,
     view: &IndexView,
+    db: Option<&dyn crate::salsa_queries::Db>,
+    salsa_file: Option<crate::salsa_db::SourceFile>,
 ) -> Option<SemanticContext> {
+    if let (Some(db), Some(salsa_file)) = (db, salsa_file) {
+        return crate::salsa_queries::java::extract_java_semantic_context_at_offset(
+            db,
+            salsa_file,
+            offset,
+            view.clone(),
+            None,
+        );
+    }
+
     let mut ctx = crate::salsa_queries::java::extract_java_semantic_context_from_source_at_offset(
         source,
         offset,
@@ -154,6 +176,8 @@ pub(crate) struct JavaSemanticRequestContext<'a> {
     _rope: Rope,
     _root: Node<'a>,
     view: &'a IndexView,
+    salsa_db: Option<&'a dyn crate::salsa_queries::Db>,
+    salsa_file: Option<crate::salsa_db::SourceFile>,
     enricher: ContextEnricher<'a>,
     request: Option<Arc<RequestContext>>,
     semantic_context_cache: RefCell<HashMap<usize, Option<SemanticContext>>>,
@@ -167,11 +191,25 @@ impl<'a> JavaSemanticRequestContext<'a> {
         view: &'a IndexView,
         request: Option<Arc<RequestContext>>,
     ) -> Self {
+        Self::new_with_salsa(source, rope, root, view, request, None, None)
+    }
+
+    pub(crate) fn new_with_salsa(
+        source: &str,
+        rope: &Rope,
+        root: Node<'a>,
+        view: &'a IndexView,
+        request: Option<Arc<RequestContext>>,
+        salsa_db: Option<&'a dyn crate::salsa_queries::Db>,
+        salsa_file: Option<crate::salsa_db::SourceFile>,
+    ) -> Self {
         Self {
             source: Arc::from(source),
             _rope: rope.clone(),
             _root: root,
             view,
+            salsa_db,
+            salsa_file,
             enricher: ContextEnricher::new(view),
             request,
             semantic_context_cache: RefCell::new(HashMap::new()),
@@ -205,13 +243,15 @@ impl<'a> JavaSemanticRequestContext<'a> {
             metrics.record_semantic_context_lookup("inlay_semantic_context", offset);
         }
         let extract_started = std::time::Instant::now();
-        let Some(mut ctx) =
-            crate::salsa_queries::java::extract_java_semantic_context_from_source_at_offset(
-                self.source.as_ref(),
-                offset,
-                self.view.clone(),
-            )
-        else {
+        let Some(mut ctx) = semantic_context_at_offset_with_salsa(
+            self.source.as_ref(),
+            &self._rope,
+            self._root,
+            offset,
+            self.view,
+            self.salsa_db,
+            self.salsa_file,
+        ) else {
             return Ok(None);
         };
         if let Some(metrics) = self.metrics() {
@@ -222,15 +262,17 @@ impl<'a> JavaSemanticRequestContext<'a> {
             );
         }
 
-        self.check_cancelled("inlay.semantic_context.before_enrich")?;
-        let enrich_started = std::time::Instant::now();
-        self.enricher.enrich(&mut ctx);
-        if let Some(metrics) = self.metrics() {
-            metrics.record_phase_duration_at(
-                "inlay.enrich_semantic_context",
-                Some(offset),
-                enrich_started.elapsed(),
-            );
+        if self.salsa_db.is_none() || self.salsa_file.is_none() {
+            self.check_cancelled("inlay.semantic_context.before_enrich")?;
+            let enrich_started = std::time::Instant::now();
+            self.enricher.enrich(&mut ctx);
+            if let Some(metrics) = self.metrics() {
+                metrics.record_phase_duration_at(
+                    "inlay.enrich_semantic_context",
+                    Some(offset),
+                    enrich_started.elapsed(),
+                );
+            }
         }
         self.check_cancelled("inlay.semantic_context.after_enrich")?;
         let cached = Some(ctx.clone());
