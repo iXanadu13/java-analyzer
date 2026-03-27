@@ -128,6 +128,7 @@ pub fn extract_kotlin_completion_context(
 
     Arc::new(CompletionContextData {
         location,
+        java_module_context: None,
         query,
         cursor_offset: offset,
         enclosing_class,
@@ -344,6 +345,7 @@ fn is_in_comment(content: &str, offset: usize) -> bool {
 fn empty_context(db: &dyn Db, file: SourceFile) -> CompletionContextData {
     CompletionContextData {
         location: CursorLocationData::Unknown,
+        java_module_context: None,
         query: Arc::from(""),
         cursor_offset: 0,
         enclosing_class: None,

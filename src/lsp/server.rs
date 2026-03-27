@@ -258,6 +258,10 @@ impl Backend {
         let index_updated = workspace.index.update(|index| {
             index.update_source_in_context(analysis.module, analysis.source_root, origin, classes)
         });
+        {
+            let db = workspace.salsa_db.lock();
+            workspace.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
+        }
         tracing::debug!(
             uri = %uri,
             reason,

@@ -8,6 +8,7 @@ pub mod intrinsic_member;
 pub mod keyword;
 pub mod local_var;
 pub mod member;
+pub mod module_name;
 pub mod name_suggestion;
 pub mod override_member;
 pub mod package;

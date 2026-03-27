@@ -19,6 +19,7 @@ use crate::index::{
     WorkspaceIndexHandle,
 };
 use crate::language::Language;
+use crate::language::java::module_info::JavaModuleDescriptor;
 use crate::salsa_db::{Database as SalsaDatabase, FileId};
 use crate::salsa_queries::semantic::CachedMethodLocal;
 use crate::semantic::context::CurrentClassMember;
@@ -36,6 +37,60 @@ struct SemanticCache {
     method_locals: HashMap<u64, Vec<CachedMethodLocal>>,
     /// Cached class members per class, keyed by content hash
     class_members: HashMap<u64, Vec<CurrentClassMember>>,
+}
+
+#[derive(Default)]
+struct JavaModuleRegistry {
+    by_uri: HashMap<Url, Arc<JavaModuleDescriptor>>,
+    by_name: HashMap<Arc<str>, Vec<Url>>,
+}
+
+impl JavaModuleRegistry {
+    fn rebuild_name_index(&mut self) {
+        self.by_name.clear();
+        for (uri, descriptor) in &self.by_uri {
+            self.by_name
+                .entry(Arc::clone(&descriptor.name))
+                .or_default()
+                .push(uri.clone());
+        }
+    }
+
+    fn upsert(&mut self, uri: Url, descriptor: Arc<JavaModuleDescriptor>) {
+        self.by_uri.insert(uri, descriptor);
+        self.rebuild_name_index();
+    }
+
+    fn remove(&mut self, uri: &Url) {
+        if self.by_uri.remove(uri).is_some() {
+            self.rebuild_name_index();
+        }
+    }
+
+    fn replace_all(&mut self, descriptors: Vec<(Url, Arc<JavaModuleDescriptor>)>) {
+        self.by_uri.clear();
+        for (uri, descriptor) in descriptors {
+            self.by_uri.insert(uri, descriptor);
+        }
+        self.rebuild_name_index();
+    }
+
+    fn module_names(&self) -> Vec<Arc<str>> {
+        let mut names = self.by_name.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn descriptor_for_uri(&self, uri: &Url) -> Option<Arc<JavaModuleDescriptor>> {
+        self.by_uri.get(uri).cloned()
+    }
+
+    fn first_uri_for_name(&self, name: &str) -> Option<Url> {
+        self.by_name
+            .get(name)
+            .and_then(|uris| uris.first())
+            .cloned()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +126,7 @@ pub struct Workspace {
     /// IntelliJ-style semantic cache for parsed locals and members
     /// Keyed by content hash, automatically invalidated when content changes
     semantic_cache: Arc<parking_lot::RwLock<SemanticCache>>,
+    java_modules: Arc<parking_lot::RwLock<JavaModuleRegistry>>,
     jdk_classes: RwLock<Vec<ClassMetadata>>,
     full_reindex_in_progress: Arc<AtomicUsize>,
     full_reindex_serial: Arc<AtomicUsize>,
@@ -155,6 +211,7 @@ impl Workspace {
             indexed_salsa_uris: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             workspace_root: Arc::new(parking_lot::RwLock::new(None)),
             semantic_cache: Arc::new(parking_lot::RwLock::new(SemanticCache::default())),
+            java_modules: Arc::new(parking_lot::RwLock::new(JavaModuleRegistry::default())),
             jdk_classes: RwLock::new(Vec::new()),
             full_reindex_in_progress: Arc::new(AtomicUsize::new(0)),
             full_reindex_serial: Arc::new(AtomicUsize::new(0)),
@@ -623,6 +680,7 @@ impl Workspace {
             );
         }
 
+        self.rebuild_java_module_registry();
         self.prune_indexed_salsa_files(&current_indexed_uris);
         self.index.replace(new_index, Some(snapshot.clone()));
         self.publish_watched_source_roots();
@@ -682,6 +740,7 @@ impl Workspace {
         for (origin, classes) in by_origin {
             index.update_source(scope, origin, classes);
         }
+        self.rebuild_java_module_registry();
         self.prune_indexed_salsa_files(&current_indexed_uris);
         self.index.replace(index, None);
         self.publish_watched_source_roots();
@@ -858,6 +917,61 @@ impl Workspace {
         files.get(uri).copied()
     }
 
+    pub(crate) fn refresh_java_module_descriptor_for_salsa_file(
+        &self,
+        db: &crate::salsa_db::Database,
+        file: crate::salsa_db::SourceFile,
+    ) {
+        let uri = file.file_id(db).uri().clone();
+        if file.language_id(db).as_ref() != "java" {
+            self.java_modules.write().remove(&uri);
+            return;
+        }
+
+        let descriptor = crate::salsa_queries::java::extract_java_module_descriptor(db, file);
+        let mut modules = self.java_modules.write();
+        if let Some(descriptor) = descriptor {
+            modules.upsert(uri, descriptor);
+        } else {
+            modules.remove(&uri);
+        }
+    }
+
+    fn rebuild_java_module_registry(&self) {
+        let files = self
+            .salsa_files
+            .read()
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        let db = self.salsa_db.lock();
+        let descriptors = files
+            .into_iter()
+            .filter_map(|file| {
+                if file.language_id(&*db).as_ref() != "java" {
+                    return None;
+                }
+                let descriptor =
+                    crate::salsa_queries::java::extract_java_module_descriptor(&*db, file)?;
+                Some((file.file_id(&*db).uri().clone(), descriptor))
+            })
+            .collect::<Vec<_>>();
+        drop(db);
+        self.java_modules.write().replace_all(descriptors);
+    }
+
+    pub fn java_module_names(&self) -> Vec<Arc<str>> {
+        self.java_modules.read().module_names()
+    }
+
+    pub fn java_module_descriptor_for_uri(&self, uri: &Url) -> Option<Arc<JavaModuleDescriptor>> {
+        self.java_modules.read().descriptor_for_uri(uri)
+    }
+
+    pub fn java_module_uri(&self, module_name: &str) -> Option<Url> {
+        self.java_modules.read().first_uri_for_name(module_name)
+    }
+
     pub(crate) fn extract_salsa_classes_for_index_context(
         &self,
         db: &crate::salsa_db::Database,
@@ -902,6 +1016,8 @@ impl Workspace {
         let file_id = file.file_id(&*db);
         crate::salsa_queries::Db::remove_parse_tree(&*db, &file_id);
         crate::salsa_queries::Db::remove_class_extraction(&*db, &file_id);
+        drop(db);
+        self.java_modules.write().remove(uri);
     }
 
     fn create_salsa_file(
@@ -1124,6 +1240,10 @@ impl Workspace {
         let changed = self.index.update(|index| {
             index.update_source_in_context(context.module, context.source_root, origin, classes)
         });
+        {
+            let db = self.salsa_db.lock();
+            self.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
+        }
         self.track_indexed_uri(&uri);
 
         Ok(if changed {
@@ -1515,6 +1635,41 @@ mod tests {
 
         assert_eq!(snapshot.origin, ParseTreeOrigin::Seeded);
         assert_eq!(snapshot.content.as_ref(), text);
+    }
+
+    #[test]
+    fn java_module_registry_tracks_module_info_source_files() {
+        let workspace = Workspace::new();
+        let uri = Url::parse("file:///workspace/module-info.java").expect("valid uri");
+        let salsa_file = workspace.get_or_create_salsa_file(
+            &uri,
+            "module com.example.app { requires com.example.shared; }",
+            "java",
+        );
+
+        {
+            let db = workspace.salsa_db.lock();
+            workspace.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
+        }
+
+        assert_eq!(
+            workspace.java_module_names(),
+            vec![Arc::from("com.example.app")]
+        );
+        assert_eq!(
+            workspace
+                .java_module_descriptor_for_uri(&uri)
+                .expect("module descriptor")
+                .name
+                .as_ref(),
+            "com.example.app"
+        );
+        assert_eq!(
+            workspace
+                .java_module_uri("com.example.app")
+                .expect("module uri"),
+            uri
+        );
     }
 
     #[test]

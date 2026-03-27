@@ -5,6 +5,7 @@ use crate::index::{FieldSummary, IndexView, MethodParams, MethodSummary};
 use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::salsa_db::SourceFile;
 use crate::salsa_queries::Db;
+use crate::salsa_queries::context::JavaModuleContextKindData;
 use crate::salsa_queries::{
     CompletionContextData, CursorLocationData, ExpectedTypeSourceData, FunctionalExprShapeData,
     FunctionalTargetHintData, MethodRefQualifierKindData, MethodSummaryData, StatementLabelData,
@@ -12,7 +13,8 @@ use crate::salsa_queries::{
 };
 use crate::semantic::context::{
     CurrentClassMember, ExpectedTypeSource, FunctionalExprShape, FunctionalMethodCallHint,
-    FunctionalTargetHint, MethodRefQualifierKind, StatementLabel, StatementLabelTargetKind,
+    FunctionalTargetHint, JavaModuleContextKind, MethodRefQualifierKind, StatementLabel,
+    StatementLabelTargetKind,
 };
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::{CursorLocation, LocalVar, SemanticContext};
@@ -78,6 +80,10 @@ impl FromSalsaDataWithAnalysis<CompletionContextData> for SemanticContext {
             data.enclosing_internal_name.clone(),
             data.enclosing_package.clone(),
             existing_imports.clone(),
+        )
+        .with_java_module_context(
+            data.java_module_context
+                .map(convert_java_module_context_kind),
         )
         .with_enclosing_class_chain(data.enclosing_class_chain.clone())
         .with_file_uri(data.file_uri.clone())
@@ -163,6 +169,21 @@ pub(crate) fn enrich_java_semantic_context(
         });
 
     let static_imports = fetch_static_imports(db, file);
+    let current_java_module_name = workspace
+        .and_then(|ws| ws.java_module_descriptor_for_uri(file.file_id(db).uri()))
+        .map(|descriptor| Arc::clone(&descriptor.name));
+    let java_module_names = workspace
+        .map(crate::workspace::Workspace::java_module_names)
+        .unwrap_or_default();
+    let java_module_packages = analysis
+        .map(|request_analysis| {
+            db.workspace_index().module_source_package_names(
+                request_analysis.analysis.module,
+                request_analysis.analysis.classpath,
+                request_analysis.analysis.source_root,
+            )
+        })
+        .unwrap_or_default();
     let enclosing_class_member =
         crate::salsa_queries::java::extract_java_enclosing_method(db, file, data.cursor_offset)
             .as_deref()
@@ -195,6 +216,9 @@ pub(crate) fn enrich_java_semantic_context(
     ctx.local_variables = local_variables;
 
     ctx.with_static_imports(static_imports)
+        .with_current_java_module_name(current_java_module_name)
+        .with_java_module_packages(java_module_packages)
+        .with_java_module_names(java_module_names)
         .with_class_member_position(data.is_class_member_position)
         .with_class_members(members)
         .with_enclosing_member(enclosing_class_member)
@@ -312,6 +336,22 @@ fn convert_cursor_location(data: &CursorLocationData) -> CursorLocation {
             }
         }
         CursorLocationData::Unknown => CursorLocation::Unknown,
+    }
+}
+
+fn convert_java_module_context_kind(data: JavaModuleContextKindData) -> JavaModuleContextKind {
+    match data {
+        JavaModuleContextKindData::DirectiveKeyword => JavaModuleContextKind::DirectiveKeyword,
+        JavaModuleContextKindData::RequiresModifier => JavaModuleContextKind::RequiresModifier,
+        JavaModuleContextKindData::RequiresModule => JavaModuleContextKind::RequiresModule,
+        JavaModuleContextKindData::ExportsPackage => JavaModuleContextKind::ExportsPackage,
+        JavaModuleContextKindData::OpensPackage => JavaModuleContextKind::OpensPackage,
+        JavaModuleContextKindData::TargetModule => JavaModuleContextKind::TargetModule,
+        JavaModuleContextKindData::UsesType => JavaModuleContextKind::UsesType,
+        JavaModuleContextKindData::ProvidesService => JavaModuleContextKind::ProvidesService,
+        JavaModuleContextKindData::ProvidesImplementation => {
+            JavaModuleContextKind::ProvidesImplementation
+        }
     }
 }
 

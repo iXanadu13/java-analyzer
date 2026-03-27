@@ -6,8 +6,9 @@ use crate::salsa_db::{FileId, SourceFile};
 use crate::salsa_queries::Db;
 use crate::salsa_queries::context::{
     CompletionContextData, CursorLocationData, ExpectedTypeSourceData, FunctionalExprShapeData,
-    FunctionalMethodCallHintData, FunctionalTargetHintData, MethodRefQualifierKindData,
-    StatementLabelData, StatementLabelTargetKindData, line_col_to_offset,
+    FunctionalMethodCallHintData, FunctionalTargetHintData, JavaModuleContextKindData,
+    MethodRefQualifierKindData, StatementLabelData, StatementLabelTargetKindData,
+    line_col_to_offset,
 };
 use crate::salsa_queries::conversion::{FromSalsaDataWithAnalysis, RequestAnalysisState};
 use crate::semantic::{CursorLocation, SemanticContext};
@@ -55,8 +56,26 @@ pub fn extract_java_completion_context_at_offset(
         None,
     );
     let cursor_node = extractor.find_cursor_node(root);
-    let (rich_location, rich_query) =
-        crate::language::java::location::determine_location(&extractor, cursor_node, trigger_char);
+    let module_match = crate::language::java::module_info::infer_module_completion_context(
+        &extractor,
+        root,
+        cursor_node,
+    );
+    let (rich_location, rich_query, java_module_context) = if let Some(module_match) = module_match
+    {
+        (
+            module_match.location,
+            module_match.query,
+            Some(convert_java_module_context(module_match.context)),
+        )
+    } else {
+        let (location, query) = crate::language::java::location::determine_location(
+            &extractor,
+            cursor_node,
+            trigger_char,
+        );
+        (location, query, None)
+    };
     let location = convert_rich_location(&rich_location);
     let query = Arc::from(rich_query.as_str());
     let statement_labels = convert_statement_labels(
@@ -94,6 +113,7 @@ pub fn extract_java_completion_context_at_offset(
 
     Arc::new(CompletionContextData {
         location,
+        java_module_context,
         query,
         cursor_offset: offset,
         enclosing_class,
@@ -309,6 +329,7 @@ fn convert_rich_location(location: &CursorLocation) -> CursorLocationData {
 fn empty_context(db: &dyn Db, file: SourceFile) -> CompletionContextData {
     CompletionContextData {
         location: CursorLocationData::Unknown,
+        java_module_context: None,
         query: Arc::from(""),
         cursor_offset: 0,
         enclosing_class: None,
@@ -325,6 +346,40 @@ fn empty_context(db: &dyn Db, file: SourceFile) -> CompletionContextData {
         content_hash: 0,
         file_uri: Arc::from(file.file_id(db).as_str()),
         language_id: Arc::from("java"),
+    }
+}
+
+fn convert_java_module_context(
+    kind: crate::semantic::context::JavaModuleContextKind,
+) -> JavaModuleContextKindData {
+    match kind {
+        crate::semantic::context::JavaModuleContextKind::DirectiveKeyword => {
+            JavaModuleContextKindData::DirectiveKeyword
+        }
+        crate::semantic::context::JavaModuleContextKind::RequiresModifier => {
+            JavaModuleContextKindData::RequiresModifier
+        }
+        crate::semantic::context::JavaModuleContextKind::RequiresModule => {
+            JavaModuleContextKindData::RequiresModule
+        }
+        crate::semantic::context::JavaModuleContextKind::ExportsPackage => {
+            JavaModuleContextKindData::ExportsPackage
+        }
+        crate::semantic::context::JavaModuleContextKind::OpensPackage => {
+            JavaModuleContextKindData::OpensPackage
+        }
+        crate::semantic::context::JavaModuleContextKind::TargetModule => {
+            JavaModuleContextKindData::TargetModule
+        }
+        crate::semantic::context::JavaModuleContextKind::UsesType => {
+            JavaModuleContextKindData::UsesType
+        }
+        crate::semantic::context::JavaModuleContextKind::ProvidesService => {
+            JavaModuleContextKindData::ProvidesService
+        }
+        crate::semantic::context::JavaModuleContextKind::ProvidesImplementation => {
+            JavaModuleContextKindData::ProvidesImplementation
+        }
     }
 }
 

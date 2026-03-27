@@ -65,7 +65,7 @@ Legend:
 | Type-import-on-demand (§7.5.2) | Done | Wildcard imports resolved against `IndexView` |
 | Static-single-type import (§7.5.3) | Done | `import static Foo.bar` resolved |
 | Static-import-on-demand (§7.5.4) | Done | `import static Foo.*` resolved |
-| Module declarations (§7.7) | Not implemented | JPMS modules not modeled; JDK modules loaded as flat class pool |
+| Module declarations (§7.7) | Partial | Source `module-info.java` descriptors, completion, document symbols, and module-name goto are supported; binary `module-info.class` metadata and JPMS readability / export enforcement are not modeled |
 
 ## Chapter 8 — Classes
 
@@ -171,7 +171,7 @@ Legend:
 | Java 8 | Method references | Partial |
 | Java 8 | Default / static interface methods | Done |
 | Java 8 | Stream API (library) | Done (via indexing) |
-| Java 9 | Module system (JPMS) | Not implemented |
+| Java 9 | Module system (JPMS) | Partial (source `module-info.java` only; no binary module metadata or module-path enforcement) |
 | Java 10 | `var` local type inference | Done |
 | Java 14 | `switch` expressions | Partial |
 | Java 14 | Records (preview) | Done |
@@ -197,4 +197,4 @@ Legend:
 | Lambda / method-ref constraint solving | Low |
 | Diagnostics / error reporting | None |
 | Data-flow analysis | Minimal (instanceof narrowing only) |
-| JPMS module system | None |
+| JPMS module system | Low (source `module-info.java` descriptors only) |

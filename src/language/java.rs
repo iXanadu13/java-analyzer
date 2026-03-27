@@ -8,9 +8,9 @@ use crate::language::java::completion::providers::{
     constructor::ConstructorProvider, expression::ExpressionProvider, import::ImportProvider,
     import_static::ImportStaticProvider, intrinsic_member::IntrinsicMemberProvider,
     keyword::KeywordProvider, local_var::LocalVarProvider, member::MemberProvider,
-    name_suggestion::NameSuggestionProvider, override_member::OverrideProvider,
-    package::PackageProvider, snippet::SnippetProvider, statement_label::StatementLabelProvider,
-    static_import_member::StaticImportMemberProvider,
+    module_name::ModuleNameProvider, name_suggestion::NameSuggestionProvider,
+    override_member::OverrideProvider, package::PackageProvider, snippet::SnippetProvider,
+    statement_label::StatementLabelProvider, static_import_member::StaticImportMemberProvider,
 };
 use crate::language::java::inlay_hints::{JavaInlayHintKind, collect_java_inlay_hints};
 use crate::language::java::symbols::collect_java_symbols;
@@ -38,6 +38,7 @@ pub mod intrinsics;
 pub mod location;
 pub mod lombok;
 pub mod members;
+pub mod module_info;
 pub mod render;
 pub mod scope;
 pub mod super_support;
@@ -46,13 +47,14 @@ pub mod synthetic;
 pub mod type_ctx;
 pub mod utils;
 
-static JAVA_COMPLETION_PROVIDERS: [&dyn CompletionProvider; 16] = [
+static JAVA_COMPLETION_PROVIDERS: [&dyn CompletionProvider; 17] = [
     &LocalVarProvider,
     &StatementLabelProvider,
     &IntrinsicMemberProvider,
     &MemberProvider,
     &ConstructorProvider,
     &PackageProvider,
+    &ModuleNameProvider,
     &ExpressionProvider,
     &ImportProvider,
     &ImportStaticProvider,

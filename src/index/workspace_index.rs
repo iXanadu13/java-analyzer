@@ -200,6 +200,16 @@ impl WorkspaceIndex {
             .classpath_jars(classpath_id)
     }
 
+    pub fn module_source_package_names(
+        &self,
+        module: ModuleId,
+        classpath_id: ClasspathId,
+        source_root: Option<SourceRootId>,
+    ) -> Vec<Arc<str>> {
+        self.ensure_module(module, default_module_name(module))
+            .visible_source_package_names(classpath_id, source_root)
+    }
+
     pub fn module_classpath_summary(&self, module: ModuleId) -> Vec<(ClasspathId, Vec<Arc<str>>)> {
         self.ensure_module(module, default_module_name(module))
             .classpath_summary()

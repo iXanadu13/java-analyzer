@@ -1,11 +1,14 @@
 use crate::{
     completion::{
+        CandidateKind, CompletionCandidate,
         candidate::ReplacementMode,
+        fuzzy,
         provider::{CompletionProvider, ProviderCompletionResult},
     },
     index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
+use std::sync::Arc;
 
 pub struct PackageProvider;
 
@@ -15,6 +18,18 @@ impl CompletionProvider for PackageProvider {
     }
 
     fn is_applicable(&self, ctx: &SemanticContext) -> bool {
+        match ctx.java_module_context {
+            Some(crate::semantic::context::JavaModuleContextKind::ExportsPackage)
+            | Some(crate::semantic::context::JavaModuleContextKind::OpensPackage) => {
+                return matches!(&ctx.location, CursorLocation::Expression { .. });
+            }
+            Some(crate::semantic::context::JavaModuleContextKind::UsesType)
+            | Some(crate::semantic::context::JavaModuleContextKind::ProvidesService)
+            | Some(crate::semantic::context::JavaModuleContextKind::ProvidesImplementation) => {}
+            Some(_) => return false,
+            None => {}
+        }
+
         match &ctx.location {
             CursorLocation::Import { .. } => true,
             CursorLocation::Expression { prefix } | CursorLocation::TypeAnnotation { prefix } => {
@@ -50,6 +65,22 @@ impl CompletionProvider for PackageProvider {
         request: Option<&crate::lsp::request_context::RequestContext>,
         _limit: Option<usize>,
     ) -> crate::lsp::request_cancellation::RequestResult<ProviderCompletionResult> {
+        match ctx.java_module_context {
+            Some(crate::semantic::context::JavaModuleContextKind::ExportsPackage)
+            | Some(crate::semantic::context::JavaModuleContextKind::OpensPackage) => {
+                let prefix = match &ctx.location {
+                    CursorLocation::Expression { prefix } => prefix.as_str(),
+                    _ => return Ok(ProviderCompletionResult::default()),
+                };
+                return Ok(module_package_candidates(prefix, &ctx.java_module_packages).into());
+            }
+            Some(crate::semantic::context::JavaModuleContextKind::UsesType)
+            | Some(crate::semantic::context::JavaModuleContextKind::ProvidesService)
+            | Some(crate::semantic::context::JavaModuleContextKind::ProvidesImplementation) => {}
+            Some(_) => return Ok(ProviderCompletionResult::default()),
+            None => {}
+        }
+
         match &ctx.location {
             CursorLocation::Import { prefix } => {
                 Ok(crate::completion::import_completion::candidates_for_import(
@@ -119,6 +150,44 @@ impl CompletionProvider for PackageProvider {
             _ => Ok(ProviderCompletionResult::default()),
         }
     }
+}
+
+fn module_package_candidates(prefix: &str, packages: &[Arc<str>]) -> Vec<CompletionCandidate> {
+    let prefix_lower = prefix.to_lowercase();
+    let mut results = packages
+        .iter()
+        .filter_map(|package| {
+            let dotted = package.replace('/', ".");
+            let lower = dotted.to_lowercase();
+            let score = if prefix.is_empty() {
+                Some(50.0)
+            } else if lower.starts_with(&prefix_lower) {
+                Some(90.0)
+            } else {
+                fuzzy::fuzzy_match(&prefix_lower, &lower).map(|score| 60.0 + score as f32 * 0.1)
+            }?;
+            Some(
+                CompletionCandidate::new(
+                    Arc::from(dotted.as_str()),
+                    dotted.clone(),
+                    CandidateKind::Package,
+                    "module_package",
+                )
+                .with_detail(format!("package {}", dotted))
+                .with_replacement_mode(ReplacementMode::PackagePath)
+                .with_filter_text(dotted.clone())
+                .with_score(score),
+            )
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.label.as_ref().cmp(right.label.as_ref()))
+    });
+    results
 }
 
 #[cfg(test)]

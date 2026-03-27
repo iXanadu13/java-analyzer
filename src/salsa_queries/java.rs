@@ -15,8 +15,8 @@ pub use completion::{
 };
 pub use hints::{compute_java_inlay_hints, infer_java_variable_type};
 pub use indexing::{
-    extract_java_imports, extract_java_package, extract_java_static_imports,
-    extract_java_static_imports_from_source, parse_java_classes,
+    extract_java_imports, extract_java_module_descriptor, extract_java_package,
+    extract_java_static_imports, extract_java_static_imports_from_source, parse_java_classes,
     parse_java_classes_with_index_view,
 };
 pub use resolve::{is_java_local_variable, resolve_java_symbol};
@@ -29,7 +29,9 @@ mod tests {
     use super::*;
     use crate::index::{ClassOrigin, WorkspaceIndex};
     use crate::salsa_db::{Database, FileId, SourceFile};
-    use crate::salsa_queries::context::{CursorLocationData, line_col_to_offset};
+    use crate::salsa_queries::context::{
+        CursorLocationData, JavaModuleContextKindData, line_col_to_offset,
+    };
     use crate::semantic::context::CursorLocation;
     use ropey::Rope;
     use std::sync::Arc;
@@ -184,6 +186,36 @@ class User {
             extract_java_completion_context_at_offset(&db, file, byte_offset, Some('.'));
 
         assert_eq!(by_line_col.as_ref(), by_offset.as_ref());
+    }
+
+    #[test]
+    fn test_extract_java_context_marks_module_target_module_position() {
+        let db = Database::default();
+        let uri = Url::parse("file:///test/module-info.java").unwrap();
+        let content = "module demo { exports com.example.api to com.example.te; }";
+        let rope = Rope::from_str(content);
+        let byte_offset = content.find("com.example.te").unwrap() + "com.example.te".len();
+        let char_idx = rope.byte_to_char(byte_offset);
+        let line = rope.char_to_line(char_idx) as u32;
+        let character = (char_idx - rope.line_to_char(line as usize)) as u32;
+        let file = SourceFile::new(
+            &db,
+            FileId::new(uri),
+            content.to_string(),
+            Arc::from("java"),
+        );
+
+        let ctx = extract_java_completion_context(&db, file, line, character, None);
+
+        assert_eq!(
+            ctx.java_module_context,
+            Some(JavaModuleContextKindData::TargetModule)
+        );
+        assert_eq!(ctx.query.as_ref(), "com.example.te");
+        assert!(matches!(
+            ctx.location,
+            CursorLocationData::Expression { .. }
+        ));
     }
 
     #[test]

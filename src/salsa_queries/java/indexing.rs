@@ -106,6 +106,18 @@ pub fn extract_java_static_imports(db: &dyn Db, file: SourceFile) -> Vec<Arc<str
     crate::language::java::class_parser::extract_static_imports_from_root(content, tree.root_node())
 }
 
+pub fn extract_java_module_descriptor(
+    db: &dyn Db,
+    file: SourceFile,
+) -> Option<Arc<crate::language::java::module_info::JavaModuleDescriptor>> {
+    let content = file.content(db);
+    let tree = crate::salsa_queries::parse::parse_tree(db, file)?;
+    crate::language::java::module_info::extract_module_descriptor_from_root(
+        content,
+        tree.root_node(),
+    )
+}
+
 pub fn extract_java_static_imports_from_source(source: &str) -> Vec<Arc<str>> {
     let mut parser = crate::language::java::make_java_parser();
     let tree = match parser.parse(source, None) {

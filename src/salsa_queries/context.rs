@@ -19,6 +19,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CompletionContextData {
     pub location: CursorLocationData,
+    pub java_module_context: Option<JavaModuleContextKindData>,
     pub query: Arc<str>,
     pub cursor_offset: usize,
     pub enclosing_class: Option<Arc<str>>,
@@ -100,6 +101,19 @@ pub enum CursorLocationData {
         prefix: Arc<str>,
     },
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JavaModuleContextKindData {
+    DirectiveKeyword,
+    RequiresModifier,
+    RequiresModule,
+    ExportsPackage,
+    OpensPackage,
+    TargetModule,
+    UsesType,
+    ProvidesService,
+    ProvidesImplementation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -228,6 +242,7 @@ pub fn extract_completion_context(
 
     Arc::new(CompletionContextData {
         location: CursorLocationData::Unknown,
+        java_module_context: None,
         query: Arc::from(""),
         cursor_offset: 0,
         enclosing_class: None,

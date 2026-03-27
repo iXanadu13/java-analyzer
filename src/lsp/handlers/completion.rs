@@ -419,8 +419,19 @@ fn default_filter_text(c: &CompletionCandidate) -> Option<String> {
 mod tests {
     use super::*;
     use crate::completion::candidate::CandidateKind;
-    use crate::completion::engine::CompletionMetadata;
+    use crate::completion::engine::{CompletionEngine, CompletionMetadata};
+    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId};
+    use crate::language::LanguageRegistry;
+    use crate::lsp::request_cancellation::{CancellationToken, RequestFamily};
+    use crate::lsp::request_context::RequestContext;
+    use crate::workspace::document::Document;
+    use crate::workspace::{SourceFile, Workspace};
+    use rust_asm::constants::ACC_PUBLIC;
     use std::sync::Arc;
+    use tower_lsp::lsp_types::{
+        CompletionContext, CompletionTriggerKind, PartialResultParams, TextDocumentIdentifier,
+        TextDocumentPositionParams, Url, WorkDoneProgressParams,
+    };
 
     fn edit_range(edit: &CompletionTextEdit) -> Range {
         match edit {
@@ -434,6 +445,103 @@ mod tests {
             CompletionTextEdit::Edit(te) => te.new_text.as_str(),
             CompletionTextEdit::InsertAndReplace(te) => te.new_text.as_str(),
         }
+    }
+
+    fn root_scope() -> IndexScope {
+        IndexScope {
+            module: ModuleId::ROOT,
+        }
+    }
+
+    fn strip_cursor_marker(marked_source: &str) -> (String, Position) {
+        let marker = marked_source.find('|').expect("cursor marker");
+        let source = marked_source.replacen('|', "", 1);
+        let rope = ropey::Rope::from_str(&source);
+        let line = rope.byte_to_line(marker) as u32;
+        let character = (marker - rope.line_to_byte(line as usize)) as u32;
+        (source, Position::new(line, character))
+    }
+
+    fn make_class(package: &str, name: &str, origin: ClassOrigin) -> ClassMetadata {
+        let internal_name = if package.is_empty() {
+            name.to_string()
+        } else {
+            format!("{package}/{name}")
+        };
+        ClassMetadata {
+            package: (!package.is_empty()).then(|| Arc::from(package)),
+            name: Arc::from(name),
+            internal_name: Arc::from(internal_name),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: None,
+            origin,
+        }
+    }
+
+    fn open_java_document(workspace: &Workspace, uri: &Url, source: &str) {
+        workspace.documents.open(Document::new(SourceFile::new(
+            uri.clone(),
+            "java",
+            1,
+            source.to_string(),
+            None,
+        )));
+        let salsa_file = workspace
+            .get_or_update_salsa_file(uri)
+            .expect("salsa file for document");
+        let db = workspace.salsa_db.lock();
+        workspace.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
+    }
+
+    fn completion_labels_from_marked_source(
+        workspace: Arc<Workspace>,
+        uri: Url,
+        marked_source: &str,
+    ) -> Vec<String> {
+        let (source, position) = strip_cursor_marker(marked_source);
+        open_java_document(workspace.as_ref(), &uri, &source);
+
+        let response = handle_completion_blocking(
+            Arc::clone(&workspace),
+            Arc::new(CompletionEngine::new()),
+            Arc::new(LanguageRegistry::new()),
+            CompletionParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+                context: Some(CompletionContext {
+                    trigger_kind: CompletionTriggerKind::INVOKED,
+                    trigger_character: None,
+                }),
+            },
+            RequestContext::new(
+                "test_completion",
+                &uri,
+                RequestFamily::Completion,
+                1,
+                CancellationToken::new(),
+            ),
+        )
+        .expect("completion result")
+        .expect("completion response");
+
+        let mut labels: Vec<String> = match response {
+            CompletionResponse::Array(items) => items.into_iter().map(|item| item.label).collect(),
+            CompletionResponse::List(list) => {
+                list.items.into_iter().map(|item| item.label).collect()
+            }
+        };
+        labels.sort();
+        labels
     }
 
     #[test]
@@ -786,5 +894,115 @@ mod tests {
         );
         assert!(list.is_incomplete);
         assert_eq!(list.items.len(), 2);
+    }
+
+    #[test]
+    fn test_module_info_completion_suggests_directive_keywords() {
+        let workspace = Arc::new(Workspace::new());
+        let uri = Url::parse("file:///workspace/module-info.java").expect("uri");
+
+        let labels =
+            completion_labels_from_marked_source(workspace, uri, "module com.example.app { req| }");
+
+        assert!(labels.iter().any(|label| label == "requires"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|label| label == "return"),
+            "module body keyword completion should stay JPMS-specific: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_module_info_requires_completion_uses_workspace_module_registry() {
+        let workspace = Arc::new(Workspace::new());
+        let shared_uri = Url::parse("file:///workspace/shared/module-info.java").expect("uri");
+        open_java_document(
+            workspace.as_ref(),
+            &shared_uri,
+            "module com.example.shared { }",
+        );
+
+        let app_uri = Url::parse("file:///workspace/app/module-info.java").expect("uri");
+        let labels = completion_labels_from_marked_source(
+            workspace,
+            app_uri,
+            "module com.example.app { requires com.example.|; }",
+        );
+
+        assert!(
+            labels.iter().any(|label| label == "com.example.shared"),
+            "{labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|label| label == "com.example.app"),
+            "current module should not be suggested in requires completion: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_module_info_exports_completion_uses_current_module_source_packages() {
+        let workspace = Arc::new(Workspace::new());
+        let api_uri = Url::parse("file:///workspace/src/com/example/api/Api.java").expect("uri");
+        let internal_uri =
+            Url::parse("file:///workspace/src/com/example/internal/Internal.java").expect("uri");
+        workspace.index.update(|index| {
+            let api_origin = ClassOrigin::SourceFile(Arc::from(api_uri.as_str()));
+            index.update_source(
+                root_scope(),
+                api_origin.clone(),
+                vec![make_class("com/example/api", "Api", api_origin)],
+            );
+            let internal_origin = ClassOrigin::SourceFile(Arc::from(internal_uri.as_str()));
+            index.update_source(
+                root_scope(),
+                internal_origin.clone(),
+                vec![make_class(
+                    "com/example/internal",
+                    "Internal",
+                    internal_origin,
+                )],
+            );
+        });
+
+        let module_uri = Url::parse("file:///workspace/module-info.java").expect("uri");
+        let labels = completion_labels_from_marked_source(
+            workspace,
+            module_uri,
+            "module com.example.app { exports com.example.|; }",
+        );
+
+        assert!(
+            labels.iter().any(|label| label == "com.example.api"),
+            "{labels:?}"
+        );
+        assert!(
+            labels.iter().any(|label| label == "com.example.internal"),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_module_info_uses_completion_routes_to_type_candidates() {
+        let workspace = Arc::new(Workspace::new());
+        workspace.index.update(|index| {
+            index.add_classes(vec![make_class(
+                "com/example/spi",
+                "Service",
+                ClassOrigin::Unknown,
+            )]);
+        });
+
+        let module_uri = Url::parse("file:///workspace/module-info.java").expect("uri");
+        let labels = completion_labels_from_marked_source(
+            workspace,
+            module_uri,
+            "module com.example.app { uses com.example.spi.Se|; }",
+        );
+
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "com.example.spi.Service"),
+            "{labels:?}"
+        );
     }
 }

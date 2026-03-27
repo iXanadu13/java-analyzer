@@ -29,6 +29,15 @@ impl CompletionProvider for ExpressionProvider {
     }
 
     fn is_applicable(&self, ctx: &SemanticContext) -> bool {
+        if let Some(module_context) = ctx.java_module_context {
+            return matches!(
+                module_context,
+                crate::semantic::context::JavaModuleContextKind::UsesType
+                    | crate::semantic::context::JavaModuleContextKind::ProvidesService
+                    | crate::semantic::context::JavaModuleContextKind::ProvidesImplementation
+            ) && matches!(&ctx.location, CursorLocation::TypeAnnotation { .. });
+        }
+
         matches!(
             &ctx.location,
             CursorLocation::Expression { .. }

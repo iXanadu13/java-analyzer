@@ -190,6 +190,11 @@ impl BucketIndex {
             .is_some_and(|v| !v.is_empty())
     }
 
+    pub fn package_names(&self) -> Vec<Arc<str>> {
+        let inner = self.inner.read();
+        inner.package_index.keys().cloned().collect()
+    }
+
     pub fn resolve_imports(&self, imports: &[Arc<str>]) -> Vec<Arc<ClassMetadata>> {
         let mut result = Vec::new();
         for import in imports {

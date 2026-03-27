@@ -378,6 +378,19 @@ pub enum JavaAccessReceiverKind {
     Expression,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JavaModuleContextKind {
+    DirectiveKeyword,
+    RequiresModifier,
+    RequiresModule,
+    ExportsPackage,
+    OpensPackage,
+    TargetModule,
+    UsesType,
+    ProvidesService,
+    ProvidesImplementation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaIntrinsicAccess {
     pub kind: JavaIntrinsicAccessKind,
@@ -418,6 +431,10 @@ pub struct SemanticContext {
     pub typed_expr_ctx: Option<TypedExpressionContext>,
     pub typed_chain_receiver: Option<TypedChainReceiver>,
     pub java_intrinsic_access: Option<JavaIntrinsicAccess>,
+    pub java_module_context: Option<JavaModuleContextKind>,
+    pub current_java_module_name: Option<Arc<str>>,
+    pub java_module_packages: Vec<Arc<str>>,
+    pub java_module_names: Vec<Arc<str>>,
     pub expected_functional_interface: Option<TypeName>,
     pub expected_sam: Option<SamSignature>,
     /// Flow-sensitive local type overrides scoped to the current cursor region
@@ -478,6 +495,10 @@ impl SemanticContext {
             typed_expr_ctx: None,
             typed_chain_receiver: None,
             java_intrinsic_access: None,
+            java_module_context: None,
+            current_java_module_name: None,
+            java_module_packages: vec![],
+            java_module_names: vec![],
             expected_functional_interface: None,
             expected_sam: None,
             flow_type_overrides: HashMap::new(),
@@ -527,6 +548,26 @@ impl SemanticContext {
 
     pub fn with_typed_expression_context(mut self, typed: Option<TypedExpressionContext>) -> Self {
         self.typed_expr_ctx = typed;
+        self
+    }
+
+    pub fn with_java_module_context(mut self, kind: Option<JavaModuleContextKind>) -> Self {
+        self.java_module_context = kind;
+        self
+    }
+
+    pub fn with_current_java_module_name(mut self, name: Option<Arc<str>>) -> Self {
+        self.current_java_module_name = name;
+        self
+    }
+
+    pub fn with_java_module_packages(mut self, packages: Vec<Arc<str>>) -> Self {
+        self.java_module_packages = packages;
+        self
+    }
+
+    pub fn with_java_module_names(mut self, module_names: Vec<Arc<str>>) -> Self {
+        self.java_module_names = module_names;
         self
     }
 

@@ -144,6 +144,43 @@ fn handle_goto_definition_blocking(
         return Ok(GotoPrepared::Ready(None));
     }
 
+    if matches!(
+        ctx.java_module_context,
+        Some(
+            crate::semantic::context::JavaModuleContextKind::RequiresModule
+                | crate::semantic::context::JavaModuleContextKind::TargetModule
+        )
+    ) && !ctx.query.is_empty()
+        && let Some(target_uri) = workspace.java_module_uri(ctx.query.as_str())
+    {
+        let range = workspace
+            .documents
+            .with_doc(&target_uri, |doc| doc.source().text().to_owned())
+            .or_else(|| {
+                target_uri
+                    .to_file_path()
+                    .ok()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+            })
+            .and_then(|content| {
+                let mut parser = crate::language::java::make_java_parser();
+                let tree = parser.parse(&content, None)?;
+                let rope = ropey::Rope::from_str(&content);
+                let name_node = crate::language::java::module_info::module_declaration_name_node(
+                    tree.root_node(),
+                )?;
+                Some(crate::lsp::converters::ts_node_to_range(&name_node, &rope))
+            })
+            .unwrap_or_default();
+        log_summary();
+        return Ok(GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(
+            Location {
+                uri: target_uri,
+                range,
+            },
+        ))));
+    }
+
     let resolver = SymbolResolver::new(&view);
     let symbol = match resolver.resolve(&ctx) {
         Some(s) => s,
@@ -618,13 +655,86 @@ fn extract_class_bytes(jar: &str, internal: &str) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::index::ClassOrigin;
+    use crate::language::LanguageRegistry;
     use crate::language::java::class_parser::parse_java_source_via_tree_for_test;
     use crate::lsp::request_cancellation::{CancellationToken, RequestFamily};
     use crate::lsp::request_context::RequestContext;
     use crate::workspace::document::Document;
     use crate::workspace::{SourceFile, Workspace};
     use std::sync::Arc;
-    use tower_lsp::lsp_types::Url;
+    use tower_lsp::lsp_types::{
+        GotoDefinitionParams, PartialResultParams, TextDocumentIdentifier,
+        TextDocumentPositionParams, Url, WorkDoneProgressParams,
+    };
+
+    fn strip_cursor_marker(marked_source: &str) -> (String, Position) {
+        let marker = marked_source.find('|').expect("cursor marker");
+        let source = marked_source.replacen('|', "", 1);
+        let rope = ropey::Rope::from_str(&source);
+        let line = rope.byte_to_line(marker) as u32;
+        let character = (marker - rope.line_to_byte(line as usize)) as u32;
+        (source, Position::new(line, character))
+    }
+
+    fn open_java_document(workspace: &Workspace, uri: &Url, source: &str) {
+        workspace.documents.open(Document::new(SourceFile::new(
+            uri.clone(),
+            "java",
+            1,
+            source.to_string(),
+            None,
+        )));
+        let salsa_file = workspace
+            .get_or_update_salsa_file(uri)
+            .expect("salsa file for document");
+        let db = workspace.salsa_db.lock();
+        workspace.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
+    }
+
+    fn goto_location_from_marked_source(
+        workspace: Arc<Workspace>,
+        uri: Url,
+        marked_source: &str,
+    ) -> Location {
+        let (source, position) = strip_cursor_marker(marked_source);
+        open_java_document(workspace.as_ref(), &uri, &source);
+
+        let prepared = handle_goto_definition_blocking(
+            Arc::clone(&workspace),
+            Arc::new(LanguageRegistry::new()),
+            GotoDefinitionParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            },
+            RequestContext::new(
+                "test_goto",
+                &uri,
+                RequestFamily::GotoDefinition,
+                1,
+                CancellationToken::new(),
+            ),
+        )
+        .expect("goto result");
+
+        match prepared {
+            GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(location))) => location,
+            _ => panic!("expected scalar goto location"),
+        }
+    }
+
+    fn assert_range_matches_name(source: &str, range: Range, expected_name: &str) {
+        let line = source
+            .lines()
+            .nth(range.start.line as usize)
+            .expect("target line");
+        let start = range.start.character as usize;
+        let end = range.end.character as usize;
+        assert_eq!(&line[start..end], expected_name);
+    }
 
     #[test]
     fn test_find_var_decl_col_supports_varargs_parameter() {
@@ -709,5 +819,41 @@ mod tests {
             }
             _ => panic!("expected source goto location"),
         }
+    }
+
+    #[test]
+    fn test_goto_module_requires_jumps_to_module_declaration_name() {
+        let workspace = Arc::new(Workspace::new());
+        let target_uri = Url::parse("file:///workspace/shared/module-info.java").expect("uri");
+        let target_source = "module com.example.shared { }";
+        open_java_document(workspace.as_ref(), &target_uri, target_source);
+
+        let app_uri = Url::parse("file:///workspace/app/module-info.java").expect("uri");
+        let location = goto_location_from_marked_source(
+            workspace,
+            app_uri,
+            "module com.example.app { requires com.example.sh|ared; }",
+        );
+
+        assert_eq!(location.uri, target_uri);
+        assert_range_matches_name(target_source, location.range, "com.example.shared");
+    }
+
+    #[test]
+    fn test_goto_module_target_jumps_to_module_declaration_name() {
+        let workspace = Arc::new(Workspace::new());
+        let target_uri = Url::parse("file:///workspace/shared/module-info.java").expect("uri");
+        let target_source = "module com.example.shared { }";
+        open_java_document(workspace.as_ref(), &target_uri, target_source);
+
+        let app_uri = Url::parse("file:///workspace/app/module-info.java").expect("uri");
+        let location = goto_location_from_marked_source(
+            workspace,
+            app_uri,
+            "module com.example.app { exports com.example.api to com.example.sh|ared; }",
+        );
+
+        assert_eq!(location.uri, target_uri);
+        assert_range_matches_name(target_source, location.range, "com.example.shared");
     }
 }

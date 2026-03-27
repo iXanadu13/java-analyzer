@@ -238,6 +238,20 @@ impl ModuleIndex {
         layers
     }
 
+    pub fn visible_source_package_names(
+        &self,
+        classpath_id: ClasspathId,
+        preferred_root: Option<SourceRootId>,
+    ) -> Vec<Arc<str>> {
+        let mut packages = std::collections::BTreeSet::new();
+        for bucket in self.visible_source_layers(classpath_id, preferred_root) {
+            for package in bucket.package_names() {
+                packages.insert(package);
+            }
+        }
+        packages.into_iter().collect()
+    }
+
     pub fn classpath_layers(&self, id: ClasspathId) -> Vec<Arc<BucketIndex>> {
         let state = self.state.read();
         state

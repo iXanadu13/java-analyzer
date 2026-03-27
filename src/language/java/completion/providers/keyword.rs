@@ -4,6 +4,7 @@ use crate::{
         provider::{CompletionProvider, ProviderCompletionResult},
     },
     index::{IndexScope, IndexView},
+    language::java::module_info::{MODULE_DIRECTIVE_KEYWORDS, REQUIRES_MODIFIERS},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -38,16 +39,22 @@ impl CompletionProvider for KeywordProvider {
         _request: Option<&crate::lsp::request_context::RequestContext>,
         _limit: Option<usize>,
     ) -> crate::lsp::request_cancellation::RequestResult<ProviderCompletionResult> {
-        let prefix = match &ctx.location {
-            CursorLocation::Expression { prefix } => prefix.as_str(),
+        let (prefix, keywords): (&str, &[&str]) = match (&ctx.location, ctx.java_module_context) {
+            (
+                CursorLocation::Expression { prefix },
+                Some(crate::semantic::context::JavaModuleContextKind::DirectiveKeyword),
+            ) => (prefix.as_str(), MODULE_DIRECTIVE_KEYWORDS),
+            (
+                CursorLocation::Expression { prefix },
+                Some(crate::semantic::context::JavaModuleContextKind::RequiresModifier),
+            ) => (prefix.as_str(), REQUIRES_MODIFIERS),
+            (CursorLocation::Expression { prefix }, None) => (prefix.as_str(), JAVA_KEYWORDS),
             _ => return Ok(ProviderCompletionResult::default()),
         };
 
-        // TODO: context based completation
-
         let prefix_lower = prefix.to_lowercase();
 
-        Ok(JAVA_KEYWORDS
+        Ok(keywords
             .iter()
             .filter(|&&kw| kw.starts_with(&prefix_lower))
             .map(|&kw| {

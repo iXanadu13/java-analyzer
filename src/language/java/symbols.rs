@@ -28,6 +28,12 @@ fn collect_type_declarations<'a>(
         {
             request.check_cancelled("document_symbol.type_declarations")?;
         }
+        if child.kind() == "module_declaration" {
+            if let Some(symbol) = build_module_symbol(child, bytes, rope) {
+                out.push(symbol);
+            }
+            continue;
+        }
         if is_type_declaration(child.kind()) {
             if let Some(symbol) = build_type_symbol(child, bytes, rope, request)? {
                 out.push(symbol);
@@ -146,6 +152,72 @@ fn start_type_symbol<'a>(
     };
 
     Some((sym, body))
+}
+
+fn build_module_symbol<'a>(
+    node: Node<'a>,
+    bytes: &'a [u8],
+    rope: &ropey::Rope,
+) -> Option<DocumentSymbol> {
+    let name_node = node.child_by_field_name("name")?;
+    let body = node.child_by_field_name("body");
+
+    #[allow(deprecated)]
+    Some(DocumentSymbol {
+        name: name_node.utf8_text(bytes).ok()?.to_string(),
+        detail: Some("module".to_string()),
+        kind: SymbolKind::MODULE,
+        tags: None,
+        deprecated: None,
+        range: ts_node_to_range(&node, rope),
+        selection_range: ts_node_to_range(&name_node, rope),
+        children: body.map(|body| collect_module_directives(body, bytes, rope)),
+    })
+}
+
+fn collect_module_directives<'a>(
+    body: Node<'a>,
+    bytes: &'a [u8],
+    rope: &ropey::Rope,
+) -> Vec<DocumentSymbol> {
+    let mut out = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if let Some(symbol) = build_module_directive_symbol(child, bytes, rope) {
+            out.push(symbol);
+        }
+    }
+    out
+}
+
+fn build_module_directive_symbol<'a>(
+    node: Node<'a>,
+    bytes: &'a [u8],
+    rope: &ropey::Rope,
+) -> Option<DocumentSymbol> {
+    let kind = match node.kind() {
+        "requires_module_directive" => SymbolKind::MODULE,
+        "exports_module_directive" | "opens_module_directive" => SymbolKind::PACKAGE,
+        "uses_module_directive" | "provides_module_directive" => SymbolKind::INTERFACE,
+        _ => return None,
+    };
+
+    #[allow(deprecated)]
+    Some(DocumentSymbol {
+        name: node
+            .utf8_text(bytes)
+            .ok()?
+            .trim()
+            .trim_end_matches(';')
+            .to_string(),
+        detail: None,
+        kind,
+        tags: None,
+        deprecated: None,
+        range: ts_node_to_range(&node, rope),
+        selection_range: ts_node_to_range(&node, rope),
+        children: None,
+    })
 }
 
 fn parse_method_symbol<'a>(
@@ -322,5 +394,23 @@ mod tests {
                 && outer_children.iter().any(|s| s.name == "outerMethod"),
             "outer must keep its own members"
         );
+    }
+
+    #[test]
+    fn module_symbols_include_directives() {
+        let syms = collect(indoc::indoc! {r#"
+            module com.example.app {
+                requires java.logging;
+                exports com.example.api;
+            }
+        "#});
+
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].kind, SymbolKind::MODULE);
+        assert_eq!(syms[0].name, "com.example.app");
+        let children = syms[0].children.as_ref().expect("module children");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].name, "requires java.logging");
+        assert_eq!(children[1].name, "exports com.example.api");
     }
 }

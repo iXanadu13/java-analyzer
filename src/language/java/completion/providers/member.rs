@@ -34,6 +34,10 @@ impl CompletionProvider for MemberProvider {
     }
 
     fn is_applicable(&self, ctx: &SemanticContext) -> bool {
+        if ctx.java_module_context.is_some() {
+            return false;
+        }
+
         matches!(
             ctx.location,
             CursorLocation::Expression { .. }
