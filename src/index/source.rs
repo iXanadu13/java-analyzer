@@ -14,7 +14,6 @@ use crate::{
     },
 };
 
-#[deprecated]
 /// Parse the source file string and return all classes defined within it.
 pub(crate) fn parse_source_str(
     source: &str,
