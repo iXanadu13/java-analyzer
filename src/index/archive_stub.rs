@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +15,10 @@ const TARGET_VALUE_TYPE: &str = "java/lang/annotation/ElementType";
 const RETENTION_INTERNAL: &str = "java/lang/annotation/Retention";
 const RETENTION_VALUE_TYPE: &str = "java/lang/annotation/RetentionPolicy";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, PartialEq, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub struct ArchiveMethodStub {
     pub name: Arc<str>,
     pub descriptor: Arc<str>,
@@ -53,7 +57,10 @@ impl ArchiveMethodStub {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, PartialEq, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub struct ArchiveFieldStub {
     pub name: Arc<str>,
     pub descriptor: Arc<str>,
@@ -85,7 +92,10 @@ impl ArchiveFieldStub {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, PartialEq, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub struct ArchiveClassStub {
     pub package: Option<Arc<str>>,
     pub name: Arc<str>,

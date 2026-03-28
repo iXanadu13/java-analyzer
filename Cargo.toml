@@ -20,7 +20,6 @@ zip = "8.4.0"
 tower-lsp = "0.20.0"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-postcard = { version = "1", features = ["alloc"] }
 dirs = "6.0.0"
 nucleo = "0.5.0"
 nucleo-matcher = "0.3.1"
@@ -38,6 +37,8 @@ async-trait = "0.1.89"
 lru = "0.16.3"
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
+heed = "0.21.0"
+rkyv = { version = "0.7.45", features = ["validation"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["ron"] }

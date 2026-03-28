@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use tree_sitter::Node;
 use tree_sitter_utils::traversal::first_child_of_kind;
 
@@ -11,26 +12,74 @@ pub(crate) const MODULE_DIRECTIVE_KEYWORDS: &[&str] =
     &["requires", "exports", "opens", "uses", "provides"];
 pub(crate) const REQUIRES_MODIFIERS: &[&str] = &["static", "transitive"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub struct JavaModuleRequires {
     pub module_name: Arc<str>,
     pub is_static: bool,
     pub is_transitive: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub struct JavaModulePackageDirective {
     pub package_name: Arc<str>,
     pub target_modules: Vec<Arc<str>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub struct JavaModuleProvides {
     pub service: Arc<str>,
     pub implementations: Vec<Arc<str>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub struct JavaModuleDescriptor {
     pub name: Arc<str>,
     pub is_open: bool,

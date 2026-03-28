@@ -1,108 +1,74 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::OnceLock;
+
 use tracing::{debug, warn};
 
 use crate::index::IndexedArchiveData;
-
-const CACHE_VERSION: u32 = 2;
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CacheFile {
-    version: u32,
-    source_hash: u64,
-    data: IndexedArchiveData,
-}
-
-fn source_hash(path: &Path) -> u64 {
-    let mut h = DefaultHasher::new();
-    path.hash(&mut h);
-    if let Ok(meta) = std::fs::metadata(path) {
-        if let Ok(modified) = meta.modified()
-            && let Ok(dur) = modified.duration_since(SystemTime::UNIX_EPOCH)
-        {
-            dur.as_secs().hash(&mut h);
-        }
-        meta.len().hash(&mut h);
-    }
-    h.finish()
-}
+use crate::index::store::{
+    ArtifactKind, ArtifactSource, ArtifactStore, LmdbIndexStore, shared_store_root,
+};
 
 pub fn cache_dir() -> Option<PathBuf> {
-    Some(dirs::cache_dir()?.join("java-analyzer"))
+    shared_store_root()
 }
 
-fn cache_path_for(source_path: &Path) -> Option<PathBuf> {
-    let mut h = DefaultHasher::new();
-    source_path.hash(&mut h);
-    Some(cache_dir()?.join(format!("{:016x}.postcard", h.finish())))
+fn shared_store() -> Option<&'static LmdbIndexStore> {
+    static STORE: OnceLock<Option<LmdbIndexStore>> = OnceLock::new();
+
+    STORE
+        .get_or_init(|| {
+            let root = shared_store_root()?;
+            match LmdbIndexStore::open(&root) {
+                Ok(store) => Some(store),
+                Err(err) => {
+                    warn!(path = %root.display(), error = %err, "failed to open index store");
+                    None
+                }
+            }
+        })
+        .as_ref()
 }
 
 pub fn load_cached(source_path: &Path) -> Option<IndexedArchiveData> {
-    let cache_path = cache_path_for(source_path)?;
-    let expected_hash = source_hash(source_path);
-
-    let mut file = std::fs::File::open(&cache_path).ok()?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
-
-    let cached: CacheFile = postcard::from_bytes(&buf).ok()?;
-
-    if cached.version != CACHE_VERSION || cached.source_hash != expected_hash {
-        debug!(path = %cache_path.display(), "cache stale or version mismatch");
-        let _ = std::fs::remove_file(&cache_path);
-        return None;
+    let source = ArtifactSource::from_path(source_path, detect_artifact_kind(source_path)).ok()?;
+    let store = shared_store()?;
+    let loaded = store.load_artifact(&source).ok()?;
+    if let Some(artifact) = loaded {
+        debug!(
+            path = %source_path.display(),
+            kind = ?artifact.metadata.kind,
+            class_count = artifact.data.classes.len(),
+            module_count = artifact.data.modules.len(),
+            "loaded artifact from LMDB index store"
+        );
+        return Some(artifact.data);
     }
-
-    debug!(
-        path = %source_path.display(),
-        class_count = cached.data.classes.len(),
-        module_count = cached.data.modules.len(),
-        "loaded from cache"
-    );
-    Some(cached.data)
+    None
 }
 
 pub fn save_cache(source_path: &Path, data: &IndexedArchiveData) {
-    let Some(cache_path) = cache_path_for(source_path) else {
+    let Some(store) = shared_store() else {
         return;
     };
-    let Some(dir) = cache_dir() else { return };
-
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!(error = %e, "failed to create cache dir");
+    let Ok(source) = ArtifactSource::from_path(source_path, detect_artifact_kind(source_path))
+    else {
         return;
+    };
+
+    if let Err(err) = store.store_artifact(&source, data) {
+        warn!(
+            path = %source_path.display(),
+            error = %err,
+            "failed to persist artifact into LMDB index store"
+        );
     }
+}
 
-    let entry = CacheFile {
-        version: CACHE_VERSION,
-        source_hash: source_hash(source_path),
-        data: data.clone(),
-    };
-
-    match postcard::to_allocvec(&entry) {
-        Ok(buf) => {
-            let tmp = cache_path.with_extension("tmp");
-            match std::fs::File::create(&tmp) {
-                Ok(mut f) => {
-                    if f.write_all(&buf).is_ok() {
-                        if let Err(e) = std::fs::rename(&tmp, &cache_path) {
-                            warn!(error = %e, "failed to rename cache file");
-                        } else {
-                            debug!(
-                                path = %cache_path.display(),
-                                bytes = buf.len(),
-                                "cache saved"
-                            );
-                        }
-                    }
-                    let _ = std::fs::remove_file(&tmp);
-                }
-                Err(e) => warn!(error = %e, "failed to create cache tmp file"),
-            }
-        }
-        Err(e) => warn!(error = %e, "failed to serialize cache"),
+fn detect_artifact_kind(path: &Path) -> ArtifactKind {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("modules") => ArtifactKind::JdkModulesImage,
+        Some("src.zip") => ArtifactKind::SourceZip,
+        _ if path.extension().is_some_and(|ext| ext == "jar") => ArtifactKind::Jar,
+        _ => ArtifactKind::Unknown,
     }
 }

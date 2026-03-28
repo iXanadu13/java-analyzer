@@ -10,6 +10,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
@@ -32,6 +33,7 @@ pub mod module_index;
 pub mod scope;
 pub mod scope_snapshot;
 pub mod source;
+pub mod store;
 pub mod view;
 pub mod workspace_index;
 
@@ -42,6 +44,9 @@ pub use module_graph::ModuleGraph;
 pub use module_index::{ClasspathIndex, ModuleIndex, ModuleQueryCache};
 pub use scope::{ClasspathId, IndexScope, ModuleId};
 pub use scope_snapshot::{AnalysisContextKey, ScopeSnapshot};
+pub use store::{
+    ArtifactId, ArtifactKind, ArtifactMetadata, ArtifactSource, IndexStore, LmdbIndexStore,
+};
 pub use view::IndexView;
 pub use workspace_index::WorkspaceIndex;
 
@@ -64,7 +69,10 @@ pub struct ClassMetadata {
     pub origin: ClassOrigin,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub struct IndexedJavaModule {
     pub descriptor: Arc<JavaModuleDescriptor>,
     pub origin: ClassOrigin,
@@ -248,7 +256,19 @@ pub enum AnnotationValue {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+#[archive(check_bytes)]
 pub enum ClassOrigin {
     Jar(Arc<str>),
     SourceFile(Arc<str>),
