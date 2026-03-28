@@ -52,7 +52,6 @@ struct SourceRootIndex {
 struct ModuleState {
     classpaths: HashMap<ClasspathId, ClasspathIndex>,
     active_classpath: ClasspathId,
-    deps: Vec<ModuleId>,
     source_roots: HashMap<SourceRootId, SourceRootIndex>,
 }
 
@@ -69,7 +68,6 @@ impl ModuleIndex {
         let state = ModuleState {
             classpaths: HashMap::new(),
             active_classpath: ClasspathId::Main,
-            deps: Vec::new(),
             source_roots: HashMap::new(),
         };
         Self {
@@ -328,10 +326,5 @@ impl ModuleIndex {
                 bucket.clear_query_caches();
             }
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_deps(&self, deps: Vec<ModuleId>) {
-        self.state.write().deps = deps;
     }
 }

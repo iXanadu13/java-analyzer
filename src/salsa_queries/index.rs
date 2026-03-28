@@ -128,8 +128,7 @@ pub fn cached_index_view_metadata(
 ) -> IndexViewMetadata {
     let index = db.workspace_index();
 
-    let view = index.view_for_analysis_context(module_id, classpath, source_root);
-    let jars = index.module_classpath_jars(module_id, classpath);
+    let scope = index.scope_for_analysis_context(module_id, classpath, source_root);
 
     // Compute hash for change detection
     let content_hash = {
@@ -138,8 +137,8 @@ pub fn cached_index_view_metadata(
         let mut hasher = DefaultHasher::new();
 
         // Hash the layer count and jar paths
-        view.layer_count().hash(&mut hasher);
-        for jar in &jars {
+        scope.layer_count().hash(&mut hasher);
+        for jar in scope.jar_paths() {
             jar.hash(&mut hasher);
         }
 
@@ -150,8 +149,8 @@ pub fn cached_index_view_metadata(
         module_id,
         classpath,
         source_root,
-        layer_count: view.layer_count(),
-        jar_count: jars.len(),
+        layer_count: scope.layer_count(),
+        jar_count: scope.jar_count(),
         content_hash,
     }
 }
@@ -170,7 +169,9 @@ pub fn cached_name_table(
 ) -> NameTableMetadata {
     let index = db.workspace_index();
 
-    let name_table = index.build_name_table_for_analysis_context(module_id, classpath, source_root);
+    let name_table = index
+        .scope_for_analysis_context(module_id, classpath, source_root)
+        .build_name_table();
 
     // Compute hash for change detection
     let content_hash = {
@@ -208,7 +209,8 @@ pub fn cached_name_table(
 /// Get the actual IndexView for a specific analysis context
 ///
 /// This triggers the cached query for change detection, then retrieves the actual view.
-/// Use this instead of view_for_analysis_context() for better performance.
+/// Use this instead of constructing a view directly when you need Salsa-backed
+/// change detection for the underlying analysis scope.
 pub fn get_index_view_for_context(
     db: &dyn Db,
     module_id: ModuleId,
@@ -255,7 +257,8 @@ pub struct NameTableMetadata {
 /// Get the actual name table for a specific analysis context
 ///
 /// This triggers the cached query for change detection, then retrieves the actual data.
-/// Use this instead of build_name_table_for_context() for better performance.
+/// Use this instead of building a scope name table directly when you need
+/// Salsa-backed change detection for the underlying analysis scope.
 pub fn get_name_table_for_context(
     db: &dyn Db,
     module_id: ModuleId,
@@ -281,8 +284,9 @@ pub fn get_name_table_for_context(
     // Get actual name table (fast)
     let index = db.workspace_index();
 
-    let view = index.view_for_analysis_context(module_id, classpath, source_root);
-    view.build_name_table()
+    index
+        .scope_for_analysis_context(module_id, classpath, source_root)
+        .build_name_table()
 }
 
 /// Get visible classpath JARs for a module and classpath

@@ -5,7 +5,9 @@ use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use crate::index::{BucketIndex, ClassMetadata, FieldSummary, MethodSummary, NameTable};
+use crate::index::{
+    BucketIndex, ClassMetadata, FieldSummary, MethodSummary, NameTable, ScopeSnapshot,
+};
 
 #[derive(Default)]
 struct IndexViewCaches {
@@ -20,7 +22,6 @@ struct IndexViewCaches {
     fields_by_name: DashMap<(Arc<str>, Arc<str>), Option<Arc<FieldSummary>>>,
     declaring_method_owner: DashMap<(Arc<str>, Arc<str>, Arc<str>), Option<Arc<ClassMetadata>>>,
     all_classes: OnceLock<Arc<Vec<Arc<ClassMetadata>>>>,
-    name_table: OnceLock<Arc<NameTable>>,
 }
 
 struct InheritedMembers {
@@ -30,17 +31,21 @@ struct InheritedMembers {
 
 #[derive(Clone)]
 pub struct IndexView {
-    layers: SmallVec<Arc<BucketIndex>, 8>,
+    scope: Arc<ScopeSnapshot>,
     caches: Arc<IndexViewCaches>,
 }
 
 impl IndexView {
+    fn layers(&self) -> &[Arc<BucketIndex>] {
+        self.scope.layers()
+    }
+
     fn merge_classes<F>(&self, mut fetch: F) -> Vec<Arc<ClassMetadata>>
     where
         F: FnMut(&BucketIndex) -> Vec<Arc<ClassMetadata>>,
     {
         let mut by_internal: FxHashMap<Arc<str>, Arc<ClassMetadata>> = Default::default();
-        for layer in &self.layers {
+        for layer in self.layers() {
             for class in fetch(layer) {
                 let key = Arc::clone(&class.internal_name);
                 if let Some(current) = by_internal.get(&key) {
@@ -90,8 +95,12 @@ impl IndexView {
     }
 
     pub fn new(layers: SmallVec<Arc<BucketIndex>, 8>) -> Self {
+        Self::from_scope(Arc::new(ScopeSnapshot::from_layers(layers)))
+    }
+
+    pub fn from_scope(scope: Arc<ScopeSnapshot>) -> Self {
         Self {
-            layers,
+            scope,
             caches: Arc::new(IndexViewCaches::default()),
         }
     }
@@ -104,15 +113,15 @@ impl IndexView {
         let overlay = Arc::new(BucketIndex::new());
         overlay.add_classes(classes);
 
-        let mut layers = SmallVec::with_capacity(self.layers.len() + 1);
+        let mut layers = SmallVec::with_capacity(self.scope.layer_count() + 1);
         layers.push(overlay);
-        layers.extend(self.layers.iter().cloned());
+        layers.extend(self.layers().iter().cloned());
         Self::new(layers)
     }
 
     /// Get the number of layers in this view
     pub fn layer_count(&self) -> usize {
-        self.layers.len()
+        self.scope.layer_count()
     }
 
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
@@ -121,7 +130,7 @@ impl IndexView {
         }
 
         let mut best: Option<Arc<ClassMetadata>> = None;
-        for layer in &self.layers {
+        for layer in self.layers() {
             if let Some(class) = layer.get_class(internal_name) {
                 if let Some(current) = &best {
                     if Self::should_replace(current, &class) {
@@ -266,7 +275,7 @@ impl IndexView {
         simple_name: &str,
     ) -> Option<Arc<ClassMetadata>> {
         let mut best: Option<Arc<ClassMetadata>> = None;
-        for layer in &self.layers {
+        for layer in self.layers() {
             for candidate in layer.direct_inner_classes_by_owner(owner_internal) {
                 if !candidate.matches_simple_name(simple_name) {
                     continue;
@@ -334,11 +343,11 @@ impl IndexView {
     }
 
     pub fn has_package(&self, pkg: &str) -> bool {
-        self.layers.iter().any(|layer| layer.has_package(pkg))
+        self.layers().iter().any(|layer| layer.has_package(pkg))
     }
 
     pub fn has_classes_in_package(&self, pkg: &str) -> bool {
-        self.layers
+        self.layers()
             .iter()
             .any(|layer| layer.has_classes_in_package(pkg))
     }
@@ -566,7 +575,7 @@ impl IndexView {
     pub fn fuzzy_autocomplete(&self, query: &str, limit: usize) -> Vec<Arc<str>> {
         let mut out = Vec::new();
         let mut seen: FxHashSet<Arc<str>> = Default::default();
-        for layer in &self.layers {
+        for layer in self.layers() {
             for name in layer.fuzzy_autocomplete(query, limit) {
                 if seen.insert(Arc::clone(&name)) {
                     out.push(name);
@@ -579,7 +588,7 @@ impl IndexView {
     pub fn fuzzy_search_classes(&self, query: &str, limit: usize) -> Vec<Arc<ClassMetadata>> {
         let mut by_internal: rustc_hash::FxHashMap<Arc<str>, Arc<ClassMetadata>> =
             Default::default();
-        for layer in &self.layers {
+        for layer in self.layers() {
             for class in layer.fuzzy_search_classes(query, limit) {
                 let key = Arc::clone(&class.internal_name);
                 if let Some(current) = by_internal.get(&key) {
@@ -608,25 +617,7 @@ impl IndexView {
     }
 
     pub fn build_name_table(&self) -> Arc<NameTable> {
-        Arc::clone(self.caches.name_table.get_or_init(|| {
-            let mut names = Vec::new();
-            let mut seen: FxHashSet<Arc<str>> = Default::default();
-            for layer in &self.layers {
-                let layer_table = layer.build_name_table();
-                for name in layer_table.iter() {
-                    if seen.insert(Arc::clone(name)) {
-                        names.push(Arc::clone(name));
-                    }
-                }
-            }
-            tracing::debug!(
-                layer_count = self.layers.len(),
-                name_count = names.len(),
-                phase = "indexing_or_discovery",
-                "build NameTable from IndexView"
-            );
-            NameTable::from_names(names)
-        }))
+        self.scope.build_name_table()
     }
 }
 

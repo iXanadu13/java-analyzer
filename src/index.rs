@@ -29,6 +29,7 @@ pub mod jdk;
 pub mod module_graph;
 pub mod module_index;
 pub mod scope;
+pub mod scope_snapshot;
 pub mod source;
 pub mod view;
 pub mod workspace_index;
@@ -38,6 +39,7 @@ pub use handle::WorkspaceIndexHandle;
 pub use module_graph::ModuleGraph;
 pub use module_index::{ClasspathIndex, ModuleIndex, ModuleQueryCache};
 pub use scope::{ClasspathId, IndexScope, ModuleId};
+pub use scope_snapshot::{AnalysisContextKey, ScopeSnapshot};
 pub use view::IndexView;
 pub use workspace_index::WorkspaceIndex;
 

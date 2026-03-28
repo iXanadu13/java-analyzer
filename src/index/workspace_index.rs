@@ -11,17 +11,16 @@ use smallvec::SmallVec;
 use crate::build_integration::SourceRootId;
 use crate::index::view::IndexView;
 use crate::index::{
-    BucketIndex, ClassMetadata, ClassOrigin, ClasspathId, IndexScope, IndexedArchiveData,
-    IndexedJavaModule, ModuleGraph, ModuleId, ModuleIndex, NameTable, index_jar,
+    AnalysisContextKey, BucketIndex, ClassMetadata, ClassOrigin, ClasspathId, IndexScope,
+    IndexedArchiveData, IndexedJavaModule, ModuleGraph, ModuleId, ModuleIndex, NameTable,
+    ScopeSnapshot, index_jar,
 };
-
-type AnalysisContextKey = (ModuleId, ClasspathId, Option<SourceRootId>);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorkspaceIndexStats {
     pub module_count: usize,
     pub jar_cache_entries: usize,
-    pub view_cache_entries: usize,
+    pub scope_cache_entries: usize,
     pub classpath_jar_refs: usize,
     pub unique_bucket_count: usize,
     pub class_count: usize,
@@ -38,7 +37,7 @@ pub struct WorkspaceIndex {
     modules: DashMap<ModuleId, Arc<ModuleIndex>>,
     jdk: Arc<BucketIndex>,
     jar_cache: DashMap<Arc<str>, Arc<BucketIndex>>,
-    view_cache: DashMap<AnalysisContextKey, (u64, IndexView)>,
+    scope_cache: DashMap<AnalysisContextKey, (u64, Arc<ScopeSnapshot>)>,
     graph: RwLock<ModuleGraph>,
     /// Version counter that increments on every mutation
     /// Used by Salsa to detect changes
@@ -54,7 +53,7 @@ impl WorkspaceIndex {
             modules,
             jdk: Arc::new(BucketIndex::new()),
             jar_cache: DashMap::new(),
-            view_cache: DashMap::new(),
+            scope_cache: DashMap::new(),
             graph: RwLock::new(ModuleGraph::new()),
             version: AtomicU64::new(0),
         }
@@ -72,7 +71,7 @@ impl WorkspaceIndex {
     }
 
     fn invalidate_analysis_caches(&self) {
-        self.view_cache.clear();
+        self.scope_cache.clear();
         self.increment_version();
     }
 
@@ -195,8 +194,6 @@ impl WorkspaceIndex {
     }
 
     pub fn set_module_dependencies(&self, module: ModuleId, deps: Vec<ModuleId>) {
-        let module_index = self.ensure_module(module, default_module_name(module));
-        module_index.set_deps(deps.clone());
         self.graph.write().set_deps(module, deps);
         self.invalidate_analysis_caches();
     }
@@ -248,9 +245,8 @@ impl WorkspaceIndex {
         source_root: Option<SourceRootId>,
     ) -> Vec<Arc<str>> {
         let mut names = BTreeSet::new();
-        for bucket in
-            self.visible_buckets_for_analysis_context(module_id, classpath_id, source_root)
-        {
+        let scope = self.scope_for_analysis_context(module_id, classpath_id, source_root);
+        for bucket in scope.layers() {
             for name in bucket.module_names() {
                 names.insert(name);
             }
@@ -265,9 +261,8 @@ impl WorkspaceIndex {
         source_root: Option<SourceRootId>,
         module_name: &str,
     ) -> Option<Arc<IndexedJavaModule>> {
-        for bucket in
-            self.visible_buckets_for_analysis_context(module_id, classpath_id, source_root)
-        {
+        let scope = self.scope_for_analysis_context(module_id, classpath_id, source_root);
+        for bucket in scope.layers() {
             if let Some(module) = bucket.get_module(module_name) {
                 return Some(module);
             }
@@ -283,42 +278,51 @@ impl WorkspaceIndex {
         self.view_for_analysis_context(scope.module, classpath_id, None)
     }
 
+    pub fn scope(&self, scope: IndexScope) -> Arc<ScopeSnapshot> {
+        self.scope_for_classpath(scope, ClasspathId::Main)
+    }
+
+    pub fn scope_for_classpath(
+        &self,
+        scope: IndexScope,
+        classpath_id: ClasspathId,
+    ) -> Arc<ScopeSnapshot> {
+        self.scope_for_analysis_context(scope.module, classpath_id, None)
+    }
+
+    pub fn scope_for_analysis_context(
+        &self,
+        module_id: ModuleId,
+        classpath_id: ClasspathId,
+        source_root: Option<SourceRootId>,
+    ) -> Arc<ScopeSnapshot> {
+        let key = (module_id, classpath_id, source_root);
+        let started_version = self.version();
+        if let Some(cached) = self.scope_cache.get(&key)
+            && cached.value().0 == started_version
+        {
+            return Arc::clone(&cached.value().1);
+        }
+
+        let snapshot = Arc::new(self.build_scope_snapshot(module_id, classpath_id, source_root));
+        if self.version() == started_version {
+            self.scope_cache
+                .insert(key, (started_version, Arc::clone(&snapshot)));
+        }
+        snapshot
+    }
+
     pub fn view_for_analysis_context(
         &self,
         module_id: ModuleId,
         classpath_id: ClasspathId,
         source_root: Option<SourceRootId>,
     ) -> IndexView {
-        let key = (module_id, classpath_id, source_root);
-        let started_version = self.version();
-        if let Some(cached) = self.view_cache.get(&key)
-            && cached.value().0 == started_version
-        {
-            return cached.value().1.clone();
-        }
-
-        let module = self.ensure_module(module_id, default_module_name(module_id));
-        let module_jars = module.classpath_jars(classpath_id);
-        let layers =
-            self.visible_buckets_for_analysis_context(module_id, classpath_id, source_root);
-
-        tracing::debug!(
-            module = module_id.0,
-            requested_classpath = ?classpath_id,
-            source_root = ?source_root.map(|id| id.0),
-            module_classpath_jars = module_jars.len(),
-            layer_count = layers.len(),
-            "building index view for analysis context"
-        );
-        let view = IndexView::new(layers);
-        if self.version() == started_version {
-            self.view_cache.insert(key, (started_version, view.clone()));
-        }
-        view
+        IndexView::from_scope(self.scope_for_analysis_context(module_id, classpath_id, source_root))
     }
 
     pub fn build_name_table(&self, scope: IndexScope) -> Arc<NameTable> {
-        self.view(scope).build_name_table()
+        self.scope(scope).build_name_table()
     }
 
     pub fn build_name_table_for_classpath(
@@ -326,7 +330,7 @@ impl WorkspaceIndex {
         scope: IndexScope,
         classpath_id: ClasspathId,
     ) -> Arc<NameTable> {
-        self.view_for_classpath(scope, classpath_id)
+        self.scope_for_classpath(scope, classpath_id)
             .build_name_table()
     }
 
@@ -336,7 +340,7 @@ impl WorkspaceIndex {
         classpath_id: ClasspathId,
         source_root: Option<SourceRootId>,
     ) -> Arc<NameTable> {
-        self.view_for_analysis_context(module, classpath_id, source_root)
+        self.scope_for_analysis_context(module, classpath_id, source_root)
             .build_name_table()
     }
 
@@ -344,7 +348,7 @@ impl WorkspaceIndex {
         let mut stats = WorkspaceIndexStats {
             module_count: self.modules.len(),
             jar_cache_entries: self.jar_cache.len(),
-            view_cache_entries: self.view_cache.len(),
+            scope_cache_entries: self.scope_cache.len(),
             ..WorkspaceIndexStats::default()
         };
 
@@ -385,7 +389,7 @@ impl WorkspaceIndex {
     }
 
     pub(crate) fn clear_analysis_caches(&self) {
-        self.view_cache.clear();
+        self.scope_cache.clear();
         self.jdk.clear_query_caches();
 
         for module in &self.modules {
@@ -397,7 +401,29 @@ impl WorkspaceIndex {
         }
     }
 
-    fn visible_buckets_for_analysis_context(
+    fn build_scope_snapshot(
+        &self,
+        module_id: ModuleId,
+        classpath_id: ClasspathId,
+        source_root: Option<SourceRootId>,
+    ) -> ScopeSnapshot {
+        let module = self.ensure_module(module_id, default_module_name(module_id));
+        let jar_paths = module.classpath_jars(classpath_id);
+        let layers = self.build_scope_layers(module_id, classpath_id, source_root);
+
+        tracing::debug!(
+            module = module_id.0,
+            requested_classpath = ?classpath_id,
+            source_root = ?source_root.map(|id| id.0),
+            module_classpath_jars = jar_paths.len(),
+            layer_count = layers.len(),
+            "building scope snapshot for analysis context"
+        );
+
+        ScopeSnapshot::new(module_id, classpath_id, source_root, layers, jar_paths)
+    }
+
+    fn build_scope_layers(
         &self,
         module_id: ModuleId,
         classpath_id: ClasspathId,

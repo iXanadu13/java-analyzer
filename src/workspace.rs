@@ -569,7 +569,7 @@ impl Workspace {
                 "salsa.extracted_classes={extracted_class_count}\n",
                 "index.modules={index_modules}\n",
                 "index.jar_cache_entries={jar_cache_entries}\n",
-                "index.view_cache_entries={view_cache_entries}\n",
+                "index.scope_cache_entries={scope_cache_entries}\n",
                 "index.classpath_jar_refs={classpath_jar_refs}\n",
                 "index.unique_buckets={unique_bucket_count}\n",
                 "index.classes={index_class_count}\n",
@@ -606,7 +606,7 @@ impl Workspace {
             extracted_class_count = salsa_cache_stats.extracted_class_count,
             index_modules = index_stats.module_count,
             jar_cache_entries = index_stats.jar_cache_entries,
-            view_cache_entries = index_stats.view_cache_entries,
+            scope_cache_entries = index_stats.scope_cache_entries,
             classpath_jar_refs = index_stats.classpath_jar_refs,
             unique_bucket_count = index_stats.unique_bucket_count,
             index_class_count = index_stats.class_count,
@@ -649,7 +649,7 @@ impl Workspace {
                 "workspace.class_member_entries={class_member_entries}\n",
                 "salsa.parse_tree_entries={parse_tree_entries}\n",
                 "salsa.class_extraction_entries={class_extraction_entries}\n",
-                "index.view_cache_entries={view_cache_entries}\n",
+                "index.scope_cache_entries={scope_cache_entries}\n",
                 "index.mro_cache_entries={mro_cache_entries}\n"
             ),
             semantic_token_entries = document_stats.semantic_token_entries,
@@ -658,7 +658,7 @@ impl Workspace {
             class_member_entries = semantic_stats.class_member_entries,
             parse_tree_entries = salsa_cache_stats.parse_tree_entries,
             class_extraction_entries = salsa_cache_stats.class_extraction_entries,
-            view_cache_entries = index_stats.view_cache_entries,
+            scope_cache_entries = index_stats.scope_cache_entries,
             mro_cache_entries = index_stats.mro_cache_entries,
         )
     }
