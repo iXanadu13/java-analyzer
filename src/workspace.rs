@@ -15,7 +15,7 @@ use crate::index::codebase::{
     SourceScanMode, collect_source_files, collect_source_files_for_root, load_source_inputs,
     should_index_source_path,
 };
-use crate::index::incremental::SourceTextInput;
+use crate::index::incremental::{SourceTextInput, prepare_source_inputs};
 use crate::index::{
     ClassMetadata, ClassOrigin, ClasspathId, IndexScope, IndexedArchiveData, IndexedJavaModule,
     ModuleId, WorkspaceIndex, WorkspaceIndexHandle,
@@ -818,10 +818,12 @@ impl Workspace {
         }
 
         let mut current_indexed_uris = HashSet::new();
+        let mut java_module_descriptors = HashMap::new();
         for (module_id, root_id, classpath, root_path, source_inputs) in indexed_roots {
-            let (classes, indexed_uris) =
+            let (classes, indexed_uris, descriptors) =
                 self.index_source_inputs_with_shared_salsa(source_inputs, None);
             current_indexed_uris.extend(indexed_uris);
+            java_module_descriptors.extend(descriptors);
             let mut by_origin: std::collections::HashMap<ClassOrigin, Vec<_>> =
                 std::collections::HashMap::new();
             for class in classes {
@@ -880,10 +882,19 @@ impl Workspace {
                 origin,
                 classes,
             );
+
+            match Self::extract_java_module_descriptor_for_source(&uri, &language_id, &content) {
+                Some(descriptor) => {
+                    java_module_descriptors.insert(uri, descriptor);
+                }
+                None => {
+                    java_module_descriptors.remove(&uri);
+                }
+            }
         }
 
-        self.rebuild_java_module_registry();
         self.prune_indexed_salsa_files(&current_indexed_uris);
+        self.replace_java_module_registry(java_module_descriptors.into_iter().collect());
         self.index.replace(new_index, Some(snapshot.clone()));
         self.publish_watched_source_roots();
 
@@ -921,7 +932,7 @@ impl Workspace {
             source_inputs
         })
         .await?;
-        let (classes, current_indexed_uris) =
+        let (classes, current_indexed_uris, java_module_descriptors) =
             self.index_source_inputs_with_shared_salsa(source_inputs, None);
         let scope = IndexScope {
             module: ModuleId::ROOT,
@@ -946,8 +957,8 @@ impl Workspace {
         for (origin, classes) in by_origin {
             index.update_source(scope, origin, classes);
         }
-        self.rebuild_java_module_registry();
         self.prune_indexed_salsa_files(&current_indexed_uris);
+        self.replace_java_module_registry(java_module_descriptors);
         self.index.replace(index, None);
         self.publish_watched_source_roots();
         Ok(())
@@ -1143,27 +1154,48 @@ impl Workspace {
         }
     }
 
-    fn rebuild_java_module_registry(&self) {
-        let files = self
-            .salsa_files
-            .read()
-            .values()
-            .copied()
-            .collect::<Vec<_>>();
-        let db = self.salsa_db.lock();
-        let descriptors = files
-            .into_iter()
-            .filter_map(|file| {
-                if file.language_id(&*db).as_ref() != "java" {
-                    return None;
-                }
-                let descriptor =
-                    crate::salsa_queries::java::extract_java_module_descriptor(&*db, file)?;
-                Some((file.file_id(&*db).uri().clone(), descriptor))
-            })
-            .collect::<Vec<_>>();
-        drop(db);
+    pub(crate) fn refresh_java_module_descriptor_for_source(
+        &self,
+        uri: &Url,
+        language_id: &str,
+        content: &str,
+    ) -> bool {
+        let descriptor = Self::extract_java_module_descriptor_for_source(uri, language_id, content);
+        let mut modules = self.java_modules.write();
+        let changed = match descriptor.as_ref() {
+            Some(descriptor) => modules.by_uri.get(uri) != Some(descriptor),
+            None => modules.by_uri.contains_key(uri),
+        };
+        if let Some(descriptor) = descriptor {
+            modules.upsert(uri.clone(), descriptor);
+        } else {
+            modules.remove(uri);
+        }
+        changed
+    }
+
+    fn replace_java_module_registry(&self, descriptors: Vec<(Url, Arc<JavaModuleDescriptor>)>) {
         self.java_modules.write().replace_all(descriptors);
+    }
+
+    fn extract_java_module_descriptor_for_source(
+        uri: &Url,
+        language_id: &str,
+        content: &str,
+    ) -> Option<Arc<JavaModuleDescriptor>> {
+        if language_id != "java" {
+            return None;
+        }
+
+        let is_module_info = uri
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .is_some_and(|segment| segment == "module-info.java");
+        if !is_module_info {
+            return None;
+        }
+
+        crate::language::java::module_info::extract_module_descriptor_from_source(content)
     }
 
     pub fn java_module_names(&self) -> Vec<Arc<str>> {
@@ -1362,39 +1394,67 @@ impl Workspace {
         &self,
         source_inputs: Vec<SourceTextInput>,
         name_table: Option<Arc<crate::index::NameTable>>,
-    ) -> (Vec<ClassMetadata>, HashSet<Url>) {
+    ) -> (
+        Vec<ClassMetadata>,
+        HashSet<Url>,
+        Vec<(Url, Arc<JavaModuleDescriptor>)>,
+    ) {
         let mut prepared = Vec::with_capacity(source_inputs.len());
+        let mut transient_inputs = Vec::new();
         let mut indexed_uris = HashSet::new();
+        let mut java_module_descriptors = HashMap::new();
 
-        for source in source_inputs {
+        for mut source in source_inputs {
             let Ok(uri) = Url::parse(source.uri.as_ref()) else {
                 continue;
             };
             indexed_uris.insert(uri.clone());
-            let salsa_file =
-                if crate::language::lookup_language(source.language_id.as_ref()).is_some() {
-                    Some(self.get_or_create_salsa_file(
-                        &uri,
-                        source.content.as_str(),
-                        source.language_id.as_ref(),
-                    ))
-                } else {
-                    None
-                };
-            prepared.push(IndexedWorkspaceSource {
-                language_id: source.language_id,
-                content: source.content,
-                origin: source.origin,
-                salsa_file,
-            });
+
+            let source_snapshot = self.document_snapshot(&uri);
+            if let Some(snapshot) = source_snapshot.as_ref() {
+                source.language_id = Arc::clone(&snapshot.language_id);
+                source.content = snapshot.text().to_owned();
+            }
+
+            if let Some(descriptor) = Self::extract_java_module_descriptor_for_source(
+                &uri,
+                source.language_id.as_ref(),
+                source.content.as_str(),
+            ) {
+                java_module_descriptors.insert(uri.clone(), descriptor);
+            }
+
+            if crate::language::lookup_language(source.language_id.as_ref()).is_none() {
+                continue;
+            }
+
+            if let Some(snapshot) = source_snapshot {
+                let salsa_file = self.get_or_update_salsa_file_for_snapshot(snapshot.as_ref());
+                prepared.push(IndexedWorkspaceSource {
+                    language_id: Arc::clone(&snapshot.language_id),
+                    content: snapshot.text().to_owned(),
+                    origin: source.origin,
+                    salsa_file: Some(salsa_file),
+                });
+            } else {
+                transient_inputs.push(source);
+            }
         }
+
+        let transient_sources = prepare_source_inputs(transient_inputs);
 
         let discovered_names = {
             let db = self.salsa_db.lock();
-            prepared
+            let mut names = prepared
                 .iter()
                 .flat_map(|source| source.discover_internal_names(&db))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            names.extend(
+                transient_sources
+                    .iter()
+                    .flat_map(|source| source.discover_internal_names()),
+            );
+            names
         };
 
         let enriched_name_table = match name_table {
@@ -1402,29 +1462,31 @@ impl Workspace {
             None => crate::index::NameTable::from_names(discovered_names),
         };
 
-        let classes = {
+        let mut classes = transient_sources
+            .into_iter()
+            .flat_map(|source| source.extract_classes(Some(enriched_name_table.clone())))
+            .collect::<Vec<_>>();
+
+        classes.extend({
             let db = self.salsa_db.lock();
             prepared
                 .into_iter()
                 .flat_map(|source| source.extract_classes(&db, Some(enriched_name_table.clone())))
                 .collect::<Vec<_>>()
-        };
+        });
 
-        (classes, indexed_uris)
+        (
+            classes,
+            indexed_uris,
+            java_module_descriptors.into_iter().collect(),
+        )
     }
 
     fn prune_indexed_salsa_files(&self, current_indexed_uris: &HashSet<Url>) {
-        let stale_uris = {
-            let tracked = self.indexed_salsa_uris.read();
-            tracked
-                .difference(current_indexed_uris)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-
-        for uri in &stale_uris {
-            if self.documents.with_doc(uri, |_| ()).is_none() {
-                self.remove_salsa_file(uri);
+        let retained_uris = self.salsa_files.read().keys().cloned().collect::<Vec<_>>();
+        for uri in retained_uris {
+            if self.documents.with_doc(&uri, |_| ()).is_none() {
+                self.remove_salsa_file(&uri);
             }
         }
 
@@ -1482,29 +1544,44 @@ impl Workspace {
 
         let context = Self::resolve_analysis_context_for_snapshot(model.as_ref(), Some(path));
         let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-        let salsa_file = self.get_or_create_salsa_file(&uri, &content, language_id);
-        let classes = {
-            let db = self.salsa_db.lock();
-            let _ = crate::salsa_queries::index::extract_classes(&*db, salsa_file);
-            self.extract_salsa_classes_for_index_context(
-                &*db,
-                salsa_file,
-                &origin,
-                index_snapshot.as_ref(),
-                context,
-            )
-        };
+        let classes = crate::language::lookup_language(language_id)
+            .map(|language| {
+                let view = index_snapshot.view_for_analysis_context(
+                    context.module,
+                    context.classpath,
+                    context.source_root,
+                );
+                let base_name_table = index_snapshot.build_name_table_for_analysis_context(
+                    context.module,
+                    context.classpath,
+                    context.source_root,
+                );
+                let discovered_names = language.discover_internal_names(&content, None);
+                let name_table = if discovered_names.is_empty() {
+                    Some(base_name_table)
+                } else {
+                    Some(base_name_table.extend_with(discovered_names))
+                };
+
+                language.extract_classes_from_source(
+                    &content,
+                    &origin,
+                    None,
+                    name_table,
+                    Some(&view),
+                )
+            })
+            .unwrap_or_default();
 
         let changed = self.index.update(|index| {
             index.update_source_in_context(context.module, context.source_root, origin, classes)
         });
-        {
-            let db = self.salsa_db.lock();
-            self.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
-        }
         self.track_indexed_uri(&uri);
+        self.remove_salsa_file(&uri);
+        let module_changed =
+            self.refresh_java_module_descriptor_for_source(&uri, language_id, &content);
 
-        Ok(if changed {
+        Ok(if changed || module_changed {
             FileApplyState::Applied
         } else {
             FileApplyState::Unchanged
@@ -1721,7 +1798,7 @@ mod tests {
         WorkspaceModelProvenance, WorkspaceModule, WorkspaceRoot, WorkspaceSourceRoot,
     };
     use crate::language::LanguageRegistry;
-    use crate::salsa_db::ParseTreeOrigin;
+    use crate::salsa_db::{FileId, ParseTreeOrigin};
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use crate::workspace::document::Document;
     use crate::workspace::document::SemanticContextCacheKey;
@@ -2149,7 +2226,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_root_indexing_reuses_shared_salsa_parse_tree() {
+    async fn fallback_root_indexing_drops_closed_file_salsa_state() {
         let workspace = Workspace::new();
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("Demo.java");
@@ -2162,14 +2239,17 @@ mod tests {
             .await
             .expect("first index");
 
-        let file = workspace.get_salsa_file(&uri).expect("tracked salsa file");
         {
             let db = workspace.salsa_db.lock();
-            let snapshot = db
-                .cached_parse_tree(&file.file_id(&*db))
-                .expect("cached parse tree");
-            assert_eq!(snapshot.origin, ParseTreeOrigin::Full);
+            assert!(
+                db.cached_parse_tree(&FileId::new(uri.clone())).is_none(),
+                "closed fallback sources should not retain cached parse trees"
+            );
         }
+        assert!(
+            workspace.get_salsa_file(&uri).is_none(),
+            "closed fallback sources should not retain workspace Salsa files"
+        );
 
         fs::write(&path, "class Demo { String value; }").expect("rewrite source");
 
@@ -2178,12 +2258,27 @@ mod tests {
             .await
             .expect("second index");
 
-        let file = workspace.get_salsa_file(&uri).expect("tracked salsa file");
-        let db = workspace.salsa_db.lock();
-        let snapshot = db
-            .cached_parse_tree(&file.file_id(&*db))
-            .expect("cached parse tree");
-        assert_eq!(snapshot.origin, ParseTreeOrigin::Incremental);
+        {
+            let db = workspace.salsa_db.lock();
+            assert!(
+                db.cached_parse_tree(&FileId::new(uri.clone())).is_none(),
+                "closed fallback sources should clear cached parse trees after reindex"
+            );
+        }
+        assert!(
+            workspace.get_salsa_file(&uri).is_none(),
+            "closed fallback sources should remain transient after reindex"
+        );
+
+        let index = workspace.index.load();
+        let view = index.view(IndexScope {
+            module: ModuleId::ROOT,
+        });
+        let demo = view.get_class("Demo").expect("indexed Demo");
+        assert!(
+            demo.fields[0].descriptor.as_ref().ends_with("String;"),
+            "reindexed field should reflect the rewritten String type"
+        );
     }
 
     #[tokio::test]
@@ -2213,6 +2308,37 @@ mod tests {
         let file = workspace.get_salsa_file(&uri).expect("tracked salsa file");
         let db = workspace.salsa_db.lock();
         assert_eq!(file.content(&*db), "class Demo { String live; }");
+    }
+
+    #[tokio::test]
+    async fn fallback_root_indexing_tracks_closed_module_info_without_retaining_salsa() {
+        let workspace = Workspace::new();
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("module-info.java");
+        fs::write(&path, "module com.example.app { requires java.base; }")
+            .expect("write module descriptor");
+        let uri =
+            Url::from_file_path(path.canonicalize().expect("canonical path")).expect("file uri");
+
+        workspace
+            .index_fallback_root(dir.path().to_path_buf())
+            .await
+            .expect("index root");
+
+        assert!(
+            workspace.get_salsa_file(&uri).is_none(),
+            "closed module-info indexing should not retain workspace Salsa files"
+        );
+        assert_eq!(
+            workspace.java_module_names(),
+            vec![Arc::<str>::from("com.example.app")]
+        );
+        assert_eq!(
+            workspace
+                .java_module_uri("com.example.app")
+                .expect("module uri"),
+            uri
+        );
     }
 
     #[tokio::test]
@@ -2284,8 +2410,12 @@ mod tests {
             .await
             .expect("index root");
         assert!(
-            workspace.get_salsa_file(&uri).is_some(),
-            "tracked before delete"
+            workspace.indexed_salsa_uris.read().contains(&uri),
+            "tracked source URI should be recorded before delete"
+        );
+        assert!(
+            workspace.get_salsa_file(&uri).is_none(),
+            "closed watched-root sources should not retain workspace Salsa files"
         );
 
         fs::remove_file(&path).expect("remove source");
@@ -2296,8 +2426,12 @@ mod tests {
         assert_eq!(summary.applied, 1);
         assert_eq!(summary.removed, 1);
         assert!(
+            !workspace.indexed_salsa_uris.read().contains(&uri),
+            "deleted source should be removed from tracked URIs"
+        );
+        assert!(
             workspace.get_salsa_file(&uri).is_none(),
-            "deleted file should be removed from tracked state"
+            "deleted source should not retain workspace Salsa files"
         );
     }
 
@@ -2330,9 +2464,17 @@ mod tests {
             .reconcile_closed_document_blocking(&uri)
             .expect("reconcile closed document");
 
-        let file = workspace.get_salsa_file(&uri).expect("tracked salsa file");
-        let db = workspace.salsa_db.lock();
-        assert_eq!(file.content(&*db), "class Demo { int disk; }");
+        assert!(
+            workspace.get_salsa_file(&uri).is_none(),
+            "closed document reconciliation should drop workspace Salsa retention"
+        );
+
+        let index = workspace.index.load();
+        let view = index.view(IndexScope {
+            module: ModuleId::ROOT,
+        });
+        let demo = view.get_class("Demo").expect("indexed Demo");
+        assert_eq!(demo.fields[0].descriptor.as_ref(), "I");
     }
 
     #[tokio::test]
@@ -2388,8 +2530,58 @@ mod tests {
             .expect("apply workspace model");
 
         assert!(
-            workspace.get_salsa_file(&uri).is_some(),
-            "generated Java source roots should be indexed"
+            workspace.get_salsa_file(&uri).is_none(),
+            "closed generated-root sources should not retain workspace Salsa files"
+        );
+
+        let index = workspace.index.load();
+        let view =
+            index.view_for_analysis_context(ModuleId(1), ClasspathId::Main, Some(SourceRootId(11)));
+        assert!(
+            view.get_class("org/example/GeneratedDemo").is_some(),
+            "generated Java source roots should still be indexed"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_apply_updates_closed_module_info_without_retaining_salsa() {
+        let workspace = Workspace::new();
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("module-info.java");
+        fs::write(&path, "module com.example.app { }").expect("write module descriptor");
+        let uri =
+            Url::from_file_path(path.canonicalize().expect("canonical path")).expect("file uri");
+
+        workspace
+            .index_fallback_root(dir.path().to_path_buf())
+            .await
+            .expect("index root");
+        assert_eq!(
+            workspace.java_module_names(),
+            vec![Arc::<str>::from("com.example.app")]
+        );
+
+        fs::write(&path, "module com.example.renamed { }").expect("rewrite module descriptor");
+
+        let summary = workspace
+            .apply_filesystem_changes_blocking(vec![FilesystemChange::upsert(path.clone())])
+            .expect("apply filesystem change");
+        assert_eq!(summary.applied, 1);
+        assert!(
+            workspace.get_salsa_file(&uri).is_none(),
+            "closed module-info updates should not retain workspace Salsa files"
+        );
+        assert_eq!(
+            workspace.java_module_names(),
+            vec![Arc::<str>::from("com.example.renamed")]
+        );
+        assert_eq!(
+            workspace
+                .java_module_descriptor_for_uri(&uri)
+                .expect("module descriptor")
+                .name
+                .as_ref(),
+            "com.example.renamed"
         );
     }
 
