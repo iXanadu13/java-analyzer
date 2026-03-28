@@ -65,10 +65,9 @@ impl ScopeSnapshot {
             let mut names = Vec::new();
             let mut seen: FxHashSet<Arc<str>> = Default::default();
             for layer in &self.layers {
-                let layer_table = layer.build_name_table();
-                for name in layer_table.iter() {
-                    if seen.insert(Arc::clone(name)) {
-                        names.push(Arc::clone(name));
+                for name in layer.exact_match_keys() {
+                    if seen.insert(Arc::clone(&name)) {
+                        names.push(name);
                     }
                 }
             }

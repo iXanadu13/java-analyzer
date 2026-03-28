@@ -15,6 +15,7 @@ use crate::index::{
     intern_str,
 };
 
+type ClassId = usize;
 type OwnerKey = Arc<str>;
 
 const MRO_CACHE_LIMIT: usize = 1024;
@@ -34,13 +35,14 @@ pub(crate) struct BucketStats {
 type MroCacheMap = LruCache<Arc<str>, (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>)>;
 
 struct BucketState {
-    classes: HashMap<Arc<str>, Arc<ClassMetadata>>,
+    classes: Vec<Option<Arc<ClassMetadata>>>,
+    free_class_ids: Vec<ClassId>,
+    by_internal: HashMap<Arc<str>, ClassId>,
     modules: HashMap<Arc<str>, Arc<IndexedJavaModule>>,
-    by_origin: HashMap<ClassOrigin, Vec<Arc<str>>>,
-    simple_name_index: HashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
-    package_index: HashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
-    owner_index: HashMap<OwnerKey, Vec<Arc<ClassMetadata>>>,
-    name_table: Arc<NameTable>,
+    by_origin: HashMap<ClassOrigin, Vec<ClassId>>,
+    simple_name_index: HashMap<Arc<str>, Vec<ClassId>>,
+    package_index: HashMap<Arc<str>, Vec<ClassId>>,
+    owner_index: HashMap<OwnerKey, Vec<ClassId>>,
     mro_cache: MroCacheMap,
 }
 
@@ -51,13 +53,14 @@ pub struct BucketIndex {
 impl BucketIndex {
     pub fn new() -> Self {
         let state = BucketState {
-            classes: HashMap::with_capacity(100_000),
+            classes: Vec::with_capacity(100_000),
+            free_class_ids: Vec::new(),
+            by_internal: HashMap::with_capacity(100_000),
             modules: HashMap::new(),
             by_origin: HashMap::new(),
             simple_name_index: HashMap::with_capacity(100_000),
             package_index: HashMap::with_capacity(10_000),
             owner_index: HashMap::with_capacity(50_000),
-            name_table: Arc::new(NameTable(FxHashSet::default())),
             mro_cache: LruCache::new(
                 NonZeroUsize::new(MRO_CACHE_LIMIT).expect("MRO cache limit must be non-zero"),
             ),
@@ -73,45 +76,7 @@ impl BucketIndex {
 
         for mut class in classes {
             Self::intern_class(&mut class);
-
-            let internal = Arc::clone(&class.internal_name);
-            let simple = Arc::clone(&class.name);
-            let pkg = class.package.clone();
-            let owner_internal = class.inner_class_of.clone();
-            let origin = class.origin.clone();
-            let rc = Arc::new(class);
-
-            inner.classes.insert(Arc::clone(&internal), Arc::clone(&rc));
-            inner
-                .simple_name_index
-                .entry(Arc::clone(&simple))
-                .or_default()
-                .push(Arc::clone(&rc));
-
-            if let Some(p) = pkg {
-                inner
-                    .package_index
-                    .entry(Arc::clone(&p))
-                    .or_default()
-                    .push(Arc::clone(&rc));
-            }
-            if let Some(owner_name) = owner_internal {
-                inner
-                    .owner_index
-                    .entry(owner_name)
-                    .or_default()
-                    .push(Arc::clone(&rc));
-            }
-
-            inner
-                .by_origin
-                .entry(origin)
-                .or_default()
-                .push(Arc::clone(&internal));
-
-            Arc::make_mut(&mut inner.name_table)
-                .0
-                .insert(Arc::clone(&internal));
+            Self::insert_class_locked(&mut inner, Arc::new(class));
         }
 
         inner.mro_cache.clear();
@@ -155,7 +120,8 @@ impl BucketIndex {
 
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
         let inner = self.inner.read();
-        inner.classes.get(internal_name).cloned()
+        let id = *inner.by_internal.get(internal_name)?;
+        inner.classes.get(id).and_then(|class| class.clone())
     }
 
     pub fn get_module(&self, module_name: &str) -> Option<Arc<IndexedJavaModule>> {
@@ -173,7 +139,7 @@ impl BucketIndex {
         inner
             .simple_name_index
             .get(simple_name)
-            .cloned()
+            .map(|ids| Self::resolve_class_ids_locked(&inner, ids))
             .unwrap_or_default()
     }
 
@@ -186,7 +152,7 @@ impl BucketIndex {
         inner
             .owner_index
             .get(owner_internal)
-            .cloned()
+            .map(|ids| Self::resolve_class_ids_locked(&inner, ids))
             .unwrap_or_default()
     }
 
@@ -206,7 +172,7 @@ impl BucketIndex {
         inner
             .package_index
             .get(normalized.as_str())
-            .cloned()
+            .map(|ids| Self::resolve_class_ids_locked(&inner, ids))
             .unwrap_or_default()
     }
 
@@ -222,7 +188,7 @@ impl BucketIndex {
         inner
             .package_index
             .get(normalized.as_str())
-            .is_some_and(|v| !v.is_empty())
+            .is_some_and(|ids| !ids.is_empty())
     }
 
     pub fn package_names(&self) -> Vec<Arc<str>> {
@@ -401,7 +367,7 @@ impl BucketIndex {
 
     pub fn exact_match_keys(&self) -> Vec<Arc<str>> {
         let inner = self.inner.read();
-        let keys: Vec<Arc<str>> = inner.classes.keys().cloned().collect();
+        let keys: Vec<Arc<str>> = inner.by_internal.keys().cloned().collect();
         tracing::debug!(
             key_count = keys.len(),
             sample_keys = ?keys.iter().take(5).map(|k| k.as_ref()).collect::<Vec<_>>(),
@@ -412,29 +378,32 @@ impl BucketIndex {
 
     pub fn class_count(&self) -> usize {
         let inner = self.inner.read();
-        inner.classes.len()
+        inner.by_internal.len()
     }
 
     pub fn iter_all_classes(&self) -> Vec<Arc<ClassMetadata>> {
         let inner = self.inner.read();
-        inner.classes.values().cloned().collect()
+        inner
+            .classes
+            .iter()
+            .filter_map(|class| class.clone())
+            .collect()
     }
 
     pub fn build_name_table(&self) -> Arc<NameTable> {
-        let inner = self.inner.read();
-        Arc::clone(&inner.name_table)
+        NameTable::from_names(self.exact_match_keys())
     }
 
     pub(crate) fn stats(&self) -> BucketStats {
         let inner = self.inner.read();
         BucketStats {
-            class_count: inner.classes.len(),
+            class_count: inner.by_internal.len(),
             module_count: inner.modules.len(),
             origin_count: inner.by_origin.len(),
             simple_name_entry_count: inner.simple_name_index.len(),
             package_entry_count: inner.package_index.len(),
             owner_entry_count: inner.owner_index.len(),
-            name_table_size: inner.name_table.len(),
+            name_table_size: 0,
             mro_cache_entries: inner.mro_cache.len(),
         }
     }
@@ -445,55 +414,32 @@ impl BucketIndex {
 
     pub fn remove_by_origin(&self, origin: &ClassOrigin) -> bool {
         let mut inner = self.inner.write();
-        let internals = match inner.by_origin.remove(origin) {
+        let class_ids = match inner.by_origin.remove(origin) {
             Some(v) => v,
             None => return false,
         };
 
-        for internal in &internals {
-            if let Some(meta) = inner.classes.remove(internal) {
-                if let Some(v) = inner.simple_name_index.get_mut(&meta.name) {
-                    v.retain(|meta: &Arc<ClassMetadata>| meta.internal_name != *internal);
-                    if v.is_empty() {
-                        inner.simple_name_index.remove(&meta.name);
-                    }
-                }
-                if let Some(pkg) = &meta.package
-                    && let Some(v) = inner.package_index.get_mut(pkg)
-                {
-                    v.retain(|meta: &Arc<ClassMetadata>| meta.internal_name != *internal);
-                    if v.is_empty() {
-                        inner.package_index.remove(pkg);
-                    }
-                }
-                if let Some(owner_name) = &meta.inner_class_of {
-                    if let Some(v) = inner.owner_index.get_mut(owner_name) {
-                        v.retain(|meta: &Arc<ClassMetadata>| meta.internal_name != *internal);
-                        if v.is_empty() {
-                            inner.owner_index.remove(owner_name);
-                        }
-                    }
-                }
-            }
+        for class_id in class_ids {
+            Self::detach_class_locked(&mut inner, class_id);
         }
 
         inner.mro_cache.clear();
-        Self::rebuild_name_table_locked(&mut inner);
         true
     }
 
     fn same_classes_for_origin(&self, origin: &ClassOrigin, classes: &[ClassMetadata]) -> bool {
         let inner = self.inner.read();
-        let Some(internals) = inner.by_origin.get(origin) else {
+        let Some(class_ids) = inner.by_origin.get(origin) else {
             return false;
         };
-        if internals.len() != classes.len() {
+        if class_ids.len() != classes.len() {
             return false;
         }
 
-        let mut existing = internals
+        let mut existing = class_ids
             .iter()
-            .filter_map(|internal| inner.classes.get(internal).map(|meta| (**meta).clone()))
+            .filter_map(|id| inner.classes.get(*id).and_then(|meta| meta.clone()))
+            .map(|meta| (*meta).clone())
             .collect::<Vec<_>>();
         drop(inner);
 
@@ -505,8 +451,104 @@ impl BucketIndex {
         existing == incoming
     }
 
-    fn rebuild_name_table_locked(inner: &mut BucketState) {
-        inner.name_table = Arc::new(NameTable(inner.classes.keys().cloned().collect()));
+    fn resolve_class_ids_locked(inner: &BucketState, ids: &[ClassId]) -> Vec<Arc<ClassMetadata>> {
+        ids.iter()
+            .filter_map(|id| inner.classes.get(*id).and_then(|class| class.clone()))
+            .collect()
+    }
+
+    fn insert_class_locked(inner: &mut BucketState, class: Arc<ClassMetadata>) {
+        let internal = Arc::clone(&class.internal_name);
+        let simple = Arc::clone(&class.name);
+        let pkg = class.package.clone();
+        let owner_internal = class.inner_class_of.clone();
+        let origin = class.origin.clone();
+
+        if let Some(existing_id) = inner.by_internal.get(internal.as_ref()).copied() {
+            Self::remove_class_by_id_locked(inner, existing_id);
+        }
+
+        let class_id = if let Some(reused_id) = inner.free_class_ids.pop() {
+            inner.classes[reused_id] = Some(Arc::clone(&class));
+            reused_id
+        } else {
+            let next_id = inner.classes.len();
+            inner.classes.push(Some(Arc::clone(&class)));
+            next_id
+        };
+
+        inner.by_internal.insert(internal, class_id);
+        inner
+            .simple_name_index
+            .entry(simple)
+            .or_default()
+            .push(class_id);
+
+        if let Some(pkg) = pkg {
+            inner.package_index.entry(pkg).or_default().push(class_id);
+        }
+
+        if let Some(owner_name) = owner_internal {
+            inner
+                .owner_index
+                .entry(owner_name)
+                .or_default()
+                .push(class_id);
+        }
+
+        inner.by_origin.entry(origin).or_default().push(class_id);
+    }
+
+    fn remove_class_by_id_locked(inner: &mut BucketState, class_id: ClassId) -> bool {
+        let Some(meta) = Self::detach_class_locked(inner, class_id) else {
+            return false;
+        };
+
+        let origin = meta.origin.clone();
+        let remove_origin_entry = inner.by_origin.get_mut(&origin).is_some_and(|ids| {
+            ids.retain(|candidate| *candidate != class_id);
+            ids.is_empty()
+        });
+        if remove_origin_entry {
+            inner.by_origin.remove(&origin);
+        }
+        true
+    }
+
+    fn detach_class_locked(
+        inner: &mut BucketState,
+        class_id: ClassId,
+    ) -> Option<Arc<ClassMetadata>> {
+        let class = inner.classes.get_mut(class_id)?.take()?;
+        if inner.by_internal.get(class.internal_name.as_ref()).copied() == Some(class_id) {
+            inner.by_internal.remove(class.internal_name.as_ref());
+        }
+
+        Self::trim_id_index_locked(&mut inner.simple_name_index, class.name.as_ref(), class_id);
+
+        if let Some(pkg) = class.package.as_deref() {
+            Self::trim_id_index_locked(&mut inner.package_index, pkg, class_id);
+        }
+        if let Some(owner_name) = class.inner_class_of.as_deref() {
+            Self::trim_id_index_locked(&mut inner.owner_index, owner_name, class_id);
+        }
+
+        inner.free_class_ids.push(class_id);
+        Some(class)
+    }
+
+    fn trim_id_index_locked(
+        index: &mut HashMap<Arc<str>, Vec<ClassId>>,
+        key: &str,
+        class_id: ClassId,
+    ) {
+        let remove_entry = index.get_mut(key).is_some_and(|ids| {
+            ids.retain(|candidate| *candidate != class_id);
+            ids.is_empty()
+        });
+        if remove_entry {
+            index.remove(key);
+        }
     }
 
     fn intern_class(class: &mut ClassMetadata) {
