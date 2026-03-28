@@ -398,7 +398,7 @@ class UserRepo(val db: String) {
     }
 
     #[test]
-    fn test_codebase_index_session_reuses_incremental_java_parse_tree() {
+    fn test_codebase_index_session_reparses_java_source_after_content_change() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Demo.java");
         fs::write(&path, "package org.test;\nclass Demo { int value; }\n").unwrap();
@@ -434,14 +434,11 @@ class UserRepo(val db: String) {
                 .iter()
                 .any(|field| field.name.as_ref() == "count")
         }));
-        assert_eq!(
-            session.java_parse_origin(&uri),
-            Some(ParseTreeOrigin::Incremental)
-        );
+        assert_eq!(session.java_parse_origin(&uri), Some(ParseTreeOrigin::Full));
     }
 
     #[test]
-    fn test_codebase_index_session_reuses_java_source_text_by_uri() {
+    fn test_codebase_index_session_reuses_uri_without_retaining_old_source_text() {
         let uri = "file:///workspace/Demo.java";
         let mut session = CodebaseIndexSession::default();
 
@@ -452,9 +449,6 @@ class UserRepo(val db: String) {
         let second =
             session.index_source_text(uri, "class Demo { int value; int count; }", "java", None);
         assert_eq!(second.len(), 1);
-        assert_eq!(
-            session.java_parse_origin(uri),
-            Some(ParseTreeOrigin::Incremental)
-        );
+        assert_eq!(session.java_parse_origin(uri), Some(ParseTreeOrigin::Full));
     }
 }

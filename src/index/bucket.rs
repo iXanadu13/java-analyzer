@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use lru::LruCache;
 use nucleo_matcher::{
@@ -11,8 +11,8 @@ use parking_lot::RwLock;
 use rustc_hash::FxHashSet;
 
 use crate::index::{
-    ClassMetadata, ClassOrigin, FieldSummary, IndexedJavaModule, MethodSummary, NameTable,
-    intern_str,
+    ArchiveClassStub, ClassMetadata, ClassOrigin, FieldSummary, IndexedJavaModule, MethodSummary,
+    NameTable, intern_str,
 };
 
 type ClassId = usize;
@@ -34,8 +34,61 @@ pub(crate) struct BucketStats {
 
 type MroCacheMap = LruCache<Arc<str>, (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>)>;
 
+enum StoredClassBody {
+    Rich(Arc<ClassMetadata>),
+    ArchiveStub {
+        stub: Arc<ArchiveClassStub>,
+        materialized: OnceLock<Arc<ClassMetadata>>,
+    },
+}
+
+struct StoredClass {
+    internal_name: Arc<str>,
+    name: Arc<str>,
+    package: Option<Arc<str>>,
+    inner_class_of: Option<Arc<str>>,
+    origin: ClassOrigin,
+    body: StoredClassBody,
+}
+
+impl StoredClass {
+    fn from_metadata(class: Arc<ClassMetadata>) -> Self {
+        Self {
+            internal_name: Arc::clone(&class.internal_name),
+            name: Arc::clone(&class.name),
+            package: class.package.clone(),
+            inner_class_of: class.inner_class_of.clone(),
+            origin: class.origin.clone(),
+            body: StoredClassBody::Rich(class),
+        }
+    }
+
+    fn from_archive_stub(stub: ArchiveClassStub) -> Self {
+        Self {
+            internal_name: Arc::clone(&stub.internal_name),
+            name: Arc::clone(&stub.name),
+            package: stub.package.clone(),
+            inner_class_of: stub.inner_class_of.clone(),
+            origin: stub.origin.clone(),
+            body: StoredClassBody::ArchiveStub {
+                stub: Arc::new(stub),
+                materialized: OnceLock::new(),
+            },
+        }
+    }
+
+    fn materialize(&self) -> Arc<ClassMetadata> {
+        match &self.body {
+            StoredClassBody::Rich(class) => Arc::clone(class),
+            StoredClassBody::ArchiveStub { stub, materialized } => {
+                Arc::clone(materialized.get_or_init(|| Arc::new(stub.materialize())))
+            }
+        }
+    }
+}
+
 struct BucketState {
-    classes: Vec<Option<Arc<ClassMetadata>>>,
+    classes: Vec<Option<StoredClass>>,
     free_class_ids: Vec<ClassId>,
     by_internal: HashMap<Arc<str>, ClassId>,
     modules: HashMap<Arc<str>, Arc<IndexedJavaModule>>,
@@ -76,7 +129,19 @@ impl BucketIndex {
 
         for mut class in classes {
             Self::intern_class(&mut class);
-            Self::insert_class_locked(&mut inner, Arc::new(class));
+            Self::insert_record_locked(&mut inner, StoredClass::from_metadata(Arc::new(class)));
+        }
+
+        inner.mro_cache.clear();
+    }
+
+    pub fn add_archive_classes(&self, classes: Vec<ClassMetadata>) {
+        let mut inner = self.inner.write();
+
+        for mut class in classes {
+            Self::intern_class(&mut class);
+            let stub = ArchiveClassStub::from_class_metadata(class);
+            Self::insert_record_locked(&mut inner, StoredClass::from_archive_stub(stub));
         }
 
         inner.mro_cache.clear();
@@ -121,7 +186,11 @@ impl BucketIndex {
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
         let inner = self.inner.read();
         let id = *inner.by_internal.get(internal_name)?;
-        inner.classes.get(id).and_then(|class| class.clone())
+        inner
+            .classes
+            .get(id)
+            .and_then(|class| class.as_ref())
+            .map(StoredClass::materialize)
     }
 
     pub fn get_module(&self, module_name: &str) -> Option<Arc<IndexedJavaModule>> {
@@ -386,7 +455,7 @@ impl BucketIndex {
         inner
             .classes
             .iter()
-            .filter_map(|class| class.clone())
+            .filter_map(|class| class.as_ref().map(StoredClass::materialize))
             .collect()
     }
 
@@ -438,7 +507,13 @@ impl BucketIndex {
 
         let mut existing = class_ids
             .iter()
-            .filter_map(|id| inner.classes.get(*id).and_then(|meta| meta.clone()))
+            .filter_map(|id| {
+                inner
+                    .classes
+                    .get(*id)
+                    .and_then(|record| record.as_ref())
+                    .map(StoredClass::materialize)
+            })
             .map(|meta| (*meta).clone())
             .collect::<Vec<_>>();
         drop(inner);
@@ -453,11 +528,17 @@ impl BucketIndex {
 
     fn resolve_class_ids_locked(inner: &BucketState, ids: &[ClassId]) -> Vec<Arc<ClassMetadata>> {
         ids.iter()
-            .filter_map(|id| inner.classes.get(*id).and_then(|class| class.clone()))
+            .filter_map(|id| {
+                inner
+                    .classes
+                    .get(*id)
+                    .and_then(|class| class.as_ref())
+                    .map(StoredClass::materialize)
+            })
             .collect()
     }
 
-    fn insert_class_locked(inner: &mut BucketState, class: Arc<ClassMetadata>) {
+    fn insert_record_locked(inner: &mut BucketState, class: StoredClass) {
         let internal = Arc::clone(&class.internal_name);
         let simple = Arc::clone(&class.name);
         let pkg = class.package.clone();
@@ -469,11 +550,11 @@ impl BucketIndex {
         }
 
         let class_id = if let Some(reused_id) = inner.free_class_ids.pop() {
-            inner.classes[reused_id] = Some(Arc::clone(&class));
+            inner.classes[reused_id] = Some(class);
             reused_id
         } else {
             let next_id = inner.classes.len();
-            inner.classes.push(Some(Arc::clone(&class)));
+            inner.classes.push(Some(class));
             next_id
         };
 
@@ -515,10 +596,7 @@ impl BucketIndex {
         true
     }
 
-    fn detach_class_locked(
-        inner: &mut BucketState,
-        class_id: ClassId,
-    ) -> Option<Arc<ClassMetadata>> {
+    fn detach_class_locked(inner: &mut BucketState, class_id: ClassId) -> Option<StoredClass> {
         let class = inner.classes.get_mut(class_id)?.take()?;
         if inner.by_internal.get(class.internal_name.as_ref()).copied() == Some(class_id) {
             inner.by_internal.remove(class.internal_name.as_ref());
@@ -597,5 +675,97 @@ impl BucketIndex {
 impl Default for BucketIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{AnnotationSummary, AnnotationValue, MethodParam, MethodParams};
+    use rust_asm::constants::{ACC_ANNOTATION, ACC_PUBLIC};
+
+    fn target_annotation(targets: &[&str]) -> AnnotationSummary {
+        AnnotationSummary {
+            internal_name: Arc::from("java/lang/annotation/Target"),
+            runtime_visible: true,
+            elements: rustc_hash::FxHashMap::from_iter([(
+                Arc::from("value"),
+                AnnotationValue::Array(
+                    targets
+                        .iter()
+                        .map(|target| AnnotationValue::Enum {
+                            type_name: Arc::from("java/lang/annotation/ElementType"),
+                            const_name: Arc::from(*target),
+                        })
+                        .collect(),
+                ),
+            )]),
+        }
+    }
+
+    fn retention_annotation(policy: &str) -> AnnotationSummary {
+        AnnotationSummary {
+            internal_name: Arc::from("java/lang/annotation/Retention"),
+            runtime_visible: true,
+            elements: rustc_hash::FxHashMap::from_iter([(
+                Arc::from("value"),
+                AnnotationValue::Enum {
+                    type_name: Arc::from("java/lang/annotation/RetentionPolicy"),
+                    const_name: Arc::from(policy),
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn archive_classes_materialize_annotation_semantics_and_param_names() {
+        let bucket = BucketIndex::new();
+        let annotation = ClassMetadata {
+            package: Some(Arc::from("com/example")),
+            name: Arc::from("MyAnnotation"),
+            internal_name: Arc::from("com/example/MyAnnotation"),
+            super_name: Some(Arc::from("java/lang/Object")),
+            interfaces: vec![Arc::from("java/lang/annotation/Annotation")],
+            annotations: vec![
+                target_annotation(&["TYPE", "METHOD"]),
+                retention_annotation("RUNTIME"),
+            ],
+            methods: vec![MethodSummary {
+                name: Arc::from("value"),
+                params: MethodParams {
+                    items: vec![MethodParam {
+                        descriptor: Arc::from("Ljava/lang/String;"),
+                        name: Arc::from("name"),
+                        annotations: Vec::new(),
+                    }],
+                },
+                annotations: Vec::new(),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: Some(Arc::from("Ljava/lang/String;")),
+            }],
+            fields: Vec::new(),
+            access_flags: ACC_PUBLIC | ACC_ANNOTATION,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Jar(Arc::from("jar:///annotations.jar")),
+        };
+
+        bucket.add_archive_classes(vec![annotation]);
+
+        let materialized = bucket
+            .get_class("com/example/MyAnnotation")
+            .expect("archive class should materialize");
+
+        assert_eq!(
+            materialized.annotation_targets(),
+            Some(vec![Arc::from("TYPE"), Arc::from("METHOD")])
+        );
+        assert_eq!(materialized.annotation_retention(), Some("RUNTIME"));
+        assert_eq!(
+            materialized.methods[0].params.param_names(),
+            vec![Arc::from("name")]
+        );
     }
 }

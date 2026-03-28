@@ -5,7 +5,7 @@ use crate::salsa_db::{ParseTreeOrigin, ParseTreeSnapshot, SourceFile};
 /// These queries are the foundation of incremental parsing. When a file's
 /// content changes, only these queries (and their dependents) are invalidated.
 use std::sync::Arc;
-use tree_sitter::{InputEdit, Parser, Point, Tree};
+use tree_sitter::{Parser, Tree};
 
 /// Metadata about a parsed syntax tree
 ///
@@ -63,25 +63,26 @@ pub fn parse_tree(db: &dyn Db, file: SourceFile) -> Option<Tree> {
     let content = file.content(db);
     let language_id = file.language_id(db);
     let file_id = file.file_id(db).clone();
+    let source_hash = crate::salsa_db::source_content_hash(content.as_str());
     let cached = db.cached_parse_tree(&file_id);
 
     if let Some(snapshot) = cached.as_ref()
-        && snapshot.content.as_ref() == content
+        && snapshot.source_hash == source_hash
         && snapshot.language_id.as_ref() == language_id.as_ref()
     {
         return Some(snapshot.tree.clone());
     }
 
-    let tree = parse_tree_from_snapshot(content, language_id.as_ref(), cached.as_ref());
+    let tree = parse_tree_for_language(content, language_id.as_ref());
     match tree {
-        Some((tree, origin)) => {
+        Some(tree) => {
             db.store_parse_tree(
                 file_id,
                 ParseTreeSnapshot {
-                    content: Arc::from(content.as_str()),
+                    source_hash,
                     language_id: Arc::clone(&language_id),
                     tree: tree.clone(),
-                    origin,
+                    origin: ParseTreeOrigin::Full,
                 },
             );
             Some(tree)
@@ -105,7 +106,7 @@ pub fn seed_parse_tree(db: &dyn Db, file: SourceFile, tree: &Tree) {
     db.store_parse_tree(
         file.file_id(db).clone(),
         ParseTreeSnapshot {
-            content: Arc::from(file.content(db).as_str()),
+            source_hash: crate::salsa_db::source_content_hash(file.content(db).as_str()),
             language_id: file.language_id(db),
             tree: tree.clone(),
             origin: ParseTreeOrigin::Seeded,
@@ -145,80 +146,8 @@ pub fn parse_tree_for_language(content: &str, language_id: &str) -> Option<Tree>
     parser.parse(content, None)
 }
 
-fn parse_tree_from_snapshot(
-    content: &str,
-    language_id: &str,
-    cached: Option<&ParseTreeSnapshot>,
-) -> Option<(Tree, ParseTreeOrigin)> {
-    let mut parser = parser_for_language(language_id)?;
-
-    if let Some(snapshot) = cached
-        && snapshot.language_id.as_ref() == language_id
-    {
-        let mut old_tree = snapshot.tree.clone();
-        if snapshot.content.as_ref() != content {
-            old_tree.edit(&compute_input_edit(snapshot.content.as_ref(), content));
-        }
-
-        if let Some(tree) = parser.parse(content, Some(&old_tree)) {
-            return Some((tree, ParseTreeOrigin::Incremental));
-        }
-    }
-
-    parser
-        .parse(content, None)
-        .map(|tree| (tree, ParseTreeOrigin::Full))
-}
-
 fn parser_for_language(language_id: &str) -> Option<Parser> {
     crate::language::lookup_language(language_id).map(crate::language::Language::make_parser)
-}
-
-fn compute_input_edit(old_content: &str, new_content: &str) -> InputEdit {
-    let prefix = common_prefix_len(old_content, new_content);
-    let old_suffix = common_suffix_len(&old_content[prefix..], &new_content[prefix..]);
-    let old_end_byte = old_content.len() - old_suffix;
-    let new_end_byte = new_content.len() - old_suffix;
-
-    InputEdit {
-        start_byte: prefix,
-        old_end_byte,
-        new_end_byte,
-        start_position: point_for_offset(old_content, prefix),
-        old_end_position: point_for_offset(old_content, old_end_byte),
-        new_end_position: point_for_offset(new_content, new_end_byte),
-    }
-}
-
-fn common_prefix_len(left: &str, right: &str) -> usize {
-    left.chars()
-        .zip(right.chars())
-        .take_while(|(a, b)| a == b)
-        .map(|(ch, _)| ch.len_utf8())
-        .sum()
-}
-
-fn common_suffix_len(left: &str, right: &str) -> usize {
-    left.chars()
-        .rev()
-        .zip(right.chars().rev())
-        .take_while(|(a, b)| a == b)
-        .map(|(ch, _)| ch.len_utf8())
-        .sum()
-}
-
-fn point_for_offset(source: &str, offset: usize) -> Point {
-    let mut row = 0usize;
-    let mut column = 0usize;
-    for byte in source.as_bytes().iter().take(offset) {
-        if *byte == b'\n' {
-            row += 1;
-            column = 0;
-        } else {
-            column += 1;
-        }
-    }
-    Point::new(row, column)
 }
 
 #[cfg(test)]
@@ -321,7 +250,7 @@ public class Test {
         let tree2 = parse_tree(&db, file).unwrap();
         let snapshot2 = db.cached_parse_tree(&file_id).unwrap();
 
-        assert_eq!(snapshot2.origin, ParseTreeOrigin::Incremental);
+        assert_eq!(snapshot2.origin, ParseTreeOrigin::Full);
         assert!(
             tree2.root_node().descendant_count() > snapshot1.tree.root_node().descendant_count()
         );

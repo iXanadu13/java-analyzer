@@ -4,6 +4,7 @@
 /// using the Salsa framework. It's designed to integrate with the existing
 /// Language trait and workspace infrastructure.
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Tree;
@@ -97,7 +98,7 @@ impl ParseTreeOrigin {
 /// Latest parse snapshot retained for incremental tree-sitter reparses.
 #[derive(Clone)]
 pub struct ParseTreeSnapshot {
-    pub content: Arc<str>,
+    pub source_hash: u64,
     pub language_id: Arc<str>,
     pub tree: Tree,
     pub origin: ParseTreeOrigin,
@@ -107,7 +108,7 @@ pub struct ParseTreeSnapshot {
 /// need both Salsa change tracking and the materialized class list.
 #[derive(Clone)]
 pub struct ClassExtractionSnapshot {
-    pub content: Arc<str>,
+    pub source_hash: u64,
     pub language_id: Arc<str>,
     pub classes: Vec<crate::index::ClassMetadata>,
 }
@@ -235,15 +236,9 @@ impl Database {
 
         SalsaCacheStats {
             parse_tree_entries: parse_trees.len(),
-            parse_tree_text_bytes: parse_trees
-                .values()
-                .map(|snapshot| snapshot.content.len())
-                .sum(),
+            parse_tree_text_bytes: 0,
             class_extraction_entries: class_extractions.len(),
-            class_extraction_text_bytes: class_extractions
-                .values()
-                .map(|snapshot| snapshot.content.len())
-                .sum(),
+            class_extraction_text_bytes: 0,
             extracted_class_count: class_extractions
                 .values()
                 .map(|snapshot| snapshot.classes.len())
@@ -255,6 +250,12 @@ impl Database {
         self.parse_trees.write().clear();
         self.class_extractions.write().clear();
     }
+}
+
+pub(crate) fn source_content_hash(source: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[salsa::db]

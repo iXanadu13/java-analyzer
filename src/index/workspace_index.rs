@@ -139,12 +139,12 @@ impl WorkspaceIndex {
     }
 
     pub fn add_jdk_classes(&self, classes: Vec<ClassMetadata>) {
-        self.jdk.add_classes(classes);
+        self.jdk.add_archive_classes(classes);
         self.invalidate_analysis_caches();
     }
 
     pub fn add_jdk_archive(&self, data: IndexedArchiveData) {
-        self.jdk.add_classes(data.classes);
+        self.jdk.add_archive_classes(data.classes);
         self.jdk.add_modules(data.modules);
         self.invalidate_analysis_caches();
     }
@@ -152,7 +152,7 @@ impl WorkspaceIndex {
     pub fn add_jar_classes(&self, scope: IndexScope, classes: Vec<ClassMetadata>) {
         let module = self.ensure_module(scope.module, default_module_name(scope.module));
         let bucket = Arc::new(BucketIndex::new());
-        bucket.add_classes(classes);
+        bucket.add_archive_classes(classes);
         module.add_classpath_bucket(ClasspathId::Main, bucket);
         self.invalidate_analysis_caches();
     }
@@ -165,7 +165,7 @@ impl WorkspaceIndex {
         let bucket = Arc::new(BucketIndex::new());
         match index_jar(Path::new(path.as_ref())) {
             Ok(data) => {
-                bucket.add_classes(data.classes);
+                bucket.add_archive_classes(data.classes);
                 bucket.add_modules(data.modules);
             }
             Err(err) => {

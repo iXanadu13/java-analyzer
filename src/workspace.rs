@@ -684,7 +684,12 @@ impl Workspace {
             .documents
             .snapshot_documents()
             .into_iter()
-            .map(|(uri, language_id, content)| (uri.to_string(), (language_id, content)))
+            .map(|snapshot| {
+                (
+                    snapshot.uri.to_string(),
+                    (snapshot.language_id, snapshot.text),
+                )
+            })
             .collect::<HashMap<_, _>>();
         let root_inputs = snapshot
             .modules
@@ -846,15 +851,19 @@ impl Workspace {
         }
 
         let open_docs = self.documents.snapshot_documents();
-        for (uri, language_id, content) in open_docs {
+        for open_doc in open_docs {
             let context = Self::resolve_analysis_context_for_snapshot(
                 Some(&snapshot),
-                uri.to_file_path().ok().as_deref(),
+                open_doc.uri.to_file_path().ok().as_deref(),
             );
-            let origin = ClassOrigin::SourceFile(Arc::from(uri.to_string().as_str()));
+            let origin = ClassOrigin::SourceFile(Arc::<str>::from(open_doc.uri.to_string()));
 
             // Get or create Salsa file for this document
-            let salsa_file = self.get_or_create_salsa_file(&uri, &content, &language_id);
+            let salsa_file = self.get_or_create_salsa_file(
+                &open_doc.uri,
+                open_doc.text.as_ref(),
+                open_doc.language_id.as_ref(),
+            );
 
             // Use Salsa queries for incremental parsing
             let classes = {
@@ -869,7 +878,7 @@ impl Workspace {
             };
 
             tracing::debug!(
-                uri = %uri,
+                uri = %open_doc.uri,
                 module = context.module.0,
                 classpath = ?context.classpath,
                 source_root = ?context.source_root.map(|id| id.0),
@@ -883,12 +892,16 @@ impl Workspace {
                 classes,
             );
 
-            match Self::extract_java_module_descriptor_for_source(&uri, &language_id, &content) {
+            match Self::extract_java_module_descriptor_for_source(
+                &open_doc.uri,
+                open_doc.language_id.as_ref(),
+                open_doc.text.as_ref(),
+            ) {
                 Some(descriptor) => {
-                    java_module_descriptors.insert(uri, descriptor);
+                    java_module_descriptors.insert(open_doc.uri, descriptor);
                 }
                 None => {
-                    java_module_descriptors.remove(&uri);
+                    java_module_descriptors.remove(&open_doc.uri);
                 }
             }
         }
@@ -923,7 +936,12 @@ impl Workspace {
             .documents
             .snapshot_documents()
             .into_iter()
-            .map(|(uri, language_id, content)| (uri.to_string(), (language_id, content)))
+            .map(|snapshot| {
+                (
+                    snapshot.uri.to_string(),
+                    (snapshot.language_id, snapshot.text),
+                )
+            })
             .collect::<HashMap<_, _>>();
         let source_inputs = tokio::task::spawn_blocking(move || {
             let source_files = collect_source_files([root]);
@@ -1112,17 +1130,16 @@ impl Workspace {
         language_id: &str,
     ) -> crate::salsa_db::SourceFile {
         if let Some(file) = self.get_salsa_file(uri) {
-            self.update_existing_salsa_file(file, content.to_string(), language_id.to_string());
+            self.update_existing_salsa_file(file, content, language_id);
             self.seed_salsa_parse_tree_from_document(uri, file);
             file
         } else {
-            let created =
-                self.create_salsa_file(uri.clone(), content.to_string(), language_id.to_string());
+            let created = self.create_salsa_file(uri.clone(), content, language_id);
             let file = {
                 let mut files = self.salsa_files.write();
                 *files.entry(uri.clone()).or_insert(created)
             };
-            self.update_existing_salsa_file(file, content.to_string(), language_id.to_string());
+            self.update_existing_salsa_file(file, content, language_id);
             self.seed_salsa_parse_tree_from_document(uri, file);
             file
         }
@@ -1313,11 +1330,16 @@ impl Workspace {
     fn create_salsa_file(
         &self,
         uri: Url,
-        content: String,
-        language_id: String,
+        content: &str,
+        language_id: &str,
     ) -> crate::salsa_db::SourceFile {
         let db = self.salsa_db.lock();
-        crate::salsa_db::SourceFile::new(&*db, FileId::new(uri), content, Arc::from(language_id))
+        crate::salsa_db::SourceFile::new(
+            &*db,
+            FileId::new(uri),
+            content.to_owned(),
+            Arc::from(language_id),
+        )
     }
 
     fn create_salsa_file_from_source(&self, source: &SourceFile) -> crate::salsa_db::SourceFile {
@@ -1333,14 +1355,14 @@ impl Workspace {
     fn update_existing_salsa_file(
         &self,
         file: crate::salsa_db::SourceFile,
-        content: String,
-        language_id: String,
+        content: &str,
+        language_id: &str,
     ) {
         use salsa::Setter;
 
         let mut db = self.salsa_db.lock();
-        if file.content(&*db).as_str() != content.as_str() {
-            file.set_content(&mut *db).to(content);
+        if file.content(&*db).as_str() != content {
+            file.set_content(&mut *db).to(content.to_owned());
         }
         if file.language_id(&*db).as_ref() != language_id {
             file.set_language_id(&mut *db).to(Arc::from(language_id));
@@ -1413,13 +1435,13 @@ impl Workspace {
             let source_snapshot = self.document_snapshot(&uri);
             if let Some(snapshot) = source_snapshot.as_ref() {
                 source.language_id = Arc::clone(&snapshot.language_id);
-                source.content = snapshot.text().to_owned();
+                source.content = Arc::clone(&snapshot.text);
             }
 
             if let Some(descriptor) = Self::extract_java_module_descriptor_for_source(
                 &uri,
                 source.language_id.as_ref(),
-                source.content.as_str(),
+                source.content.as_ref(),
             ) {
                 java_module_descriptors.insert(uri.clone(), descriptor);
             }
@@ -1432,7 +1454,7 @@ impl Workspace {
                 let salsa_file = self.get_or_update_salsa_file_for_snapshot(snapshot.as_ref());
                 prepared.push(IndexedWorkspaceSource {
                     language_id: Arc::clone(&snapshot.language_id),
-                    content: snapshot.text().to_owned(),
+                    content: Arc::clone(&snapshot.text),
                     origin: source.origin,
                     salsa_file: Some(salsa_file),
                 });
@@ -1671,7 +1693,7 @@ fn merge_classpath<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Vec<&'a Path
 
 struct IndexedWorkspaceSource {
     language_id: Arc<str>,
-    content: String,
+    content: Arc<str>,
     origin: ClassOrigin,
     salsa_file: Option<crate::salsa_db::SourceFile>,
 }
@@ -1685,10 +1707,10 @@ impl IndexedWorkspaceSource {
         if let Some(file) = self.salsa_file
             && let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file)
         {
-            return language.discover_internal_names(self.content.as_str(), Some(&tree));
+            return language.discover_internal_names(self.content.as_ref(), Some(&tree));
         }
 
-        language.discover_internal_names(self.content.as_str(), None)
+        language.discover_internal_names(self.content.as_ref(), None)
     }
 
     fn extract_classes(
@@ -1704,7 +1726,7 @@ impl IndexedWorkspaceSource {
             && let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file)
         {
             return language.extract_classes_from_source(
-                self.content.as_str(),
+                self.content.as_ref(),
                 &self.origin,
                 Some(&tree),
                 name_table,
@@ -1713,7 +1735,7 @@ impl IndexedWorkspaceSource {
         }
 
         language.extract_classes_from_source(
-            self.content.as_str(),
+            self.content.as_ref(),
             &self.origin,
             None,
             name_table,
@@ -1724,12 +1746,12 @@ impl IndexedWorkspaceSource {
 
 fn overlay_open_document_inputs(
     source_inputs: &mut [SourceTextInput],
-    open_doc_overlays: &HashMap<String, (String, String)>,
+    open_doc_overlays: &HashMap<String, (Arc<str>, Arc<str>)>,
 ) {
     for source in source_inputs {
         if let Some((language_id, content)) = open_doc_overlays.get(source.uri.as_ref()) {
-            source.language_id = Arc::from(language_id.as_str());
-            source.content = content.clone();
+            source.language_id = Arc::clone(language_id);
+            source.content = Arc::clone(content);
         }
     }
 }
@@ -2071,7 +2093,11 @@ mod tests {
             .expect("parse snapshot should be seeded");
 
         assert_eq!(snapshot.origin, ParseTreeOrigin::Seeded);
-        assert_eq!(snapshot.content.as_ref(), text);
+        assert_eq!(
+            snapshot.source_hash,
+            crate::salsa_db::source_content_hash(text)
+        );
+        assert_eq!(db.cache_stats().parse_tree_text_bytes, 0);
     }
 
     #[test]

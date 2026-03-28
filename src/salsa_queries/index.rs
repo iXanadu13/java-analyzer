@@ -42,12 +42,13 @@ pub fn extract_classes(db: &dyn Db, file: SourceFile) -> ClassExtractionResult {
     let content = file.content(db);
     let lang_id = file.language_id(db);
     let file_id = file.file_id(db).clone();
+    let source_hash = crate::salsa_db::source_content_hash(content.as_str());
     let classes = compute_extracted_classes(db, file, lang_id.as_ref());
 
     db.store_class_extraction(
         file_id,
         crate::salsa_db::ClassExtractionSnapshot {
-            content: Arc::from(content.as_str()),
+            source_hash,
             language_id: Arc::clone(&lang_id),
             classes: classes.clone(),
         },
@@ -81,9 +82,10 @@ pub fn get_extracted_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata
     let content = file.content(db);
     let lang_id = file.language_id(db);
     let file_id = file.file_id(db).clone();
+    let source_hash = crate::salsa_db::source_content_hash(content.as_str());
 
     if let Some(snapshot) = db.cached_class_extraction(&file_id)
-        && snapshot.content.as_ref() == content
+        && snapshot.source_hash == source_hash
         && snapshot.language_id.as_ref() == lang_id.as_ref()
     {
         return snapshot.classes;
@@ -93,7 +95,7 @@ pub fn get_extracted_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata
     db.store_class_extraction(
         file_id,
         crate::salsa_db::ClassExtractionSnapshot {
-            content: Arc::from(content.as_str()),
+            source_hash,
             language_id: lang_id,
             classes: classes.clone(),
         },

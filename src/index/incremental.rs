@@ -13,16 +13,21 @@ use crate::salsa_db::ParseTreeOrigin;
 pub struct SourceTextInput {
     pub uri: Arc<str>,
     pub language_id: Arc<str>,
-    pub content: String,
+    pub content: Arc<str>,
     pub origin: ClassOrigin,
 }
 
 impl SourceTextInput {
-    pub fn new(uri: Arc<str>, language_id: Arc<str>, content: String, origin: ClassOrigin) -> Self {
+    pub fn new(
+        uri: Arc<str>,
+        language_id: Arc<str>,
+        content: impl Into<Arc<str>>,
+        origin: ClassOrigin,
+    ) -> Self {
         Self {
             uri,
             language_id,
-            content,
+            content: content.into(),
             origin,
         }
     }
@@ -30,7 +35,7 @@ impl SourceTextInput {
 
 pub struct PreparedSource {
     language_id: Arc<str>,
-    content: String,
+    content: Arc<str>,
     origin: ClassOrigin,
     tree: Option<Tree>,
 }
@@ -39,7 +44,7 @@ impl PreparedSource {
     pub fn discover_internal_names(&self) -> Vec<Arc<str>> {
         crate::language::lookup_language(self.language_id.as_ref())
             .map(|language| {
-                language.discover_internal_names(self.content.as_str(), self.tree.as_ref())
+                language.discover_internal_names(self.content.as_ref(), self.tree.as_ref())
             })
             .unwrap_or_default()
     }
@@ -48,7 +53,7 @@ impl PreparedSource {
         crate::language::lookup_language(self.language_id.as_ref())
             .map(|language| {
                 language.extract_classes_from_source(
-                    self.content.as_str(),
+                    self.content.as_ref(),
                     &self.origin,
                     self.tree.as_ref(),
                     name_table,
@@ -70,7 +75,7 @@ impl SourceParseSession {
         crate::language::lookup_language(input.language_id.as_ref())?;
         let file = self.get_or_create_source_file(
             Arc::clone(&input.uri),
-            input.content.as_str(),
+            input.content.as_ref(),
             Arc::clone(&input.language_id),
         )?;
         let tree = crate::salsa_queries::parse::parse_tree(&self.db, file);

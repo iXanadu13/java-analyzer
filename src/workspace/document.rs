@@ -32,6 +32,13 @@ struct DocumentCacheStats {
     semantic_context_entries: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DocumentOverlaySnapshot {
+    pub(crate) uri: Url,
+    pub(crate) language_id: Arc<str>,
+    pub(crate) text: Arc<str>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SemanticContextCacheKey {
     pub document_version: i32,
@@ -200,16 +207,16 @@ impl DocumentStore {
         self.docs.get_mut(uri).map(|mut d| f(&mut d))
     }
 
-    pub fn snapshot_documents(&self) -> Vec<(Url, String, String)> {
+    pub(crate) fn snapshot_documents(&self) -> Vec<DocumentOverlaySnapshot> {
         self.docs
             .iter()
             .map(|entry| {
                 let doc = entry.value();
-                (
-                    doc.uri().clone(),
-                    doc.language_id().to_owned(),
-                    doc.text().to_owned(),
-                )
+                DocumentOverlaySnapshot {
+                    uri: doc.uri().clone(),
+                    language_id: Arc::clone(&doc.source.language_id),
+                    text: Arc::clone(&doc.source.text),
+                }
             })
             .collect()
     }

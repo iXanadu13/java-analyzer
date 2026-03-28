@@ -20,6 +20,7 @@ use crate::language::java::module_info::{
 };
 use crate::semantic::types::{SymbolProvider, parse_return_type_from_descriptor};
 
+pub mod archive_stub;
 pub mod bucket;
 pub mod cache;
 pub mod codebase;
@@ -34,6 +35,7 @@ pub mod source;
 pub mod view;
 pub mod workspace_index;
 
+pub use archive_stub::ArchiveClassStub;
 pub use bucket::BucketIndex;
 pub use handle::WorkspaceIndexHandle;
 pub use module_graph::ModuleGraph;
