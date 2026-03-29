@@ -5,10 +5,13 @@ use tree_sitter_utils::{
     Handler, Input, NodePredicate,
     constructors::Always,
     dispatch_on_kind, kind_is,
-    traversal::{any_child_of_kind, first_child_of_kind},
+    traversal::{ancestor_of_kind, any_child_of_kind, first_child_of_kind},
 };
 
-use crate::index::{AnnotationSummary, BucketIndex, ClassMetadata, ClassOrigin};
+use crate::index::{
+    AnnotationSummary, BucketIndex, ClassMetadata, ClassOrigin, NameTable, SourceDeclarationBatch,
+    SourcePosition, SourceRange,
+};
 use crate::jvm::descriptor::consume_one_descriptor_type;
 use crate::language::java::type_ctx::{SourceTypeCtx, build_java_descriptor};
 use crate::language::java::utils::{extract_type_parameters_prefix, source_type_to_signature};
@@ -92,6 +95,16 @@ pub fn extract_java_classes_from_tree(
     view: Option<&IndexView>,
 ) -> Vec<ClassMetadata> {
     extract_java_classes_from_root(source, tree.root_node(), origin, name_table, view)
+}
+
+pub fn extract_java_declarations_from_tree(
+    source: &str,
+    tree: &Tree,
+    origin: &ClassOrigin,
+    name_table: Option<Arc<NameTable>>,
+    view: Option<&IndexView>,
+) -> SourceDeclarationBatch {
+    extract_java_declarations_from_root(source, tree.root_node(), origin, name_table, view)
 }
 
 pub fn discover_java_names_from_tree(source: &str, tree: &Tree) -> Vec<Arc<str>> {
@@ -248,6 +261,34 @@ pub fn extract_java_classes_from_root(
     );
 
     results
+}
+
+pub fn extract_java_declarations_from_root(
+    source: &str,
+    root: Node<'_>,
+    origin: &ClassOrigin,
+    name_table: Option<Arc<NameTable>>,
+    view: Option<&IndexView>,
+) -> SourceDeclarationBatch {
+    let ctx = JavaContextExtractor::for_indexing_with_overview(source, name_table.clone());
+    let package = extract_package(&ctx, root);
+    let imports = crate::language::java::scope::extract_imports(&ctx, root);
+    let parsing_view = if let Some(view) = view {
+        if name_table.is_some() {
+            view.clone()
+        } else {
+            with_source_discovery_overlay(view, origin, discover_java_names_from_root(source, root))
+        }
+    } else {
+        source_discovery_view_from_root(source, root, origin)
+    };
+    let type_ctx = Arc::new(
+        SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(parsing_view),
+    );
+
+    let mut declarations = SourceDeclarationBatch::default();
+    collect_java_declarations(&ctx, root, &package, None, &type_ctx, &mut declarations);
+    declarations
 }
 
 fn source_discovery_view_from_root(
@@ -1459,6 +1500,311 @@ fn find_class_node<'a>(
         }
     }
     None
+}
+
+fn collect_java_declarations(
+    ctx: &JavaContextExtractor,
+    root_node: Node,
+    package: &Option<Arc<str>>,
+    initial_outer_internal: Option<Arc<str>>,
+    type_ctx: &Arc<SourceTypeCtx>,
+    declarations: &mut SourceDeclarationBatch,
+) {
+    let is_class_decl = kind_is(CLASS_DECL_KINDS);
+    let mut stack = vec![(root_node, initial_outer_internal)];
+
+    while let Some((node, outer_internal)) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if is_class_decl.test(Input::new(child, (), None)) {
+                let Some(internal_name) =
+                    declaration_internal_name(ctx, child, package, outer_internal.clone())
+                else {
+                    continue;
+                };
+
+                if let Some(name_node) = declaration_name_node(child) {
+                    declarations.insert_type(
+                        Arc::clone(&internal_name),
+                        source_range_from_node(name_node),
+                    );
+                }
+
+                if let Some(body) = child.child_by_field_name("body") {
+                    collect_class_member_declarations(
+                        ctx,
+                        body,
+                        internal_name.as_ref(),
+                        type_ctx,
+                        declarations,
+                    );
+                    stack.push((body, Some(internal_name)));
+                }
+            } else {
+                stack.push((child, outer_internal.clone()));
+            }
+        }
+    }
+}
+
+fn collect_class_member_declarations(
+    ctx: &JavaContextExtractor,
+    body: Node<'_>,
+    owner_internal: &str,
+    type_ctx: &SourceTypeCtx,
+    declarations: &mut SourceDeclarationBatch,
+) {
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        match child.kind() {
+            "method_declaration" => {
+                insert_method_declaration(ctx, child, owner_internal, type_ctx, declarations)
+            }
+            "constructor_declaration" | "compact_constructor_declaration" => {
+                insert_constructor_declaration(ctx, child, owner_internal, type_ctx, declarations)
+            }
+            "annotation_type_element_declaration" => insert_annotation_element_declaration(
+                ctx,
+                child,
+                owner_internal,
+                type_ctx,
+                declarations,
+            ),
+            "field_declaration" => {
+                insert_field_declarations(ctx, child, owner_internal, type_ctx, declarations)
+            }
+            "enum_body_declarations" | "ERROR" => collect_class_member_declarations(
+                ctx,
+                child,
+                owner_internal,
+                type_ctx,
+                declarations,
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn insert_method_declaration(
+    ctx: &JavaContextExtractor,
+    node: Node<'_>,
+    owner_internal: &str,
+    type_ctx: &SourceTypeCtx,
+    declarations: &mut SourceDeclarationBatch,
+) {
+    let Some(name_node) = declaration_name_node(node) else {
+        return;
+    };
+    let name = ctx.node_text(name_node);
+    if name == "<init>"
+        || name == "<clinit>"
+        || crate::language::java::members::is_java_keyword(name)
+    {
+        return;
+    }
+
+    let params_node = first_child_of_kind(node, "formal_parameters");
+    let params_text = params_node
+        .map(|params| ctx.node_text(params))
+        .unwrap_or("()");
+    let ret_type = declaration_return_type_text(ctx, node, "void");
+    let descriptor = build_java_descriptor(params_text, ret_type.as_str(), type_ctx);
+    declarations.insert_method(
+        owner_internal,
+        name,
+        descriptor,
+        source_range_from_node(name_node),
+    );
+}
+
+fn insert_constructor_declaration(
+    ctx: &JavaContextExtractor,
+    node: Node<'_>,
+    owner_internal: &str,
+    type_ctx: &SourceTypeCtx,
+    declarations: &mut SourceDeclarationBatch,
+) {
+    let Some(name_node) = declaration_name_node(node) else {
+        return;
+    };
+
+    let mut params_node = first_child_of_kind(node, "formal_parameters");
+    if node.kind() == "compact_constructor_declaration"
+        && let Some(record) = ancestor_of_kind(node, "record_declaration")
+    {
+        params_node = record
+            .child_by_field_name("parameters")
+            .or_else(|| first_child_of_kind(record, "formal_parameters"));
+    }
+
+    let params_text = params_node
+        .map(|params| ctx.node_text(params))
+        .unwrap_or("()");
+    let descriptor = build_java_descriptor(params_text, "void", type_ctx);
+    declarations.insert_method(
+        owner_internal,
+        "<init>",
+        descriptor,
+        source_range_from_node(name_node),
+    );
+}
+
+fn insert_annotation_element_declaration(
+    ctx: &JavaContextExtractor,
+    node: Node<'_>,
+    owner_internal: &str,
+    type_ctx: &SourceTypeCtx,
+    declarations: &mut SourceDeclarationBatch,
+) {
+    let Some(name_node) = node
+        .child_by_field_name("name")
+        .or_else(|| first_child_of_kind(node, "identifier"))
+    else {
+        return;
+    };
+    let name = ctx.node_text(name_node);
+    if crate::language::java::members::is_java_keyword(name) {
+        return;
+    }
+
+    let ret_type = declaration_return_type_text(ctx, node, "");
+    if ret_type.is_empty() {
+        return;
+    }
+
+    declarations.insert_method(
+        owner_internal,
+        name,
+        build_java_descriptor("()", ret_type.as_str(), type_ctx),
+        source_range_from_node(name_node),
+    );
+}
+
+fn insert_field_declarations(
+    ctx: &JavaContextExtractor,
+    node: Node<'_>,
+    owner_internal: &str,
+    type_ctx: &SourceTypeCtx,
+    declarations: &mut SourceDeclarationBatch,
+) {
+    let Some(_field_type) = field_type_text(ctx, node) else {
+        return;
+    };
+    let _ = type_ctx;
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+
+        let Some(name_node) = child
+            .child_by_field_name("name")
+            .or_else(|| first_child_of_kind(child, "identifier"))
+        else {
+            continue;
+        };
+        let name = ctx.node_text(name_node);
+        if crate::language::java::members::is_java_keyword(name) {
+            continue;
+        }
+
+        declarations.insert_field(owner_internal, name, source_range_from_node(name_node));
+    }
+}
+
+fn declaration_internal_name(
+    ctx: &JavaContextExtractor,
+    node: Node<'_>,
+    package: &Option<Arc<str>>,
+    outer_internal: Option<Arc<str>>,
+) -> Option<Arc<str>> {
+    scope::extract_enclosing_internal_name(ctx, Some(node), package.as_ref()).or_else(|| {
+        let name_node = declaration_name_node(node)?;
+        let simple_name = ctx.node_text(name_node);
+        if simple_name.is_empty() {
+            return None;
+        }
+
+        Some(match (package.as_deref(), outer_internal.as_deref()) {
+            (_, Some(outer)) => Arc::from(format!("{outer}${simple_name}").as_str()),
+            (Some(pkg), None) => Arc::from(format!("{pkg}/{simple_name}").as_str()),
+            (None, None) => Arc::from(simple_name),
+        })
+    })
+}
+
+fn declaration_name_node(node: Node<'_>) -> Option<Node<'_>> {
+    node.child_by_field_name("name")
+        .or_else(|| first_child_of_kind(node, "identifier"))
+}
+
+fn field_type_text<'a>(ctx: &'a JavaContextExtractor, node: Node<'_>) -> Option<&'a str> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "void_type"
+            | "integral_type"
+            | "floating_point_type"
+            | "boolean_type"
+            | "type_identifier"
+            | "array_type"
+            | "generic_type" => return Some(ctx.node_text(child)),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn declaration_return_type_text(
+    ctx: &JavaContextExtractor,
+    node: Node<'_>,
+    default_type: &str,
+) -> String {
+    let mut ret_type = node
+        .child_by_field_name("type")
+        .filter(|child| declaration_return_type_kind(child.kind()))
+        .or_else(|| {
+            let mut cursor = node.walk();
+            node.children(&mut cursor)
+                .find(|child| declaration_return_type_kind(child.kind()))
+        })
+        .map(|child| ctx.node_text(child).to_string())
+        .unwrap_or_else(|| default_type.to_string());
+
+    if let Some(dimensions) = node.child_by_field_name("dimensions") {
+        ret_type.push_str(ctx.node_text(dimensions));
+    }
+
+    ret_type
+}
+
+fn declaration_return_type_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "void_type"
+            | "integral_type"
+            | "floating_point_type"
+            | "boolean_type"
+            | "type_identifier"
+            | "array_type"
+            | "generic_type"
+    )
+}
+
+fn source_range_from_node(node: Node<'_>) -> SourceRange {
+    let start = node.start_position();
+    let end = node.end_position();
+    SourceRange {
+        start: SourcePosition {
+            line: start.row as u32,
+            character: start.column as u32,
+        },
+        end: SourcePosition {
+            line: end.row as u32,
+            character: end.column as u32,
+        },
+    }
 }
 
 fn find_member_node<'a>(

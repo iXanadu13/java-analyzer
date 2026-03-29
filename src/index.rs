@@ -337,6 +337,94 @@ pub enum NavigationDeclKind {
     Field,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SourcePosition {
+    pub line: u32,
+    pub character: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SourceRange {
+    pub start: SourcePosition,
+    pub end: SourcePosition,
+}
+
+impl From<SourceRange> for tower_lsp::lsp_types::Range {
+    fn from(value: SourceRange) -> Self {
+        Self {
+            start: tower_lsp::lsp_types::Position {
+                line: value.start.line,
+                character: value.start.character,
+            },
+            end: tower_lsp::lsp_types::Position {
+                line: value.end.line,
+                character: value.end.character,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceDeclarationBatch {
+    pub type_ranges: FxHashMap<Arc<str>, SourceRange>,
+    pub method_ranges: FxHashMap<(Arc<str>, Arc<str>, Arc<str>), SourceRange>,
+    pub field_ranges: FxHashMap<(Arc<str>, Arc<str>), SourceRange>,
+}
+
+impl SourceDeclarationBatch {
+    pub fn insert_type(&mut self, internal_name: impl Into<Arc<str>>, range: SourceRange) {
+        self.type_ranges.insert(internal_name.into(), range);
+    }
+
+    pub fn insert_method(
+        &mut self,
+        owner_internal: impl Into<Arc<str>>,
+        name: impl Into<Arc<str>>,
+        descriptor: impl Into<Arc<str>>,
+        range: SourceRange,
+    ) {
+        self.method_ranges.insert(
+            (owner_internal.into(), name.into(), descriptor.into()),
+            range,
+        );
+    }
+
+    pub fn insert_field(
+        &mut self,
+        owner_internal: impl Into<Arc<str>>,
+        name: impl Into<Arc<str>>,
+        range: SourceRange,
+    ) {
+        self.field_ranges
+            .insert((owner_internal.into(), name.into()), range);
+    }
+
+    pub fn type_range(&self, internal_name: &str) -> Option<SourceRange> {
+        self.type_ranges.get(internal_name).copied()
+    }
+
+    pub fn method_range(
+        &self,
+        owner_internal: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<SourceRange> {
+        self.method_ranges
+            .get(&(
+                Arc::from(owner_internal),
+                Arc::from(name),
+                Arc::from(descriptor),
+            ))
+            .copied()
+    }
+
+    pub fn field_range(&self, owner_internal: &str, name: &str) -> Option<SourceRange> {
+        self.field_ranges
+            .get(&(Arc::from(owner_internal), Arc::from(name)))
+            .copied()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NavigationSymbol {
     pub target_internal_name: Arc<str>,
@@ -350,6 +438,7 @@ pub struct NavigationSymbol {
 pub enum NavigationTarget {
     SourceFile {
         uri: Arc<str>,
+        exact_range: Option<SourceRange>,
         symbol: NavigationSymbol,
     },
     ZipSource {

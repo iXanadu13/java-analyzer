@@ -218,23 +218,29 @@ fn goto_resolved_symbol_blocking(
 
     request.check_cancelled("goto.before_origin_lookup")?;
     match projected {
-        NavigationTarget::SourceFile { uri, symbol } => {
+        NavigationTarget::SourceFile {
+            uri,
+            exact_range,
+            symbol,
+        } => {
             let Some(target_uri) = Url::parse(uri.as_ref()).ok() else {
                 return Ok(GotoPrepared::Ready(None));
             };
 
-            let content = workspace
-                .documents
-                .with_doc(&target_uri, |d| d.source().text().to_owned())
-                .or_else(|| {
-                    target_uri
-                        .to_file_path()
-                        .ok()
-                        .and_then(|p| std::fs::read_to_string(p).ok())
-                });
-            let range = content
-                .as_deref()
-                .and_then(|content| find_resolved_symbol_range(content, &symbol, view));
+            let range = exact_range.map(Into::into).or_else(|| {
+                let content = workspace
+                    .documents
+                    .with_doc(&target_uri, |d| d.source().text().to_owned())
+                    .or_else(|| {
+                        target_uri
+                            .to_file_path()
+                            .ok()
+                            .and_then(|p| std::fs::read_to_string(p).ok())
+                    });
+                content
+                    .as_deref()
+                    .and_then(|content| find_resolved_symbol_range(content, &symbol, view))
+            });
 
             Ok(GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(
                 Location {
@@ -649,7 +655,9 @@ fn extract_class_bytes(jar: &str, internal: &str) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{ClassOrigin, IndexedArchiveData, IndexedJavaModule};
+    use crate::index::{
+        ClassOrigin, IndexScope, IndexedArchiveData, IndexedJavaModule, MethodRef, ModuleId,
+    };
     use crate::language::LanguageRegistry;
     use crate::language::java::class_parser::parse_java_source_via_tree_for_test;
     use crate::language::java::module_info::JavaModuleDescriptor;
@@ -827,6 +835,72 @@ mod tests {
                 let start = location.range.start.character as usize;
                 let end = location.range.end.character as usize;
                 assert_eq!(&line[start..end], "Leaf");
+            }
+            _ => panic!("expected source goto location"),
+        }
+    }
+
+    #[test]
+    fn test_goto_resolved_source_method_uses_indexed_exact_range_without_loading_file() {
+        let workspace = Arc::new(Workspace::new());
+        let uri = Url::parse("file:///workspace/Missing.java").expect("uri");
+        let source = indoc::indoc! {r#"
+            package com.example;
+
+            class Demo {
+                void ping() {}
+            }
+        "#}
+        .to_string();
+        let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
+        let mut parser = crate::language::java::make_java_parser();
+        let tree = parser.parse(&source, None).expect("java tree");
+        let classes = crate::language::java::class_parser::extract_java_classes_from_tree(
+            &source, &tree, &origin, None, None,
+        );
+        let declarations = crate::language::java::class_parser::extract_java_declarations_from_tree(
+            &source, &tree, &origin, None, None,
+        );
+        workspace.index.update(|index| {
+            index.update_source_with_declarations(
+                IndexScope {
+                    module: ModuleId::ROOT,
+                },
+                origin.clone(),
+                classes,
+                Some(&declarations),
+            )
+        });
+
+        let view = workspace.index.load().view(IndexScope {
+            module: ModuleId::ROOT,
+        });
+        let request = RequestContext::new(
+            "test_goto_exact_range",
+            &uri,
+            RequestFamily::GotoDefinition,
+            1,
+            CancellationToken::new(),
+        );
+
+        let prepared = goto_resolved_symbol_blocking(
+            Arc::clone(&workspace),
+            &view,
+            ResolvedSymbol::Method(MethodRef::source(
+                TypeRef::source("com/example/Demo"),
+                "ping",
+                "()V",
+                0,
+            )),
+            &request,
+        )
+        .expect("goto result");
+
+        match prepared {
+            GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(location))) => {
+                assert_eq!(location.uri, uri);
+                assert_range_matches_name(&source, location.range, "ping");
+                assert!(location.range.start.line > 0);
             }
             _ => panic!("expected source goto location"),
         }

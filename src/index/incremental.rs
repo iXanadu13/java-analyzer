@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Tree;
 
-use super::{ClassMetadata, ClassOrigin, NameTable};
+use super::{ClassMetadata, ClassOrigin, NameTable, SourceDeclarationBatch};
 use crate::salsa_db::ParseTreeOrigin;
 
 pub struct SourceTextInput {
@@ -61,6 +61,32 @@ impl PreparedSource {
                 )
             })
             .unwrap_or_default()
+    }
+
+    pub fn extract_index_data(
+        &self,
+        name_table: Option<Arc<NameTable>>,
+    ) -> (Vec<ClassMetadata>, Option<SourceDeclarationBatch>) {
+        let classes = self.extract_classes(name_table.clone());
+        let declarations = if self.language_id.as_ref() == "java" {
+            self.tree.as_ref().map(|tree| {
+                crate::language::java::class_parser::extract_java_declarations_from_tree(
+                    self.content.as_ref(),
+                    tree,
+                    &self.origin,
+                    name_table,
+                    None,
+                )
+            })
+        } else {
+            None
+        };
+
+        (classes, declarations)
+    }
+
+    pub fn origin(&self) -> &ClassOrigin {
+        &self.origin
     }
 }
 

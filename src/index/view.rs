@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use crate::index::{
     ArtifactClassHandle, BucketIndex, ClassMetadata, FieldRef, FieldSummary, MethodRef,
     MethodSummary, NameTable, NavigationDeclKind, NavigationSymbol, NavigationTarget, ScopeLayer,
-    ScopeSnapshot, TypeRef,
+    ScopeSnapshot, SourceRange, TypeRef,
 };
 use crate::request_metrics::RequestMetrics;
 
@@ -344,7 +344,8 @@ impl IndexView {
             fallback_name: Some(self.class_ref_direct_name(&class_ref)?),
             decl_kind: NavigationDeclKind::Type,
         };
-        self.navigation_target_from_class_ref(&class_ref, symbol)
+        let exact_range = self.type_ref_declaration_range(&class_ref);
+        self.navigation_target_from_class_ref(&class_ref, symbol, exact_range)
     }
 
     pub fn project_method_navigation_target(
@@ -359,7 +360,8 @@ impl IndexView {
             fallback_name: Some(Arc::clone(&method_ref.name)),
             decl_kind: NavigationDeclKind::Method,
         };
-        self.navigation_target_from_class_ref(&class_ref, symbol)
+        let exact_range = self.method_ref_declaration_range(&class_ref, method_ref);
+        self.navigation_target_from_class_ref(&class_ref, symbol, exact_range)
     }
 
     pub fn project_field_navigation_target(
@@ -374,7 +376,8 @@ impl IndexView {
             fallback_name: Some(Arc::clone(&field_ref.name)),
             decl_kind: NavigationDeclKind::Field,
         };
-        self.navigation_target_from_class_ref(&class_ref, symbol)
+        let exact_range = self.field_ref_declaration_range(&class_ref, field_ref);
+        self.navigation_target_from_class_ref(&class_ref, symbol, exact_range)
     }
 
     pub fn get_source_type_name(&self, internal: &str) -> Option<String> {
@@ -1105,11 +1108,14 @@ impl IndexView {
         &self,
         class_ref: &ClassHandleRef,
         symbol: NavigationSymbol,
+        exact_range: Option<SourceRange>,
     ) -> Option<NavigationTarget> {
         match self.class_ref_origin(class_ref)? {
-            crate::index::ClassOrigin::SourceFile(uri) => {
-                Some(NavigationTarget::SourceFile { uri, symbol })
-            }
+            crate::index::ClassOrigin::SourceFile(uri) => Some(NavigationTarget::SourceFile {
+                uri,
+                exact_range,
+                symbol,
+            }),
             crate::index::ClassOrigin::ZipSource {
                 zip_path,
                 entry_name,
@@ -1122,6 +1128,48 @@ impl IndexView {
                 Some(NavigationTarget::Bytecode { jar_path, symbol })
             }
             crate::index::ClassOrigin::Unknown => None,
+        }
+    }
+
+    fn type_ref_declaration_range(&self, class_ref: &ClassHandleRef) -> Option<SourceRange> {
+        match class_ref {
+            ClassHandleRef::Overlay {
+                bucket,
+                internal_name,
+            } => bucket.type_declaration_range(internal_name.as_ref()),
+            ClassHandleRef::Artifact(_) => None,
+        }
+    }
+
+    fn method_ref_declaration_range(
+        &self,
+        class_ref: &ClassHandleRef,
+        method_ref: &MethodRef,
+    ) -> Option<SourceRange> {
+        match class_ref {
+            ClassHandleRef::Overlay {
+                bucket,
+                internal_name,
+            } => bucket.method_declaration_range(
+                internal_name.as_ref(),
+                method_ref.name.as_ref(),
+                method_ref.descriptor.as_ref(),
+            ),
+            ClassHandleRef::Artifact(_) => None,
+        }
+    }
+
+    fn field_ref_declaration_range(
+        &self,
+        class_ref: &ClassHandleRef,
+        field_ref: &FieldRef,
+    ) -> Option<SourceRange> {
+        match class_ref {
+            ClassHandleRef::Overlay {
+                bucket,
+                internal_name,
+            } => bucket.field_declaration_range(internal_name.as_ref(), field_ref.name.as_ref()),
+            ClassHandleRef::Artifact(_) => None,
         }
     }
 

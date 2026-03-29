@@ -14,7 +14,7 @@ use crate::index::view::IndexView;
 use crate::index::{
     AnalysisContextKey, ArtifactId, ArtifactReaderCache, BucketIndex, ClassMetadata, ClassOrigin,
     ClasspathEntry, ClasspathId, IndexScope, IndexedArchiveData, IndexedJavaModule, ModuleGraph,
-    ModuleId, ModuleIndex, NameTable, ScopeLayer, ScopeSnapshot, index_jar,
+    ModuleId, ModuleIndex, NameTable, ScopeLayer, ScopeSnapshot, SourceDeclarationBatch, index_jar,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -109,8 +109,20 @@ impl WorkspaceIndex {
         origin: ClassOrigin,
         classes: Vec<ClassMetadata>,
     ) -> bool {
+        self.update_source_with_declarations(scope, origin, classes, None)
+    }
+
+    pub fn update_source_with_declarations(
+        &self,
+        scope: IndexScope,
+        origin: ClassOrigin,
+        classes: Vec<ClassMetadata>,
+        declarations: Option<&SourceDeclarationBatch>,
+    ) -> bool {
         let module = self.ensure_module(scope.module, default_module_name(scope.module));
-        let changed = module.source.update_source(origin, classes);
+        let changed = module
+            .source
+            .update_source_with_declarations(origin, classes, declarations);
         if changed {
             self.invalidate_analysis_caches();
         }
@@ -124,8 +136,24 @@ impl WorkspaceIndex {
         origin: ClassOrigin,
         classes: Vec<ClassMetadata>,
     ) -> bool {
+        self.update_source_in_context_with_declarations(module, source_root, origin, classes, None)
+    }
+
+    pub fn update_source_in_context_with_declarations(
+        &self,
+        module: ModuleId,
+        source_root: Option<SourceRootId>,
+        origin: ClassOrigin,
+        classes: Vec<ClassMetadata>,
+        declarations: Option<&SourceDeclarationBatch>,
+    ) -> bool {
         let module = self.ensure_module(module, default_module_name(module));
-        let changed = module.update_source_in_root(source_root, origin, classes);
+        let changed = module.update_source_in_root_with_declarations(
+            source_root,
+            origin,
+            classes,
+            declarations,
+        );
         if changed {
             self.invalidate_analysis_caches();
         }

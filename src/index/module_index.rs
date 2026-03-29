@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 
 use crate::build_integration::SourceRootId;
 use crate::index::scope::{ClasspathId, ModuleId};
-use crate::index::{ArtifactId, BucketIndex, ClassMetadata, ClassOrigin};
+use crate::index::{ArtifactId, BucketIndex, ClassMetadata, ClassOrigin, SourceDeclarationBatch};
 
 #[derive(Clone)]
 pub enum ClasspathEntry {
@@ -86,7 +86,17 @@ impl ModuleIndex {
     }
 
     pub fn update_source(&self, origin: ClassOrigin, classes: Vec<ClassMetadata>) {
-        self.source.update_source(origin, classes);
+        self.update_source_with_declarations(origin, classes, None);
+    }
+
+    pub fn update_source_with_declarations(
+        &self,
+        origin: ClassOrigin,
+        classes: Vec<ClassMetadata>,
+        declarations: Option<&SourceDeclarationBatch>,
+    ) {
+        self.source
+            .update_source_with_declarations(origin, classes, declarations);
     }
 
     pub fn set_source_roots(&self, roots: Vec<(SourceRootId, ClasspathId)>) {
@@ -111,6 +121,16 @@ impl ModuleIndex {
         origin: ClassOrigin,
         classes: Vec<ClassMetadata>,
     ) -> bool {
+        self.update_source_in_root_with_declarations(source_root, origin, classes, None)
+    }
+
+    pub fn update_source_in_root_with_declarations(
+        &self,
+        source_root: Option<SourceRootId>,
+        origin: ClassOrigin,
+        classes: Vec<ClassMetadata>,
+        declarations: Option<&SourceDeclarationBatch>,
+    ) -> bool {
         let state = self.state.read();
         if let Some(root_id) = source_root
             && let Some(root) = state.source_roots.get(&root_id)
@@ -121,7 +141,9 @@ impl ModuleIndex {
                 class_count = classes.len(),
                 "update_source_in_root: adding to source root bucket"
             );
-            return root.bucket.update_source(origin, classes);
+            return root
+                .bucket
+                .update_source_with_declarations(origin, classes, declarations);
         }
         drop(state);
         tracing::debug!(
@@ -130,7 +152,8 @@ impl ModuleIndex {
             class_count = classes.len(),
             "update_source_in_root: adding to module-level source bucket (fallback)"
         );
-        self.source.update_source(origin, classes)
+        self.source
+            .update_source_with_declarations(origin, classes, declarations)
     }
 
     pub fn remove_source_origin_in_root(

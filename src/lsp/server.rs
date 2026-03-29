@@ -207,6 +207,7 @@ impl Backend {
 
         let (
             classes,
+            declarations,
             parse_origin_before,
             parse_origin_after,
             extract_tracked_elapsed,
@@ -225,7 +226,7 @@ impl Backend {
                 crate::salsa_queries::parse::cached_parse_tree_origin(&*db, salsa_file);
             let materialize_started = Instant::now();
             let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
-            let classes = workspace.extract_salsa_classes_for_index_context(
+            let (classes, declarations) = workspace.extract_salsa_index_data_for_context(
                 &db,
                 salsa_file,
                 &origin,
@@ -235,6 +236,7 @@ impl Backend {
             let extract_materialize_elapsed = materialize_started.elapsed();
             (
                 classes,
+                declarations,
                 parse_origin_before,
                 parse_origin_after,
                 extract_tracked_elapsed,
@@ -264,7 +266,13 @@ impl Backend {
         );
 
         let index_updated = workspace.index.update(|index| {
-            index.update_source_in_context(analysis.module, analysis.source_root, origin, classes)
+            index.update_source_in_context_with_declarations(
+                analysis.module,
+                analysis.source_root,
+                origin,
+                classes,
+                declarations.as_ref(),
+            )
         });
         {
             let db = workspace.salsa_db.lock();

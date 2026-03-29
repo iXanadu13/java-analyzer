@@ -12,7 +12,7 @@ use rustc_hash::FxHashSet;
 
 use crate::index::{
     ArchiveClassStub, ClassMetadata, ClassOrigin, FieldSummary, IndexedJavaModule, MethodSummary,
-    NameTable, intern_str,
+    NameTable, SourceDeclarationBatch, SourceRange, intern_str,
 };
 
 type ClassId = usize;
@@ -96,6 +96,9 @@ struct BucketState {
     by_internal: HashMap<Arc<str>, ClassId>,
     modules: HashMap<Arc<str>, Arc<IndexedJavaModule>>,
     by_origin: HashMap<ClassOrigin, Vec<ClassId>>,
+    type_ranges: HashMap<Arc<str>, SourceRange>,
+    method_ranges: HashMap<(Arc<str>, Arc<str>, Arc<str>), SourceRange>,
+    field_ranges: HashMap<(Arc<str>, Arc<str>), SourceRange>,
     simple_name_index: HashMap<Arc<str>, Vec<ClassId>>,
     package_index: HashMap<Arc<str>, Vec<ClassId>>,
     owner_index: HashMap<OwnerKey, Vec<ClassId>>,
@@ -115,6 +118,9 @@ impl BucketIndex {
             by_internal: HashMap::with_capacity(100_000),
             modules: HashMap::new(),
             by_origin: HashMap::new(),
+            type_ranges: HashMap::new(),
+            method_ranges: HashMap::new(),
+            field_ranges: HashMap::new(),
             simple_name_index: HashMap::with_capacity(100_000),
             package_index: HashMap::with_capacity(10_000),
             owner_index: HashMap::with_capacity(50_000),
@@ -129,11 +135,23 @@ impl BucketIndex {
     }
 
     pub fn add_classes(&self, classes: Vec<ClassMetadata>) {
+        self.add_classes_with_declarations(classes, None);
+    }
+
+    pub fn add_classes_with_declarations(
+        &self,
+        classes: Vec<ClassMetadata>,
+        declarations: Option<&SourceDeclarationBatch>,
+    ) {
         let mut inner = self.inner.write();
 
         for mut class in classes {
             Self::intern_class(&mut class);
-            Self::insert_record_locked(&mut inner, StoredClass::from_metadata(Arc::new(class)));
+            Self::insert_record_locked(
+                &mut inner,
+                StoredClass::from_metadata(Arc::new(class)),
+                declarations,
+            );
         }
 
         inner.mro_cache.clear();
@@ -145,7 +163,7 @@ impl BucketIndex {
         for mut class in classes {
             Self::intern_class(&mut class);
             let stub = ArchiveClassStub::from_class_metadata(class);
-            Self::insert_record_locked(&mut inner, StoredClass::from_archive_stub(stub));
+            Self::insert_record_locked(&mut inner, StoredClass::from_archive_stub(stub), None);
         }
 
         inner.mro_cache.clear();
@@ -160,6 +178,15 @@ impl BucketIndex {
     }
 
     pub fn update_source(&self, origin: ClassOrigin, classes: Vec<ClassMetadata>) -> bool {
+        self.update_source_with_declarations(origin, classes, None)
+    }
+
+    pub fn update_source_with_declarations(
+        &self,
+        origin: ClassOrigin,
+        classes: Vec<ClassMetadata>,
+        declarations: Option<&SourceDeclarationBatch>,
+    ) -> bool {
         let mut filtered = Vec::new();
 
         for c in classes {
@@ -183,8 +210,38 @@ impl BucketIndex {
         }
 
         self.remove_by_origin(&origin);
-        self.add_classes(filtered);
+        self.add_classes_with_declarations(filtered, declarations);
         true
+    }
+
+    pub fn type_declaration_range(&self, internal_name: &str) -> Option<SourceRange> {
+        let inner = self.inner.read();
+        inner.type_ranges.get(internal_name).copied()
+    }
+
+    pub fn method_declaration_range(
+        &self,
+        owner_internal: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<SourceRange> {
+        let inner = self.inner.read();
+        inner
+            .method_ranges
+            .get(&(
+                Arc::from(owner_internal),
+                Arc::from(name),
+                Arc::from(descriptor),
+            ))
+            .copied()
+    }
+
+    pub fn field_declaration_range(&self, owner_internal: &str, name: &str) -> Option<SourceRange> {
+        let inner = self.inner.read();
+        inner
+            .field_ranges
+            .get(&(Arc::from(owner_internal), Arc::from(name)))
+            .copied()
     }
 
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
@@ -542,7 +599,12 @@ impl BucketIndex {
             .collect()
     }
 
-    fn insert_record_locked(inner: &mut BucketState, class: StoredClass) {
+    fn insert_record_locked(
+        inner: &mut BucketState,
+        class: StoredClass,
+        declarations: Option<&SourceDeclarationBatch>,
+    ) {
+        let declaration_meta = declarations.map(|_| class.materialize());
         let internal = Arc::clone(&class.internal_name);
         let simple = Arc::clone(&class.name);
         let pkg = class.package.clone();
@@ -582,6 +644,9 @@ impl BucketIndex {
         }
 
         inner.by_origin.entry(origin).or_default().push(class_id);
+        if let Some(meta) = declaration_meta.as_deref() {
+            Self::insert_declarations_for_metadata_locked(inner, meta, declarations);
+        }
     }
 
     fn remove_class_by_id_locked(inner: &mut BucketState, class_id: ClassId) -> bool {
@@ -605,6 +670,7 @@ impl BucketIndex {
         if inner.by_internal.get(class.internal_name.as_ref()).copied() == Some(class_id) {
             inner.by_internal.remove(class.internal_name.as_ref());
         }
+        Self::remove_declarations_for_class_locked(inner, &class);
 
         Self::trim_id_index_locked(&mut inner.simple_name_index, class.name.as_ref(), class_id);
 
@@ -617,6 +683,66 @@ impl BucketIndex {
 
         inner.free_class_ids.push(class_id);
         Some(class)
+    }
+
+    fn insert_declarations_for_metadata_locked(
+        inner: &mut BucketState,
+        class: &ClassMetadata,
+        declarations: Option<&SourceDeclarationBatch>,
+    ) {
+        let Some(declarations) = declarations else {
+            return;
+        };
+
+        let internal_name = class.internal_name.as_ref();
+        if let Some(range) = declarations.type_range(internal_name) {
+            inner
+                .type_ranges
+                .insert(Arc::clone(&class.internal_name), range);
+        }
+
+        for method in &class.methods {
+            if let Some(range) = declarations.method_range(
+                internal_name,
+                method.name.as_ref(),
+                method.desc().as_ref(),
+            ) {
+                inner.method_ranges.insert(
+                    (
+                        Arc::clone(&class.internal_name),
+                        Arc::clone(&method.name),
+                        method.desc(),
+                    ),
+                    range,
+                );
+            }
+        }
+        for field in &class.fields {
+            if let Some(range) = declarations.field_range(internal_name, field.name.as_ref()) {
+                inner.field_ranges.insert(
+                    (Arc::clone(&class.internal_name), Arc::clone(&field.name)),
+                    range,
+                );
+            }
+        }
+    }
+
+    fn remove_declarations_for_class_locked(inner: &mut BucketState, class: &StoredClass) {
+        inner.type_ranges.remove(class.internal_name.as_ref());
+
+        let materialized = class.materialize();
+        for method in &materialized.methods {
+            inner.method_ranges.remove(&(
+                Arc::clone(&class.internal_name),
+                Arc::clone(&method.name),
+                method.desc(),
+            ));
+        }
+        for field in &materialized.fields {
+            inner
+                .field_ranges
+                .remove(&(Arc::clone(&class.internal_name), Arc::clone(&field.name)));
+        }
     }
 
     fn trim_id_index_locked(

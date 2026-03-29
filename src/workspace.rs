@@ -19,8 +19,8 @@ use crate::index::codebase::{
 use crate::index::incremental::{SourceTextInput, prepare_source_inputs};
 use crate::index::{
     ArtifactKind, ArtifactMetadata, ClassMetadata, ClassOrigin, ClasspathId, IndexScope,
-    IndexedArchiveData, IndexedJavaModule, ModuleId, StoredArtifact, WorkspaceIndex,
-    WorkspaceIndexHandle,
+    IndexedArchiveData, IndexedJavaModule, ModuleId, SourceDeclarationBatch, StoredArtifact,
+    WorkspaceIndex, WorkspaceIndexHandle,
 };
 use crate::language::Language;
 use crate::language::java::module_info::JavaModuleDescriptor;
@@ -878,7 +878,7 @@ impl Workspace {
         let mut current_indexed_uris = HashSet::new();
         let mut java_module_descriptors = HashMap::new();
         for (module_id, root_id, classpath, root_path, source_inputs) in indexed_roots {
-            let (classes, indexed_uris, descriptors) =
+            let (classes, declarations_by_origin, indexed_uris, descriptors) =
                 self.index_source_inputs_with_shared_salsa(source_inputs, None);
             current_indexed_uris.extend(indexed_uris);
             java_module_descriptors.extend(descriptors);
@@ -899,7 +899,13 @@ impl Workspace {
                     class_count = classes.len(),
                     "indexing imported workspace source root"
                 );
-                new_index.update_source_in_context(module_id, Some(root_id), origin, classes);
+                new_index.update_source_in_context_with_declarations(
+                    module_id,
+                    Some(root_id),
+                    origin.clone(),
+                    classes,
+                    declarations_by_origin.get(&origin),
+                );
             }
         }
 
@@ -919,13 +925,13 @@ impl Workspace {
             );
 
             // Use Salsa queries for incremental parsing
-            let classes = {
+            let (classes, declarations) = {
                 let db = self.salsa_db.lock();
 
                 // Trigger parse query (memoized) - this tracks changes
                 let _result = crate::salsa_queries::index::extract_classes(&*db, salsa_file);
 
-                self.extract_salsa_classes_for_index_context(
+                self.extract_salsa_index_data_for_context(
                     &db, salsa_file, &origin, &new_index, context,
                 )
             };
@@ -938,11 +944,12 @@ impl Workspace {
                 class_count = classes.len(),
                 "reindexing open document against workspace model (using Salsa)"
             );
-            new_index.update_source_in_context(
+            new_index.update_source_in_context_with_declarations(
                 context.module,
                 context.source_root,
                 origin,
                 classes,
+                declarations.as_ref(),
             );
 
             match Self::extract_java_module_descriptor_for_source(
@@ -1003,7 +1010,7 @@ impl Workspace {
             source_inputs
         })
         .await?;
-        let (classes, current_indexed_uris, java_module_descriptors) =
+        let (classes, declarations_by_origin, current_indexed_uris, java_module_descriptors) =
             self.index_source_inputs_with_shared_salsa(source_inputs, None);
         let scope = IndexScope {
             module: ModuleId::ROOT,
@@ -1021,7 +1028,12 @@ impl Workspace {
                 .push(class);
         }
         for (origin, classes) in by_origin {
-            index.update_source(scope, origin, classes);
+            index.update_source_with_declarations(
+                scope,
+                origin.clone(),
+                classes,
+                declarations_by_origin.get(&origin),
+            );
         }
         self.prune_indexed_salsa_files(&current_indexed_uris);
         self.replace_java_module_registry(java_module_descriptors);
@@ -1319,16 +1331,33 @@ impl Workspace {
         index: &WorkspaceIndex,
         context: AnalysisContext,
     ) -> Vec<ClassMetadata> {
+        self.extract_salsa_index_data_for_context(db, salsa_file, origin, index, context)
+            .0
+    }
+
+    pub(crate) fn extract_salsa_index_data_for_context(
+        &self,
+        db: &crate::salsa_db::Database,
+        salsa_file: crate::salsa_db::SourceFile,
+        origin: &ClassOrigin,
+        index: &WorkspaceIndex,
+        context: AnalysisContext,
+    ) -> (Vec<ClassMetadata>, Option<SourceDeclarationBatch>) {
         let Some(language) = crate::language::lookup_language(salsa_file.language_id(db).as_ref())
         else {
-            return crate::salsa_queries::index::get_extracted_classes(db, salsa_file);
+            return (
+                crate::salsa_queries::index::get_extracted_classes(db, salsa_file),
+                None,
+            );
         };
 
         let live_index = db.workspace_index();
         let can_use_live_salsa_context = std::ptr::eq(index, live_index.as_ref());
+        let view =
+            index.view_for_analysis_context(context.module, context.classpath, context.source_root);
 
         if salsa_file.language_id(db).as_ref() == "java" && can_use_live_salsa_context {
-            return crate::salsa_queries::java::parse_java_classes_for_analysis_context(
+            let classes = crate::salsa_queries::java::parse_java_classes_for_analysis_context(
                 db,
                 salsa_file,
                 context.module,
@@ -1338,18 +1367,22 @@ impl Workspace {
             )
             .as_ref()
             .clone();
+            let declarations =
+                Self::extract_java_declarations_for_salsa_file(db, salsa_file, origin, Some(&view));
+            return (classes, declarations);
         }
 
-        let view =
-            index.view_for_analysis_context(context.module, context.classpath, context.source_root);
         if salsa_file.language_id(db).as_ref() == "java" {
-            return language.extract_classes_with_index_salsa(
+            let classes = language.extract_classes_with_index_salsa(
                 db,
                 salsa_file,
                 origin,
                 None,
                 Some(&view),
             );
+            let declarations =
+                Self::extract_java_declarations_for_salsa_file(db, salsa_file, origin, Some(&view));
+            return (classes, declarations);
         }
         let name_table = index.build_name_table_for_analysis_context(
             context.module,
@@ -1357,12 +1390,30 @@ impl Workspace {
             context.source_root,
         );
 
-        language.extract_classes_with_index_salsa(
-            db,
-            salsa_file,
-            origin,
-            Some(name_table),
-            Some(&view),
+        (
+            language.extract_classes_with_index_salsa(
+                db,
+                salsa_file,
+                origin,
+                Some(name_table),
+                Some(&view),
+            ),
+            None,
+        )
+    }
+
+    fn extract_java_declarations_for_salsa_file(
+        db: &crate::salsa_db::Database,
+        salsa_file: crate::salsa_db::SourceFile,
+        origin: &ClassOrigin,
+        view: Option<&crate::index::IndexView>,
+    ) -> Option<SourceDeclarationBatch> {
+        let content = salsa_file.content(db);
+        let tree = crate::salsa_queries::parse::parse_tree(db, salsa_file)?;
+        Some(
+            crate::language::java::class_parser::extract_java_declarations_from_tree(
+                content, &tree, origin, None, view,
+            ),
         )
     }
 
@@ -1475,6 +1526,7 @@ impl Workspace {
         name_table: Option<Arc<crate::index::NameTable>>,
     ) -> (
         Vec<ClassMetadata>,
+        HashMap<ClassOrigin, SourceDeclarationBatch>,
         HashSet<Url>,
         Vec<(Url, Arc<JavaModuleDescriptor>)>,
     ) {
@@ -1541,21 +1593,35 @@ impl Workspace {
             None => crate::index::NameTable::from_names(discovered_names),
         };
 
-        let mut classes = transient_sources
-            .into_iter()
-            .flat_map(|source| source.extract_classes(Some(enriched_name_table.clone())))
-            .collect::<Vec<_>>();
+        let mut classes = Vec::new();
+        let mut declarations_by_origin = HashMap::new();
+        for source in transient_sources {
+            let origin = source.origin().clone();
+            let (source_classes, declarations) =
+                source.extract_index_data(Some(enriched_name_table.clone()));
+            classes.extend(source_classes);
+            if let Some(declarations) = declarations {
+                declarations_by_origin.insert(origin, declarations);
+            }
+        }
 
-        classes.extend({
+        let prepared_updates = {
             let db = self.salsa_db.lock();
             prepared
                 .into_iter()
-                .flat_map(|source| source.extract_classes(&db, Some(enriched_name_table.clone())))
+                .map(|source| source.extract_index_data(&db, Some(enriched_name_table.clone())))
                 .collect::<Vec<_>>()
-        });
+        };
+        for (origin, source_classes, declarations) in prepared_updates {
+            classes.extend(source_classes);
+            if let Some(declarations) = declarations {
+                declarations_by_origin.insert(origin, declarations);
+            }
+        }
 
         (
             classes,
+            declarations_by_origin,
             indexed_uris,
             java_module_descriptors.into_iter().collect(),
         )
@@ -1623,41 +1689,71 @@ impl Workspace {
 
         let context = Self::resolve_analysis_context_for_snapshot(model.as_ref(), Some(path));
         let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-        let classes = crate::language::lookup_language(language_id)
+        let (classes, declarations) = crate::language::lookup_language(language_id)
             .map(|language| {
                 let view = index_snapshot.view_for_analysis_context(
                     context.module,
                     context.classpath,
                     context.source_root,
                 );
-                let name_table = if language_id == "java" {
-                    None
+
+                if language_id == "java" {
+                    let mut parser = crate::language::java::make_java_parser();
+                    let Some(tree) = parser.parse(&content, None) else {
+                        return (Vec::new(), None);
+                    };
+                    let classes =
+                        crate::language::java::class_parser::extract_java_classes_from_tree(
+                            &content,
+                            &tree,
+                            &origin,
+                            None,
+                            Some(&view),
+                        );
+                    let declarations =
+                        crate::language::java::class_parser::extract_java_declarations_from_tree(
+                            &content,
+                            &tree,
+                            &origin,
+                            None,
+                            Some(&view),
+                        );
+                    return (classes, Some(declarations));
+                }
+
+                let base_name_table = index_snapshot.build_name_table_for_analysis_context(
+                    context.module,
+                    context.classpath,
+                    context.source_root,
+                );
+                let discovered_names = language.discover_internal_names(&content, None);
+                let name_table = if discovered_names.is_empty() {
+                    Some(base_name_table)
                 } else {
-                    let base_name_table = index_snapshot.build_name_table_for_analysis_context(
-                        context.module,
-                        context.classpath,
-                        context.source_root,
-                    );
-                    let discovered_names = language.discover_internal_names(&content, None);
-                    if discovered_names.is_empty() {
-                        Some(base_name_table)
-                    } else {
-                        Some(base_name_table.extend_with(discovered_names))
-                    }
+                    Some(base_name_table.extend_with(discovered_names))
                 };
 
-                language.extract_classes_from_source(
-                    &content,
-                    &origin,
+                (
+                    language.extract_classes_from_source(
+                        &content,
+                        &origin,
+                        None,
+                        name_table,
+                        Some(&view),
+                    ),
                     None,
-                    name_table,
-                    Some(&view),
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| (Vec::new(), None));
 
         let changed = self.index.update(|index| {
-            index.update_source_in_context(context.module, context.source_root, origin, classes)
+            index.update_source_in_context_with_declarations(
+                context.module,
+                context.source_root,
+                origin,
+                classes,
+                declarations.as_ref(),
+            )
         });
         self.track_indexed_uri(&uri);
         self.remove_salsa_file(&uri);
@@ -1774,32 +1870,53 @@ impl IndexedWorkspaceSource {
         language.discover_internal_names(self.content.as_ref(), None)
     }
 
-    fn extract_classes(
+    fn extract_index_data(
         self,
         db: &crate::salsa_db::Database,
         name_table: Option<Arc<crate::index::NameTable>>,
-    ) -> Vec<ClassMetadata> {
+    ) -> (
+        ClassOrigin,
+        Vec<ClassMetadata>,
+        Option<SourceDeclarationBatch>,
+    ) {
         let Some(language) = crate::language::lookup_language(self.language_id.as_ref()) else {
-            return vec![];
+            return (self.origin, vec![], None);
         };
 
         if let Some(file) = self.salsa_file
             && let Some(tree) = crate::salsa_queries::parse::parse_tree(db, file)
         {
-            return language.extract_classes_from_source(
-                self.content.as_ref(),
-                &self.origin,
-                Some(&tree),
-                name_table,
-                None,
+            let declarations = (self.language_id.as_ref() == "java").then(|| {
+                crate::language::java::class_parser::extract_java_declarations_from_tree(
+                    self.content.as_ref(),
+                    &tree,
+                    &self.origin,
+                    name_table.clone(),
+                    None,
+                )
+            });
+            return (
+                self.origin.clone(),
+                language.extract_classes_from_source(
+                    self.content.as_ref(),
+                    &self.origin,
+                    Some(&tree),
+                    name_table,
+                    None,
+                ),
+                declarations,
             );
         }
 
-        language.extract_classes_from_source(
-            self.content.as_ref(),
-            &self.origin,
-            None,
-            name_table,
+        (
+            self.origin.clone(),
+            language.extract_classes_from_source(
+                self.content.as_ref(),
+                &self.origin,
+                None,
+                name_table,
+                None,
+            ),
             None,
         )
     }
