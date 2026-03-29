@@ -9,6 +9,7 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
 };
 
+use crate::index::archive_stub::{ArchiveFieldStub, ArchiveMethodStub};
 use crate::index::cache;
 use crate::index::store::StoredArtifactArchive;
 use crate::index::{
@@ -19,6 +20,18 @@ use crate::index::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArtifactClassHandle {
     pub artifact_id: ArtifactId,
+    pub slot: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ArtifactMethodHandle {
+    pub class: ArtifactClassHandle,
+    pub slot: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ArtifactFieldHandle {
+    pub class: ArtifactClassHandle,
     pub slot: u32,
 }
 
@@ -202,6 +215,10 @@ impl ArtifactScopeReader {
         )
     }
 
+    pub fn materialize_method(&self, handle: ArtifactMethodHandle) -> Option<Arc<MethodSummary>> {
+        Some(Arc::new(self.method_stub(handle)?.materialize()))
+    }
+
     pub fn materialize_fields(
         &self,
         handle: ArtifactClassHandle,
@@ -215,6 +232,10 @@ impl ArtifactScopeReader {
         )
     }
 
+    pub fn materialize_field(&self, handle: ArtifactFieldHandle) -> Option<Arc<FieldSummary>> {
+        Some(Arc::new(self.field_stub(handle)?.materialize()))
+    }
+
     pub fn has_method_named_desc(
         &self,
         handle: ArtifactClassHandle,
@@ -224,6 +245,92 @@ impl ArtifactScopeReader {
         Some(self.stub(handle)?.methods.iter().any(|method| {
             method.name.as_ref() == method_name && method.descriptor.as_ref() == method_desc
         }))
+    }
+
+    pub fn method_handles(&self, handle: ArtifactClassHandle) -> Option<Vec<ArtifactMethodHandle>> {
+        let methods = &self.stub(handle)?.methods;
+        Some(
+            (0..methods.len())
+                .map(|slot| ArtifactMethodHandle {
+                    class: handle,
+                    slot: u32::try_from(slot).expect("artifact method count exceeded u32"),
+                })
+                .collect(),
+        )
+    }
+
+    pub fn method_handles_named(
+        &self,
+        handle: ArtifactClassHandle,
+        method_name: &str,
+    ) -> Option<Vec<ArtifactMethodHandle>> {
+        Some(
+            self.stub(handle)?
+                .methods
+                .iter()
+                .enumerate()
+                .filter(|(_, method)| method.name.as_ref() == method_name)
+                .map(|(slot, _)| ArtifactMethodHandle {
+                    class: handle,
+                    slot: u32::try_from(slot).expect("artifact method count exceeded u32"),
+                })
+                .collect(),
+        )
+    }
+
+    pub fn method_handle_by_name_desc(
+        &self,
+        handle: ArtifactClassHandle,
+        method_name: &str,
+        method_desc: &str,
+    ) -> Option<ArtifactMethodHandle> {
+        self.stub(handle)?
+            .methods
+            .iter()
+            .enumerate()
+            .find(|(_, method)| {
+                method.name.as_ref() == method_name && method.descriptor.as_ref() == method_desc
+            })
+            .map(|(slot, _)| ArtifactMethodHandle {
+                class: handle,
+                slot: u32::try_from(slot).expect("artifact method count exceeded u32"),
+            })
+    }
+
+    pub fn project_method_stub(&self, handle: ArtifactMethodHandle) -> Option<ArchiveMethodStub> {
+        Some(self.method_stub(handle)?.clone())
+    }
+
+    pub fn field_handles(&self, handle: ArtifactClassHandle) -> Option<Vec<ArtifactFieldHandle>> {
+        let fields = &self.stub(handle)?.fields;
+        Some(
+            (0..fields.len())
+                .map(|slot| ArtifactFieldHandle {
+                    class: handle,
+                    slot: u32::try_from(slot).expect("artifact field count exceeded u32"),
+                })
+                .collect(),
+        )
+    }
+
+    pub fn field_handle_by_name(
+        &self,
+        handle: ArtifactClassHandle,
+        field_name: &str,
+    ) -> Option<ArtifactFieldHandle> {
+        self.stub(handle)?
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.name.as_ref() == field_name)
+            .map(|(slot, _)| ArtifactFieldHandle {
+                class: handle,
+                slot: u32::try_from(slot).expect("artifact field count exceeded u32"),
+            })
+    }
+
+    pub fn project_field_stub(&self, handle: ArtifactFieldHandle) -> Option<ArchiveFieldStub> {
+        Some(self.field_stub(handle)?.clone())
     }
 
     pub fn class_handles_by_simple_name(&self, simple_name: &str) -> Vec<ArtifactClassHandle> {
@@ -358,6 +465,14 @@ impl ArtifactScopeReader {
 
     fn stub(&self, handle: ArtifactClassHandle) -> Option<&ArchiveClassStub> {
         Some(self.record(handle)?.stub.as_ref())
+    }
+
+    fn method_stub(&self, handle: ArtifactMethodHandle) -> Option<&ArchiveMethodStub> {
+        self.stub(handle.class)?.methods.get(handle.slot as usize)
+    }
+
+    fn field_stub(&self, handle: ArtifactFieldHandle) -> Option<&ArchiveFieldStub> {
+        self.stub(handle.class)?.fields.get(handle.slot as usize)
     }
 }
 

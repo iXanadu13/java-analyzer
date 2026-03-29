@@ -142,23 +142,23 @@ fn resolve_java_symbol_with_resolver(
 
 fn convert_resolved_symbol(symbol: ResolvedSymbol) -> ResolvedSymbolData {
     match symbol {
-        ResolvedSymbol::Class(internal_name) => ResolvedSymbolData {
+        ResolvedSymbol::Class(class_ref) => ResolvedSymbolData {
             kind: SymbolKind::Class,
-            target_internal_name: internal_name,
+            target_internal_name: Arc::clone(class_ref.internal_name()),
             member_name: None,
             descriptor: None,
         },
-        ResolvedSymbol::Method { owner, summary } => ResolvedSymbolData {
+        ResolvedSymbol::Method(method_ref) => ResolvedSymbolData {
             kind: SymbolKind::Method,
-            target_internal_name: owner,
-            member_name: Some(Arc::clone(&summary.name)),
-            descriptor: Some(summary.desc()),
+            target_internal_name: Arc::clone(method_ref.owner.internal_name()),
+            member_name: Some(Arc::clone(&method_ref.name)),
+            descriptor: Some(Arc::clone(&method_ref.descriptor)),
         },
-        ResolvedSymbol::Field { owner, summary } => ResolvedSymbolData {
+        ResolvedSymbol::Field(field_ref) => ResolvedSymbolData {
             kind: SymbolKind::Field,
-            target_internal_name: owner,
-            member_name: Some(Arc::clone(&summary.name)),
-            descriptor: Some(Arc::clone(&summary.descriptor)),
+            target_internal_name: Arc::clone(field_ref.owner.internal_name()),
+            member_name: Some(Arc::clone(&field_ref.name)),
+            descriptor: Some(Arc::clone(&field_ref.descriptor)),
         },
     }
 }

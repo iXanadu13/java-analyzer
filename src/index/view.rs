@@ -7,8 +7,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::index::{
-    ArtifactClassHandle, BucketIndex, ClassMetadata, FieldSummary, MethodSummary, NameTable,
-    ScopeLayer, ScopeSnapshot,
+    ArtifactClassHandle, BucketIndex, ClassMetadata, FieldRef, FieldSummary, MethodRef,
+    MethodSummary, NameTable, ScopeLayer, ScopeSnapshot, TypeRef,
 };
 use crate::request_metrics::RequestMetrics;
 
@@ -24,6 +24,9 @@ enum ClassHandleRef {
 type MethodsByNameCache = DashMap<(Arc<str>, Arc<str>), Arc<Vec<Arc<MethodSummary>>>>;
 type FieldsByNameCache = DashMap<(Arc<str>, Arc<str>), Option<Arc<FieldSummary>>>;
 type DeclaringMethodOwnerCache = DashMap<(Arc<str>, Arc<str>, Arc<str>), Option<Arc<str>>>;
+type MethodRefsByNameCache = DashMap<(Arc<str>, Arc<str>), Arc<Vec<MethodRef>>>;
+type FieldRefsByNameCache = DashMap<(Arc<str>, Arc<str>), Option<FieldRef>>;
+type DeclaringMethodOwnerRefCache = DashMap<(Arc<str>, Arc<str>, Arc<str>), Option<TypeRef>>;
 
 #[derive(Default)]
 struct IndexViewCaches {
@@ -36,6 +39,9 @@ struct IndexViewCaches {
     methods_by_name: MethodsByNameCache,
     fields_by_name: FieldsByNameCache,
     declaring_method_owner: DeclaringMethodOwnerCache,
+    method_refs_by_name: MethodRefsByNameCache,
+    field_refs_by_name: FieldRefsByNameCache,
+    declaring_method_owner_ref: DeclaringMethodOwnerRefCache,
     all_classes: OnceLock<Arc<Vec<ClassHandleRef>>>,
     annotation_classes: OnceLock<Arc<Vec<ClassHandleRef>>>,
 }
@@ -98,6 +104,29 @@ impl IndexView {
             .iter()
             .filter_map(|class_ref| self.resolve_class_ref(class_ref))
             .collect()
+    }
+
+    fn type_ref_from_class_ref(&self, class_ref: &ClassHandleRef) -> Option<TypeRef> {
+        match class_ref {
+            ClassHandleRef::Overlay { internal_name, .. } => {
+                Some(TypeRef::source(Arc::clone(internal_name)))
+            }
+            ClassHandleRef::Artifact(handle) => Some(TypeRef::artifact(
+                *handle,
+                self.class_ref_internal_name(class_ref)?,
+            )),
+        }
+    }
+
+    fn class_ref_from_type_ref(&self, type_ref: &TypeRef) -> Option<ClassHandleRef> {
+        match type_ref {
+            TypeRef::Source { internal_name } => self.get_class_ref_by_internal(internal_name),
+            TypeRef::Artifact { handle, .. } => Some(ClassHandleRef::Artifact(*handle)),
+        }
+    }
+
+    fn resolve_class_handle_ref(&self, type_ref: &TypeRef) -> Option<ClassHandleRef> {
+        self.class_ref_from_type_ref(type_ref)
     }
 
     fn get_class_ref_by_internal(&self, internal_name: &str) -> Option<ClassHandleRef> {
@@ -261,6 +290,50 @@ impl IndexView {
             .and_then(|class_ref| self.resolve_class_ref(&class_ref))
     }
 
+    pub fn get_class_ref(&self, internal_name: &str) -> Option<TypeRef> {
+        self.get_class_ref_by_internal(internal_name)
+            .and_then(|class_ref| self.type_ref_from_class_ref(&class_ref))
+    }
+
+    pub fn materialize_class(&self, type_ref: &TypeRef) -> Option<Arc<ClassMetadata>> {
+        self.resolve_class_handle_ref(type_ref)
+            .and_then(|class_ref| self.resolve_class_ref(&class_ref))
+    }
+
+    pub fn materialize_method(&self, method_ref: &MethodRef) -> Option<Arc<MethodSummary>> {
+        if let Some(handle) = method_ref.artifact {
+            let reader = self.scope.artifact_reader(handle.class.artifact_id)?;
+            if let Some(metrics) = self.request_metrics() {
+                metrics.record_artifact_method_materialization(1);
+            }
+            return reader.materialize_method(handle);
+        }
+
+        let owner = self.materialize_class(&method_ref.owner)?;
+        owner.methods.iter().find_map(|method| {
+            (method.name.as_ref() == method_ref.name.as_ref()
+                && method.desc().as_ref() == method_ref.descriptor.as_ref())
+            .then(|| Arc::new(method.clone()))
+        })
+    }
+
+    pub fn materialize_field(&self, field_ref: &FieldRef) -> Option<Arc<FieldSummary>> {
+        if let Some(handle) = field_ref.artifact {
+            let reader = self.scope.artifact_reader(handle.class.artifact_id)?;
+            if let Some(metrics) = self.request_metrics() {
+                metrics.record_artifact_field_materialization(1);
+            }
+            return reader.materialize_field(handle);
+        }
+
+        let owner = self.materialize_class(&field_ref.owner)?;
+        owner.fields.iter().find_map(|field| {
+            (field.name.as_ref() == field_ref.name.as_ref()
+                && field.descriptor.as_ref() == field_ref.descriptor.as_ref())
+            .then(|| Arc::new(field.clone()))
+        })
+    }
+
     pub fn get_source_type_name(&self, internal: &str) -> Option<String> {
         if let Some(cached) = self.caches.source_type_names.get(internal) {
             return Some(cached.value().to_string());
@@ -400,6 +473,15 @@ impl IndexView {
             }
         }
         best.and_then(|class_ref| self.resolve_class_ref(&class_ref))
+    }
+
+    pub fn resolve_direct_inner_class_ref(
+        &self,
+        owner_internal: &str,
+        simple_name: &str,
+    ) -> Option<TypeRef> {
+        let class_ref = self.resolve_direct_inner_class(owner_internal, simple_name)?;
+        self.get_class_ref(class_ref.internal_name.as_ref())
     }
 
     /// Resolves the direct owner of `class_internal` using authoritative `inner_class_of`
@@ -558,6 +640,194 @@ impl IndexView {
         self.project_hierarchy_classes(hierarchy_order.as_ref())
     }
 
+    pub fn lookup_methods_in_hierarchy_refs(
+        &self,
+        class_internal: &str,
+        method_name: &str,
+    ) -> Vec<MethodRef> {
+        let key = (Arc::from(class_internal), Arc::from(method_name));
+        if let Some(cached) = self.caches.method_refs_by_name.get(&key) {
+            return cached.value().as_ref().clone();
+        }
+
+        let mut methods = Vec::new();
+        let mut seen: FxHashSet<(Arc<str>, Arc<str>)> = Default::default();
+        let hierarchy_order = self.hierarchy_order(class_internal);
+
+        for class_ref in hierarchy_order.iter() {
+            let Some(owner_ref) = self.type_ref_from_class_ref(class_ref) else {
+                continue;
+            };
+
+            match class_ref {
+                ClassHandleRef::Overlay { .. } => {
+                    let Some(meta) = self.resolve_class_ref(class_ref) else {
+                        continue;
+                    };
+
+                    for method in meta
+                        .methods
+                        .iter()
+                        .filter(|m| m.name.as_ref() == method_name)
+                    {
+                        let key = Self::method_shadow_key(method);
+                        if seen.insert(key) {
+                            methods.push(MethodRef::source(
+                                owner_ref.clone(),
+                                Arc::clone(&method.name),
+                                method.desc(),
+                                method.access_flags,
+                            ));
+                        }
+                    }
+                }
+                ClassHandleRef::Artifact(handle) => {
+                    let Some(reader) = self.scope.artifact_reader(handle.artifact_id) else {
+                        continue;
+                    };
+                    let Some(handles) = reader.method_handles_named(*handle, method_name) else {
+                        continue;
+                    };
+
+                    for method_handle in handles {
+                        let Some(stub) = reader.project_method_stub(method_handle) else {
+                            continue;
+                        };
+                        let shadow_key = (
+                            Arc::clone(&stub.name),
+                            stub.generic_signature
+                                .clone()
+                                .unwrap_or_else(|| Arc::clone(&stub.descriptor)),
+                        );
+                        if seen.insert(shadow_key) {
+                            methods.push(MethodRef::artifact(
+                                owner_ref.clone(),
+                                method_handle,
+                                Arc::clone(&stub.name),
+                                Arc::clone(&stub.descriptor),
+                                stub.access_flags,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        self.caches
+            .method_refs_by_name
+            .insert(key, Arc::new(methods.clone()));
+        methods
+    }
+
+    pub fn lookup_field_in_hierarchy_ref(
+        &self,
+        class_internal: &str,
+        field_name: &str,
+    ) -> Option<FieldRef> {
+        let key = (Arc::from(class_internal), Arc::from(field_name));
+        if let Some(cached) = self.caches.field_refs_by_name.get(&key) {
+            return cached.value().clone();
+        }
+
+        let hierarchy_order = self.hierarchy_order(class_internal);
+        let field = hierarchy_order.iter().find_map(|class_ref| {
+            let owner_ref = self.type_ref_from_class_ref(class_ref)?;
+            match class_ref {
+                ClassHandleRef::Overlay { .. } => {
+                    let meta = self.resolve_class_ref(class_ref)?;
+                    meta.fields
+                        .iter()
+                        .find(|field| field.name.as_ref() == field_name)
+                        .map(|field| {
+                            FieldRef::source(
+                                owner_ref,
+                                Arc::clone(&field.name),
+                                Arc::clone(&field.descriptor),
+                                field.access_flags,
+                            )
+                        })
+                }
+                ClassHandleRef::Artifact(handle) => {
+                    let reader = self.scope.artifact_reader(handle.artifact_id)?;
+                    let field_handle = reader.field_handle_by_name(*handle, field_name)?;
+                    let stub = reader.project_field_stub(field_handle)?;
+                    Some(FieldRef::artifact(
+                        owner_ref,
+                        field_handle,
+                        Arc::clone(&stub.name),
+                        Arc::clone(&stub.descriptor),
+                        stub.access_flags,
+                    ))
+                }
+            }
+        });
+        self.caches.field_refs_by_name.insert(key, field.clone());
+        field
+    }
+
+    pub fn lookup_member_type_ref_in_hierarchy(
+        &self,
+        class_internal: &str,
+        simple_name: &str,
+    ) -> Option<TypeRef> {
+        let hierarchy_order = self.hierarchy_order(class_internal);
+        for owner_ref in hierarchy_order.iter() {
+            let Some(owner_internal) = self.class_ref_internal_name(owner_ref) else {
+                continue;
+            };
+            if let Some(inner) =
+                self.resolve_direct_inner_class_ref(owner_internal.as_ref(), simple_name)
+            {
+                return Some(inner);
+            }
+        }
+        None
+    }
+
+    pub fn find_declaring_method_owner_ref(
+        &self,
+        class_internal: &str,
+        method_name: &str,
+        method_desc: &str,
+    ) -> Option<TypeRef> {
+        let key = (
+            Arc::from(class_internal),
+            Arc::from(method_name),
+            Arc::from(method_desc),
+        );
+        if let Some(cached) = self.caches.declaring_method_owner_ref.get(&key) {
+            return cached.value().clone();
+        }
+
+        let hierarchy_order = self.hierarchy_order(class_internal);
+        let owner = hierarchy_order
+            .iter()
+            .find_map(|class_ref| match class_ref {
+                ClassHandleRef::Overlay { .. } => {
+                    let class = self.resolve_class_ref(class_ref)?;
+                    class
+                        .methods
+                        .iter()
+                        .any(|method| {
+                            method.name.as_ref() == method_name
+                                && method.desc().as_ref() == method_desc
+                        })
+                        .then(|| self.type_ref_from_class_ref(class_ref))
+                        .flatten()
+                }
+                ClassHandleRef::Artifact(handle) => {
+                    let reader = self.scope.artifact_reader(handle.artifact_id)?;
+                    reader
+                        .method_handle_by_name_desc(*handle, method_name, method_desc)
+                        .and_then(|_| self.type_ref_from_class_ref(class_ref))
+                }
+            });
+        self.caches
+            .declaring_method_owner_ref
+            .insert(key, owner.clone());
+        owner
+    }
+
     pub fn lookup_methods_in_hierarchy(
         &self,
         class_internal: &str,
@@ -604,18 +874,8 @@ impl IndexView {
         class_internal: &str,
         simple_name: &str,
     ) -> Option<Arc<ClassMetadata>> {
-        let hierarchy_order = self.hierarchy_order(class_internal);
-        for owner_ref in hierarchy_order.iter() {
-            let Some(owner_internal) = self.class_ref_internal_name(owner_ref) else {
-                continue;
-            };
-            if let Some(inner) =
-                self.resolve_direct_inner_class(owner_internal.as_ref(), simple_name)
-            {
-                return Some(inner);
-            }
-        }
-        None
+        self.lookup_member_type_ref_in_hierarchy(class_internal, simple_name)
+            .and_then(|type_ref| self.materialize_class(&type_ref))
     }
 
     pub fn find_declaring_method_owner(
@@ -636,33 +896,14 @@ impl IndexView {
                 .and_then(|owner_internal| self.get_class(&owner_internal));
         }
 
-        let hierarchy_order = self.hierarchy_order(class_internal);
-        let owner_internal = hierarchy_order
-            .iter()
-            .find_map(|class_ref| match class_ref {
-                ClassHandleRef::Overlay { .. } => {
-                    let class = self.resolve_class_ref(class_ref)?;
-                    class
-                        .methods
-                        .iter()
-                        .any(|method| {
-                            method.name.as_ref() == method_name
-                                && method.desc().as_ref() == method_desc
-                        })
-                        .then(|| Arc::clone(&class.internal_name))
-                }
-                ClassHandleRef::Artifact(handle) => {
-                    let reader = self.scope.artifact_reader(handle.artifact_id)?;
-                    reader
-                        .has_method_named_desc(*handle, method_name, method_desc)?
-                        .then(|| reader.class_internal_name(*handle))
-                        .flatten()
-                }
-            });
+        let owner = self.find_declaring_method_owner_ref(class_internal, method_name, method_desc);
+        let owner_internal = owner
+            .as_ref()
+            .map(|owner| Arc::clone(owner.internal_name()));
         self.caches
             .declaring_method_owner
             .insert(key, owner_internal.clone());
-        owner_internal.and_then(|owner_internal| self.get_class(&owner_internal))
+        owner.and_then(|owner| self.materialize_class(&owner))
     }
 
     pub fn get_unique_class_by_simple_name(&self, simple_name: &str) -> Option<Arc<ClassMetadata>> {
@@ -1824,5 +2065,42 @@ mod tests {
 
         assert!(view.get_class("pkg/Child").is_some());
         assert_eq!(metrics.artifact_class_projection_count(), 1);
+    }
+
+    #[test]
+    fn test_artifact_hierarchy_member_ref_lookup_is_lazy_until_projection() {
+        let mut base = (*make_class(
+            "pkg/Base",
+            ClassOrigin::Jar(Arc::from("memory://artifact.jar")),
+            &["()V"],
+        ))
+        .clone();
+        base.methods[0].name = Arc::from("ping");
+
+        let mut child = (*make_class(
+            "pkg/Child",
+            ClassOrigin::Jar(Arc::from("memory://artifact.jar")),
+            &["(I)V"],
+        ))
+        .clone();
+        child.super_name = Some(Arc::from("pkg/Base"));
+        child.methods[0].name = Arc::from("pong");
+
+        let metrics = RequestMetrics::new(
+            "test-artifact-ref-metrics",
+            &Url::parse("file:///workspace/Test.java").expect("uri"),
+        );
+        let view = make_artifact_view(vec![base, child]).with_request_metrics(Arc::clone(&metrics));
+
+        let inherited = view.lookup_methods_in_hierarchy_refs("pkg/Child", "ping");
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(metrics.artifact_class_projection_count(), 0);
+        assert_eq!(metrics.artifact_method_materialization_count(), 0);
+
+        let materialized = view
+            .materialize_method(&inherited[0])
+            .expect("materialized method");
+        assert_eq!(materialized.name.as_ref(), "ping");
+        assert_eq!(metrics.artifact_method_materialization_count(), 1);
     }
 }

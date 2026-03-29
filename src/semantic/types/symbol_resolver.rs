@@ -1,4 +1,4 @@
-use crate::index::{FieldSummary, IndexView, MethodSummary};
+use crate::index::{FieldRef, IndexView, MethodRef, MethodSummary, TypeRef};
 use crate::language::java::members::is_java_keyword;
 use crate::language::java::super_support::{is_super_receiver_expr, resolve_direct_super_owner};
 use crate::language::java::type_ctx::SourceTypeCtx;
@@ -15,16 +15,12 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum ResolvedSymbol {
-    Class(Arc<str>),
-    Method {
-        owner: Arc<str>,
-        summary: Arc<MethodSummary>,
-    },
-    Field {
-        owner: Arc<str>,
-        summary: Arc<FieldSummary>,
-    },
+    Class(TypeRef),
+    Method(MethodRef),
+    Field(FieldRef),
 }
+
+pub type SymbolRef = ResolvedSymbol;
 
 pub struct SymbolResolver<'a> {
     pub view: &'a IndexView,
@@ -45,8 +41,7 @@ struct TypeNameCacheKey {
 
 #[derive(Clone)]
 struct MethodCandidate {
-    lookup_owner: Arc<str>,
-    summary: Arc<MethodSummary>,
+    method_ref: MethodRef,
 }
 
 impl<'a> SymbolResolver<'a> {
@@ -74,8 +69,8 @@ impl<'a> SymbolResolver<'a> {
                     if arguments.is_none() {
                         return self
                             .view
-                            .lookup_member_type_in_hierarchy(class_internal_name, member_prefix)
-                            .map(|inner| ResolvedSymbol::Class(Arc::clone(&inner.internal_name)));
+                            .lookup_member_type_ref_in_hierarchy(class_internal_name, member_prefix)
+                            .map(ResolvedSymbol::Class);
                     }
                     return None;
                 }
@@ -118,11 +113,12 @@ impl<'a> SymbolResolver<'a> {
                 if let Some(owner_internal) = qualifier_owner_internal
                     && let Some(inner) = self
                         .view
-                        .lookup_member_type_in_hierarchy(owner_internal, class_prefix)
+                        .lookup_member_type_ref_in_hierarchy(owner_internal, class_prefix)
                 {
-                    return Some(ResolvedSymbol::Class(Arc::clone(&inner.internal_name)));
+                    return Some(ResolvedSymbol::Class(inner));
                 }
                 self.resolve_type_name(ctx, class_prefix)
+                    .map(TypeRef::source)
                     .map(ResolvedSymbol::Class)
             }
             CursorLocation::TypeAnnotation { prefix } => {
@@ -130,6 +126,7 @@ impl<'a> SymbolResolver<'a> {
                     return None;
                 }
                 self.resolve_type_name(ctx, prefix)
+                    .map(TypeRef::source)
                     .map(ResolvedSymbol::Class)
             }
             CursorLocation::Annotation { prefix, .. } => {
@@ -137,6 +134,7 @@ impl<'a> SymbolResolver<'a> {
                     return None;
                 }
                 self.resolve_type_name(ctx, prefix)
+                    .map(TypeRef::source)
                     .map(ResolvedSymbol::Class)
             }
             _ => None,
@@ -179,31 +177,28 @@ impl<'a> SymbolResolver<'a> {
                 .collect();
 
             if !named_candidates.is_empty() {
-                let summaries: Vec<&MethodSummary> = named_candidates
+                let materialized_candidates: Vec<(&MethodCandidate, Arc<MethodSummary>)> =
+                    named_candidates
+                        .iter()
+                        .filter_map(|candidate| {
+                            self.view
+                                .materialize_method(&candidate.method_ref)
+                                .map(|summary| (candidate, summary))
+                        })
+                        .collect();
+                let summaries: Vec<&MethodSummary> = materialized_candidates
                     .iter()
-                    .map(|candidate| candidate.summary.as_ref())
+                    .map(|(_, summary)| summary.as_ref())
                     .collect();
                 let best_summary = resolver
                     .select_overload_match(&summaries, arg_count, &arg_types)?
                     .method;
 
-                if let Some(found_arc) = named_candidates
+                if let Some((found_arc, _)) = materialized_candidates
                     .iter()
-                    .find(|candidate| candidate.summary.desc() == best_summary.desc())
+                    .find(|(_, summary)| summary.desc() == best_summary.desc())
                 {
-                    let owner = self
-                        .view
-                        .find_declaring_method_owner(
-                            found_arc.lookup_owner.as_ref(),
-                            found_arc.summary.name.as_ref(),
-                            found_arc.summary.desc().as_ref(),
-                        )
-                        .map(|class_meta| class_meta.internal_name.clone())
-                        .unwrap_or_else(|| Arc::clone(&found_arc.lookup_owner));
-                    return Some(ResolvedSymbol::Method {
-                        owner,
-                        summary: Arc::clone(&found_arc.summary),
-                    });
+                    return Some(ResolvedSymbol::Method(found_arc.method_ref.clone()));
                 }
             }
 
@@ -211,28 +206,13 @@ impl<'a> SymbolResolver<'a> {
             return None;
         }
 
-        if let Some((owner, field)) = self.lookup_field_candidate(receiver, name) {
-            return Some(ResolvedSymbol::Field {
-                owner,
-                summary: field,
-            });
+        if let Some(field) = self.lookup_field_candidate(receiver, name) {
+            return Some(ResolvedSymbol::Field(field));
         }
 
         // 最后才尝试返回第一个匹配的同名方法
         if let Some(m) = named_candidates.first() {
-            let owner = self
-                .view
-                .find_declaring_method_owner(
-                    m.lookup_owner.as_ref(),
-                    m.summary.name.as_ref(),
-                    m.summary.desc().as_ref(),
-                )
-                .map(|class_meta| class_meta.internal_name.clone())
-                .unwrap_or_else(|| Arc::clone(&m.lookup_owner));
-            return Some(ResolvedSymbol::Method {
-                owner,
-                summary: Arc::clone(&m.summary),
-            });
+            return Some(ResolvedSymbol::Method(m.method_ref.clone()));
         }
 
         None
@@ -243,53 +223,41 @@ impl<'a> SymbolResolver<'a> {
         let mut seen: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
         for bound in receiver.bounds_for_lookup() {
             let lookup_owner: Arc<str> = Arc::from(bound.erased_internal());
-            for summary in self
+            for method_ref in self
                 .view
-                .lookup_methods_in_hierarchy(lookup_owner.as_ref(), name)
+                .lookup_methods_in_hierarchy_refs(lookup_owner.as_ref(), name)
             {
-                let key = (Arc::clone(&lookup_owner), summary.desc());
+                let key = (
+                    Arc::clone(&lookup_owner),
+                    Arc::clone(&method_ref.descriptor),
+                );
                 if seen.insert(key) {
-                    candidates.push(MethodCandidate {
-                        lookup_owner: Arc::clone(&lookup_owner),
-                        summary,
-                    });
+                    candidates.push(MethodCandidate { method_ref });
                 }
             }
         }
         candidates
     }
 
-    fn lookup_field_candidate(
-        &self,
-        receiver: &TypeName,
-        name: &str,
-    ) -> Option<(Arc<str>, Arc<FieldSummary>)> {
+    fn lookup_field_candidate(&self, receiver: &TypeName, name: &str) -> Option<FieldRef> {
         for bound in receiver.bounds_for_lookup() {
             let lookup_owner: Arc<str> = Arc::from(bound.erased_internal());
             if let Some(field) = self
                 .view
-                .lookup_field_in_hierarchy(lookup_owner.as_ref(), name)
+                .lookup_field_in_hierarchy_ref(lookup_owner.as_ref(), name)
             {
-                return Some((lookup_owner, field));
+                return Some(field);
             }
         }
         None
     }
 
-    fn lookup_static_field_candidate(
-        &self,
-        receiver: &TypeName,
-        name: &str,
-    ) -> Option<(Arc<str>, Arc<FieldSummary>)> {
-        let (owner, field) = self.lookup_field_candidate(receiver, name)?;
-        ((field.access_flags & ACC_STATIC) != 0).then_some((owner, field))
+    fn lookup_static_field_candidate(&self, receiver: &TypeName, name: &str) -> Option<FieldRef> {
+        let field = self.lookup_field_candidate(receiver, name)?;
+        ((field.access_flags & ACC_STATIC) != 0).then_some(field)
     }
 
-    fn lookup_static_import_field(
-        &self,
-        ctx: &SemanticContext,
-        name: &str,
-    ) -> Option<(Arc<str>, Arc<FieldSummary>)> {
+    fn lookup_static_import_field(&self, ctx: &SemanticContext, name: &str) -> Option<FieldRef> {
         let mut matches = Vec::new();
         let mut seen: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
 
@@ -304,13 +272,16 @@ impl<'a> SymbolResolver<'a> {
 
             let owner_internal = owner_dot.replace('.', "/");
             let receiver = TypeName::internal(owner_internal.as_str());
-            let Some((owner, field)) = self.lookup_static_field_candidate(&receiver, name) else {
+            let Some(field) = self.lookup_static_field_candidate(&receiver, name) else {
                 continue;
             };
 
-            let key = (Arc::clone(&owner), Arc::clone(&field.descriptor));
+            let key = (
+                Arc::clone(field.owner.internal_name()),
+                Arc::clone(&field.descriptor),
+            );
             if seen.insert(key) {
-                matches.push((owner, field));
+                matches.push(field);
             }
         }
 
@@ -429,13 +400,13 @@ impl<'a> SymbolResolver<'a> {
 
         if let Some(enclosing) = &ctx.enclosing_internal_name {
             let receiver = TypeName::internal(enclosing.as_ref());
-            if let Some((owner, field)) = self.lookup_field_candidate(&receiver, name)
+            if let Some(field) = self.lookup_field_candidate(&receiver, name)
                 && let Some(ty) = field_type_name(&field)
             {
                 return Some(NameClassification::Expression {
                     ty,
                     base: ExpressionNameBase::Field {
-                        owner,
+                        owner: Arc::clone(field.owner.internal_name()),
                         name: Arc::clone(&field.name),
                         is_static: (field.access_flags & ACC_STATIC) != 0,
                     },
@@ -443,13 +414,13 @@ impl<'a> SymbolResolver<'a> {
             }
         }
 
-        if let Some((owner, field)) = self.lookup_static_import_field(ctx, name)
+        if let Some(field) = self.lookup_static_import_field(ctx, name)
             && let Some(ty) = field_type_name(&field)
         {
             return Some(NameClassification::Expression {
                 ty,
                 base: ExpressionNameBase::Field {
-                    owner,
+                    owner: Arc::clone(field.owner.internal_name()),
                     name: Arc::clone(&field.name),
                     is_static: true,
                 },
@@ -499,13 +470,13 @@ impl<'a> SymbolResolver<'a> {
                     })
             }
             NameClassification::Type { ty, internal_name } => {
-                if let Some((owner, field)) = self.lookup_static_field_candidate(&ty, segment)
+                if let Some(field) = self.lookup_static_field_candidate(&ty, segment)
                     && let Some(field_ty) = field_type_name(&field)
                 {
                     return Some(NameClassification::Expression {
                         ty: field_ty,
                         base: ExpressionNameBase::Field {
-                            owner,
+                            owner: Arc::clone(field.owner.internal_name()),
                             name: Arc::clone(&field.name),
                             is_static: true,
                         },
@@ -513,10 +484,10 @@ impl<'a> SymbolResolver<'a> {
                 }
 
                 self.view
-                    .lookup_member_type_in_hierarchy(internal_name.as_ref(), segment)
+                    .lookup_member_type_ref_in_hierarchy(internal_name.as_ref(), segment)
                     .map(|inner| NameClassification::Type {
-                        ty: TypeName::internal(inner.internal_name.as_ref()),
-                        internal_name: Arc::clone(&inner.internal_name),
+                        ty: TypeName::internal(inner.internal_name().as_ref()),
+                        internal_name: Arc::clone(inner.internal_name()),
                     })
             }
             NameClassification::Expression { ty, .. } => {
@@ -527,12 +498,12 @@ impl<'a> SymbolResolver<'a> {
                     });
                 }
 
-                let (owner, field) = self.lookup_field_candidate(&ty, segment)?;
+                let field = self.lookup_field_candidate(&ty, segment)?;
                 let field_ty = field_type_name(&field)?;
                 Some(NameClassification::Expression {
                     ty: field_ty,
                     base: ExpressionNameBase::Field {
-                        owner,
+                        owner: Arc::clone(field.owner.internal_name()),
                         name: Arc::clone(&field.name),
                         is_static: (field.access_flags & ACC_STATIC) != 0,
                     },
@@ -545,13 +516,13 @@ impl<'a> SymbolResolver<'a> {
         match self.classify_name(ctx, id)? {
             NameClassification::Package { .. } => None,
             NameClassification::Type { internal_name, .. } => {
-                Some(ResolvedSymbol::Class(internal_name))
+                Some(ResolvedSymbol::Class(TypeRef::source(internal_name)))
             }
             NameClassification::Expression { ty, base } => match base {
                 ExpressionNameBase::Field { owner, name, .. } => self
                     .view
-                    .lookup_field_in_hierarchy(owner.as_ref(), name.as_ref())
-                    .map(|summary| ResolvedSymbol::Field { owner, summary }),
+                    .lookup_field_in_hierarchy_ref(owner.as_ref(), name.as_ref())
+                    .map(ResolvedSymbol::Field),
                 ExpressionNameBase::Local { .. }
                 | ExpressionNameBase::This
                 | ExpressionNameBase::Super
@@ -560,7 +531,7 @@ impl<'a> SymbolResolver<'a> {
                     let resolved_type = self
                         .resolve_type_name(ctx, base)
                         .unwrap_or_else(|| Arc::from(base));
-                    Some(ResolvedSymbol::Class(resolved_type))
+                    Some(ResolvedSymbol::Class(TypeRef::source(resolved_type)))
                 }
             },
         }
@@ -670,7 +641,7 @@ impl<'a> SymbolResolver<'a> {
     }
 }
 
-fn field_type_name(field: &FieldSummary) -> Option<TypeName> {
+fn field_type_name(field: &FieldRef) -> Option<TypeName> {
     singleton_descriptor_to_type(&field.descriptor)
         .map(TypeName::new)
         .or_else(|| parse_single_type_to_internal(&field.descriptor))
@@ -809,9 +780,9 @@ mod tests {
         let view = idx.view(scope);
         let resolver = SymbolResolver::new(&view);
         let sym_int = resolver.resolve(&ctx_int).unwrap();
-        if let ResolvedSymbol::Method { summary, .. } = sym_int {
+        if let ResolvedSymbol::Method(method_ref) = sym_int {
             assert_eq!(
-                summary.desc().as_ref(),
+                method_ref.descriptor.as_ref(),
                 "(I)V",
                 "Should resolve to int overload"
             );
@@ -838,9 +809,9 @@ mod tests {
         );
 
         let sym_str = resolver.resolve(&ctx_str).unwrap();
-        if let ResolvedSymbol::Method { summary, .. } = sym_str {
+        if let ResolvedSymbol::Method(method_ref) = sym_str {
             assert_eq!(
-                summary.desc().as_ref(),
+                method_ref.descriptor.as_ref(),
                 "(Ljava/lang/String;)V",
                 "Should resolve to String overload"
             );
@@ -909,14 +880,16 @@ mod tests {
             vec![],
         );
         let resolved = resolver.resolve(&ctx);
-        let ResolvedSymbol::Method { summary, .. } = resolved.expect("resolved varargs method")
-        else {
+        let ResolvedSymbol::Method(method_ref) = resolved.expect("resolved varargs method") else {
             panic!("expected method");
         };
         assert!(
-            summary.desc().as_ref().contains("[Ljava/lang/String;"),
+            method_ref
+                .descriptor
+                .as_ref()
+                .contains("[Ljava/lang/String;"),
             "expected varargs descriptor shape, got {}",
-            summary.desc()
+            method_ref.descriptor
         );
     }
 
@@ -963,10 +936,10 @@ mod tests {
             vec![],
         );
         let resolved = resolver.resolve(&ctx).expect("resolved source method");
-        let ResolvedSymbol::Method { summary, .. } = resolved else {
+        let ResolvedSymbol::Method(method_ref) = resolved else {
             panic!("expected method");
         };
-        assert_eq!(summary.name.as_ref(), "join");
+        assert_eq!(method_ref.name.as_ref(), "join");
     }
 
     #[test]
@@ -1025,9 +998,9 @@ mod tests {
         let resolver = SymbolResolver::new(&view);
         let resolved = resolver.resolve(&ctx).expect("should resolve method");
         match resolved {
-            ResolvedSymbol::Method { owner, summary } => {
-                assert_eq!(owner.as_ref(), "java/util/List");
-                assert_eq!(summary.name.as_ref(), "size");
+            ResolvedSymbol::Method(method_ref) => {
+                assert_eq!(method_ref.owner.as_ref(), "java/util/List");
+                assert_eq!(method_ref.name.as_ref(), "size");
             }
             _ => panic!("Expected method resolution"),
         }
@@ -1086,9 +1059,9 @@ mod tests {
         let resolver = SymbolResolver::new(&view);
         let resolved = resolver.resolve(&ctx).expect("should resolve method");
         match resolved {
-            ResolvedSymbol::Method { owner, summary } => {
-                assert_eq!(owner.as_ref(), "java/util/List");
-                assert_eq!(summary.name.as_ref(), "size");
+            ResolvedSymbol::Method(method_ref) => {
+                assert_eq!(method_ref.owner.as_ref(), "java/util/List");
+                assert_eq!(method_ref.name.as_ref(), "size");
             }
             _ => panic!("Expected method resolution"),
         }
@@ -1176,9 +1149,9 @@ mod tests {
             .resolve(&ctx)
             .expect("should resolve intersection method");
         match resolved {
-            ResolvedSymbol::Method { owner, summary } => {
-                assert_eq!(owner.as_ref(), "org/example/Swimmable");
-                assert_eq!(summary.name.as_ref(), "swim");
+            ResolvedSymbol::Method(method_ref) => {
+                assert_eq!(method_ref.owner.as_ref(), "org/example/Swimmable");
+                assert_eq!(method_ref.name.as_ref(), "swim");
             }
             other => panic!("expected method resolution, got {other:?}"),
         }
@@ -1271,9 +1244,9 @@ mod tests {
             .resolve(&ctx)
             .expect("should resolve through local intersection type");
         match resolved {
-            ResolvedSymbol::Method { owner, summary } => {
-                assert_eq!(owner.as_ref(), "org/example/Swimmable");
-                assert_eq!(summary.name.as_ref(), "swim");
+            ResolvedSymbol::Method(method_ref) => {
+                assert_eq!(method_ref.owner.as_ref(), "org/example/Swimmable");
+                assert_eq!(method_ref.name.as_ref(), "swim");
             }
             other => panic!("expected method resolution, got {other:?}"),
         }
@@ -1647,9 +1620,9 @@ mod tests {
             .resolve(&ctx)
             .expect("resolve static field before nested type");
         match resolved {
-            ResolvedSymbol::Field { owner, summary } => {
-                assert_eq!(owner.as_ref(), "org/cubewhy/ChainCheck");
-                assert_eq!(summary.name.as_ref(), "Box");
+            ResolvedSymbol::Field(field_ref) => {
+                assert_eq!(field_ref.owner.as_ref(), "org/cubewhy/ChainCheck");
+                assert_eq!(field_ref.name.as_ref(), "Box");
             }
             other => panic!("expected field resolution, got {other:?}"),
         }
@@ -2015,9 +1988,9 @@ mod tests {
 
         let resolved = resolver.resolve(&ctx).expect("resolve super member");
         match resolved {
-            ResolvedSymbol::Method { owner, summary } => {
-                assert_eq!(owner.as_ref(), "org/cubewhy/Base");
-                assert_eq!(summary.name.as_ref(), "baseWork");
+            ResolvedSymbol::Method(method_ref) => {
+                assert_eq!(method_ref.owner.as_ref(), "org/cubewhy/Base");
+                assert_eq!(method_ref.name.as_ref(), "baseWork");
             }
             other => panic!("expected method resolution for super member, got {other:?}"),
         }

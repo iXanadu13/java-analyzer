@@ -40,7 +40,8 @@ pub mod workspace_index;
 
 pub use archive_stub::ArchiveClassStub;
 pub use artifact_reader::{
-    ArtifactClassHandle, ArtifactReaderCache, ArtifactReaderMemoryStats, ArtifactScopeReader,
+    ArtifactClassHandle, ArtifactFieldHandle, ArtifactMethodHandle, ArtifactReaderCache,
+    ArtifactReaderMemoryStats, ArtifactScopeReader,
 };
 pub use bucket::BucketIndex;
 pub use handle::WorkspaceIndexHandle;
@@ -282,6 +283,135 @@ pub enum ClassOrigin {
         entry_name: Arc<str>,
     },
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeRef {
+    Source {
+        internal_name: Arc<str>,
+    },
+    Artifact {
+        internal_name: Arc<str>,
+        handle: ArtifactClassHandle,
+    },
+}
+
+impl TypeRef {
+    pub fn source(internal_name: impl Into<Arc<str>>) -> Self {
+        Self::Source {
+            internal_name: internal_name.into(),
+        }
+    }
+
+    pub fn artifact(handle: ArtifactClassHandle, internal_name: impl Into<Arc<str>>) -> Self {
+        Self::Artifact {
+            internal_name: internal_name.into(),
+            handle,
+        }
+    }
+
+    pub fn internal_name(&self) -> &Arc<str> {
+        match self {
+            Self::Source { internal_name } | Self::Artifact { internal_name, .. } => internal_name,
+        }
+    }
+
+    pub fn artifact_handle(&self) -> Option<ArtifactClassHandle> {
+        match self {
+            Self::Artifact { handle, .. } => Some(*handle),
+            Self::Source { .. } => None,
+        }
+    }
+}
+
+impl AsRef<str> for TypeRef {
+    fn as_ref(&self) -> &str {
+        self.internal_name().as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MethodRef {
+    pub owner: TypeRef,
+    pub name: Arc<str>,
+    pub descriptor: Arc<str>,
+    pub access_flags: u16,
+    pub artifact: Option<ArtifactMethodHandle>,
+}
+
+impl MethodRef {
+    pub fn source(
+        owner: TypeRef,
+        name: impl Into<Arc<str>>,
+        descriptor: impl Into<Arc<str>>,
+        access_flags: u16,
+    ) -> Self {
+        Self {
+            owner,
+            name: name.into(),
+            descriptor: descriptor.into(),
+            access_flags,
+            artifact: None,
+        }
+    }
+
+    pub fn artifact(
+        owner: TypeRef,
+        handle: ArtifactMethodHandle,
+        name: impl Into<Arc<str>>,
+        descriptor: impl Into<Arc<str>>,
+        access_flags: u16,
+    ) -> Self {
+        Self {
+            owner,
+            name: name.into(),
+            descriptor: descriptor.into(),
+            access_flags,
+            artifact: Some(handle),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldRef {
+    pub owner: TypeRef,
+    pub name: Arc<str>,
+    pub descriptor: Arc<str>,
+    pub access_flags: u16,
+    pub artifact: Option<ArtifactFieldHandle>,
+}
+
+impl FieldRef {
+    pub fn source(
+        owner: TypeRef,
+        name: impl Into<Arc<str>>,
+        descriptor: impl Into<Arc<str>>,
+        access_flags: u16,
+    ) -> Self {
+        Self {
+            owner,
+            name: name.into(),
+            descriptor: descriptor.into(),
+            access_flags,
+            artifact: None,
+        }
+    }
+
+    pub fn artifact(
+        owner: TypeRef,
+        handle: ArtifactFieldHandle,
+        name: impl Into<Arc<str>>,
+        descriptor: impl Into<Arc<str>>,
+        access_flags: u16,
+    ) -> Self {
+        Self {
+            owner,
+            name: name.into(),
+            descriptor: descriptor.into(),
+            access_flags,
+            artifact: Some(handle),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]

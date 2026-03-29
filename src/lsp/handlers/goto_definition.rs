@@ -4,7 +4,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use crate::index::{ClassOrigin, IndexView};
+use crate::index::{ClassOrigin, IndexView, TypeRef};
 use crate::language::LanguageRegistry;
 use crate::language::java::class_parser::find_symbol_range;
 use crate::language::java::module_info::{
@@ -141,7 +141,7 @@ fn handle_goto_definition_blocking(
             let result = goto_resolved_symbol_blocking(
                 Arc::clone(&workspace),
                 &view,
-                ResolvedSymbol::Class(Arc::from(internal)),
+                ResolvedSymbol::Class(TypeRef::source(internal)),
                 &request,
             );
             log_summary();
@@ -208,16 +208,21 @@ fn goto_resolved_symbol_blocking(
     request: &RequestContext,
 ) -> crate::lsp::request_cancellation::RequestResult<GotoPrepared> {
     let (target_internal, member_name, descriptor, decl_kind) = match &symbol {
-        ResolvedSymbol::Class(name) => (Arc::clone(name), None, None, DeclKind::Type),
-        ResolvedSymbol::Method { owner, summary } => (
-            Arc::clone(owner),
-            Some(Arc::clone(&summary.name)),
-            Some(summary.desc()),
+        ResolvedSymbol::Class(class_ref) => (
+            Arc::clone(class_ref.internal_name()),
+            None,
+            None,
+            DeclKind::Type,
+        ),
+        ResolvedSymbol::Method(method_ref) => (
+            Arc::clone(method_ref.owner.internal_name()),
+            Some(Arc::clone(&method_ref.name)),
+            Some(Arc::clone(&method_ref.descriptor)),
             DeclKind::Method,
         ),
-        ResolvedSymbol::Field { owner, summary } => (
-            Arc::clone(owner),
-            Some(Arc::clone(&summary.name)),
+        ResolvedSymbol::Field(field_ref) => (
+            Arc::clone(field_ref.owner.internal_name()),
+            Some(Arc::clone(&field_ref.name)),
             None,
             DeclKind::Field,
         ),
@@ -852,7 +857,7 @@ mod tests {
         let prepared = goto_resolved_symbol_blocking(
             Arc::clone(&workspace),
             &view,
-            ResolvedSymbol::Class(Arc::from("com/example/Outer$Inner$Leaf")),
+            ResolvedSymbol::Class(TypeRef::source("com/example/Outer$Inner$Leaf")),
             &request,
         )
         .expect("goto result");
