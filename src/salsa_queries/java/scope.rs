@@ -1,5 +1,4 @@
 use super::common::find_ancestor_of_kind;
-use super::indexing::get_name_table_for_java_file;
 use crate::salsa_db::SourceFile;
 use crate::salsa_queries::Db;
 use crate::salsa_queries::MethodSummaryData;
@@ -30,19 +29,23 @@ pub fn extract_java_enclosing_method(
     let content: Arc<str> = Arc::from(file.content(db).as_str());
     let tree = crate::salsa_queries::parse::parse_tree(db, file)?;
     let root = tree.root_node();
-    let name_table = get_name_table_for_java_file(db, file);
     let extractor = crate::language::java::JavaContextExtractor::new_with_overview(
         Arc::clone(&content),
         offset.min(content.len()),
-        name_table.clone(),
+        None,
     );
     let cursor_node = extractor.find_cursor_node(root);
     let package = crate::salsa_queries::parse::extract_package(db, file);
     let imports = crate::salsa_queries::parse::extract_imports(db, file);
-    let type_ctx = crate::language::java::type_ctx::SourceTypeCtx::from_overview(
+    let type_ctx = crate::language::java::type_ctx::SourceTypeCtx::from_view(
         package,
         imports.as_ref().clone(),
-        name_table,
+        crate::salsa_queries::get_index_view_for_context(
+            db,
+            crate::index::ModuleId::ROOT,
+            crate::index::ClasspathId::Main,
+            None,
+        ),
     );
 
     cursor_node
@@ -87,5 +90,61 @@ fn convert_current_member_to_method_data(
             return_type: method.return_type.clone(),
         }),
         crate::semantic::context::CurrentClassMember::Field(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{ClassMetadata, ClassOrigin, WorkspaceIndex, WorkspaceIndexHandle};
+    use crate::salsa_db::{Database, FileId, SourceFile};
+    use indoc::indoc;
+    use tower_lsp::lsp_types::Url;
+
+    fn minimal_class(internal_name: &str) -> ClassMetadata {
+        let (package, name) = internal_name
+            .rsplit_once('/')
+            .map(|(package, name)| (Some(Arc::from(package)), Arc::from(name)))
+            .unwrap_or((None, Arc::from(internal_name)));
+        ClassMetadata {
+            package,
+            name,
+            internal_name: Arc::from(internal_name),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: 0,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }
+    }
+
+    #[test]
+    fn extract_java_enclosing_method_resolves_param_types_from_index_view() {
+        let source = indoc! {r#"
+            class Test {
+                void demo(StringBuilder builder) {
+                    buil/*caret*/
+                }
+            }
+        "#};
+        let offset = source.find("/*caret*/").expect("caret marker");
+        let source = source.replacen("/*caret*/", "", 1);
+        let workspace_index = WorkspaceIndexHandle::new(WorkspaceIndex::new());
+        workspace_index.update(|index| {
+            index.add_jdk_classes(vec![minimal_class("java/lang/StringBuilder")]);
+        });
+        let db = Database::with_workspace_index(workspace_index);
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let file = SourceFile::new(&db, FileId::new(uri), source, Arc::from("java"));
+
+        let method = extract_java_enclosing_method(&db, file, offset).expect("enclosing method");
+
+        assert_eq!(method.name.as_ref(), "demo");
+        assert_eq!(method.descriptor.as_ref(), "(Ljava/lang/StringBuilder;)V");
+        assert_eq!(method.param_names, vec![Arc::from("builder")]);
     }
 }

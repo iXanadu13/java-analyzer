@@ -135,12 +135,7 @@ pub fn extract_java_current_class_member_list_from_source(
 
     let root = tree.root_node();
     let content: Arc<str> = Arc::from(file.content(db).as_str());
-    let name_table = resolve_name_table_for_file(db, file);
-    let ctx = JavaContextExtractor::new_with_overview(
-        Arc::clone(&content),
-        cursor_offset,
-        name_table.clone(),
-    );
+    let ctx = JavaContextExtractor::new_with_overview(Arc::clone(&content), cursor_offset, None);
     let cursor_node = ctx.find_cursor_node(root);
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
@@ -150,10 +145,10 @@ pub fn extract_java_current_class_member_list_from_source(
         scope::extract_enclosing_internal_name(&ctx, cursor_node, package.as_ref()).or_else(|| {
             crate::language::java::utils::build_internal_name(&package, &enclosing_class)
         });
-    let type_ctx = SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(
-        db.workspace_index().view(crate::index::IndexScope {
-            module: crate::index::ModuleId::ROOT,
-        }),
+    let type_ctx = SourceTypeCtx::from_view(
+        package.clone(),
+        imports,
+        resolve_index_view_for_file(db, file),
     );
 
     let members = cursor_node
@@ -207,6 +202,18 @@ fn parse_source_tree(content: &str, language_id: &str) -> Option<Tree> {
 
 fn parse_file_tree(db: &dyn crate::salsa_queries::Db, file: SourceFile) -> Option<Tree> {
     crate::salsa_queries::parse::parse_tree(db, file)
+}
+
+fn resolve_index_view_for_file(
+    db: &dyn crate::salsa_queries::Db,
+    _file: SourceFile,
+) -> crate::index::IndexView {
+    crate::salsa_queries::get_index_view_for_context(
+        db,
+        crate::index::ModuleId::ROOT,
+        crate::index::ClasspathId::Main,
+        None,
+    )
 }
 
 /// Extract parsed method locals from a method (uses cache).
@@ -325,19 +332,14 @@ pub fn extract_java_flow_type_overrides(
         return Arc::new(vec![]);
     };
     let root = tree.root_node();
-    let name_table = resolve_name_table_for_file(db, file);
-    let ctx = JavaContextExtractor::new_with_overview(
-        Arc::clone(&content),
-        cursor_offset,
-        name_table.clone(),
-    );
+    let ctx = JavaContextExtractor::new_with_overview(Arc::clone(&content), cursor_offset, None);
     let cursor_node = ctx.find_cursor_node(root);
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(
-        db.workspace_index().view(crate::index::IndexScope {
-            module: crate::index::ModuleId::ROOT,
-        }),
+    let type_ctx = SourceTypeCtx::from_view(
+        package.clone(),
+        imports,
+        resolve_index_view_for_file(db, file),
     );
     let locals =
         extract_visible_locals_in_tree(root, &ctx, cursor_node, cursor_offset, Some(&type_ctx));
@@ -504,18 +506,13 @@ fn extract_root_recovery_locals(
         return vec![];
     };
     let root = tree.root_node();
-    let name_table = resolve_name_table_for_file(db, file);
-    let ctx = JavaContextExtractor::new_with_overview(
-        Arc::clone(&content),
-        cursor_offset,
-        name_table.clone(),
-    );
+    let ctx = JavaContextExtractor::new_with_overview(Arc::clone(&content), cursor_offset, None);
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(
-        db.workspace_index().view(crate::index::IndexScope {
-            module: crate::index::ModuleId::ROOT,
-        }),
+    let type_ctx = SourceTypeCtx::from_view(
+        package.clone(),
+        imports,
+        resolve_index_view_for_file(db, file),
     );
 
     let mut visible = filter_visible_locals(
@@ -560,19 +557,14 @@ fn parse_method_locals(
 
     let root = tree.root_node();
 
-    let name_table = resolve_name_table_for_file(db, file);
-    let ctx = JavaContextExtractor::new_with_overview(
-        Arc::clone(&content),
-        method_start,
-        name_table.clone(),
-    );
+    let ctx = JavaContextExtractor::new_with_overview(Arc::clone(&content), method_start, None);
 
     let package = scope::extract_package(&ctx, root);
     let imports = scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package.clone(), imports, name_table).with_view(
-        db.workspace_index().view(crate::index::IndexScope {
-            module: crate::index::ModuleId::ROOT,
-        }),
+    let type_ctx = SourceTypeCtx::from_view(
+        package.clone(),
+        imports,
+        resolve_index_view_for_file(db, file),
     );
 
     let method_node = find_node_at_offset(
@@ -1091,17 +1083,12 @@ fn extract_active_lambda_params_incremental(
         return vec![];
     }
 
-    let name_table = resolve_name_table_for_file(db, file);
-    let typed_ctx = JavaContextExtractor::new_with_overview(
-        Arc::clone(&content),
-        cursor_offset,
-        name_table.clone(),
-    );
-    let package = scope::extract_package(&typed_ctx, root);
-    let imports = scope::extract_imports(&typed_ctx, root);
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table);
+    let package = scope::extract_package(&ctx, root);
+    let imports = scope::extract_imports(&ctx, root);
+    let type_ctx =
+        SourceTypeCtx::from_view(package, imports, resolve_index_view_for_file(db, file));
 
-    extract_active_lambda_params(&typed_ctx, cursor_node, Some(&type_ctx))
+    extract_active_lambda_params(&ctx, cursor_node, Some(&type_ctx))
 }
 
 fn extract_active_lambda_param_names(
@@ -2239,10 +2226,8 @@ fn parse_class_members(
 
     let root = tree.root_node();
 
-    let name_table = resolve_name_table_for_file(db, file);
-
     // Create a minimal context extractor for parsing
-    let ctx = JavaContextExtractor::for_indexing_with_overview(content, name_table.clone());
+    let ctx = JavaContextExtractor::for_indexing_with_overview(content, None);
 
     // Extract package and imports for type resolution
     let package = scope::extract_package(&ctx, root);
@@ -2266,11 +2251,8 @@ fn parse_class_members(
 
     let owner_internal =
         scope::extract_enclosing_internal_name(&ctx, Some(class_node), package.as_ref());
-    let type_ctx = SourceTypeCtx::from_overview(package, imports, name_table).with_view(
-        db.workspace_index().view(crate::index::IndexScope {
-            module: crate::index::ModuleId::ROOT,
-        }),
-    );
+    let type_ctx =
+        SourceTypeCtx::from_view(package, imports, resolve_index_view_for_file(db, file));
 
     // Extract members with synthetics (Lombok, etc.)
     let members = extract_type_members_with_synthetics(
@@ -2280,19 +2262,6 @@ fn parse_class_members(
         owner_internal.as_deref(),
     );
     members
-}
-
-fn resolve_name_table_for_file(
-    db: &dyn crate::salsa_queries::Db,
-    file: SourceFile,
-) -> Option<Arc<crate::index::NameTable>> {
-    let _ = file;
-    Some(crate::salsa_queries::get_name_table_for_context(
-        db,
-        crate::index::ModuleId::ROOT,
-        crate::index::ClasspathId::Main,
-        None,
-    ))
 }
 
 #[cfg(test)]
@@ -2334,7 +2303,12 @@ mod tests {
         let workspace = Workspace::new();
         let uri = Url::parse("file:///test/Test.java").unwrap();
         let file = SourceFile::new(&db, FileId::new(uri), source.to_string(), Arc::from("java"));
-        let name_table = resolve_name_table_for_file(&db, file).expect("name table");
+        let name_table = crate::salsa_queries::get_name_table_for_context(
+            &db,
+            crate::index::ModuleId::ROOT,
+            crate::index::ClasspathId::Main,
+            None,
+        );
         (db, workspace, file, name_table)
     }
 
@@ -2429,7 +2403,12 @@ mod tests {
         let workspace = Workspace::new();
         let uri = Url::parse("file:///test/Test.java").unwrap();
         let file = SourceFile::new(&db, FileId::new(uri), source.clone(), Arc::from("java"));
-        let name_table = resolve_name_table_for_file(&db, file).expect("name table");
+        let name_table = crate::salsa_queries::get_name_table_for_context(
+            &db,
+            crate::index::ModuleId::ROOT,
+            crate::index::ClasspathId::Main,
+            None,
+        );
 
         let expected = reference_locals(&db, file, &source, offset, Arc::clone(&name_table));
         let actual = extract_visible_method_locals_incremental(&db, file, offset, &workspace);
@@ -2911,13 +2890,13 @@ mod tests {
         let db = Database::with_workspace_index(workspace_index);
         let uri = Url::parse("file:///test/Test.java").unwrap();
         let file = SourceFile::new(&db, FileId::new(uri), source.clone(), Arc::from("java"));
-        let name_table = resolve_name_table_for_file(&db, file).expect("name table");
+        let view = resolve_index_view_for_file(&db, file);
         assert!(
-            name_table.exists("java/lang/StringBuilder"),
-            "seeded StringBuilder should be visible in the test name table"
+            view.get_class("java/lang/StringBuilder").is_some(),
+            "seeded StringBuilder should be visible in the test index view"
         );
         assert!(
-            SourceTypeCtx::from_overview(None, vec![], Some(name_table))
+            SourceTypeCtx::from_view(None, vec![], view)
                 .resolve_type_name_relaxed("StringBuilder")
                 .is_some(),
             "StringBuilder should resolve before flow extraction"
@@ -2964,7 +2943,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_name_table_for_file_reads_current_snapshot_without_outer_workspace_lock() {
+    fn resolve_index_view_for_file_reads_current_snapshot_without_outer_workspace_lock() {
         let workspace_index =
             crate::index::WorkspaceIndexHandle::new(crate::index::WorkspaceIndex::new());
         let db = Database::with_workspace_index(workspace_index.clone());
@@ -2976,9 +2955,10 @@ mod tests {
             Arc::from("java"),
         );
 
-        assert!(
-            resolve_name_table_for_file(&db, file).is_some(),
-            "NameTable lookup should read the current snapshot without an outer workspace lock",
+        assert_eq!(
+            resolve_index_view_for_file(&db, file).layer_count(),
+            0,
+            "IndexView lookup should read the current snapshot without an outer workspace lock",
         );
     }
 }
