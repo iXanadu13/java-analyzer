@@ -512,7 +512,7 @@ fn maybe_check_cancelled(
     phase: &'static str,
     index: usize,
 ) -> crate::lsp::request_cancellation::RequestResult<()> {
-    if index % 64 == 0
+    if index.is_multiple_of(64)
         && let Some(request) = request
     {
         request.check_cancelled(phase)?;
