@@ -3,15 +3,17 @@ use crate::{
         CandidateKind, CompletionCandidate,
         candidate::ReplacementMode,
         fuzzy,
-        import_utils::is_import_needed,
+        import_utils::{is_import_needed, source_fqn_of_meta},
         provider::{CompletionProvider, ProviderCompletionResult, ProviderSearchSpace},
     },
     index::{IndexScope, IndexView},
     language::java::completion::providers::type_lookup::{
         qualified_nested_type_matches, visible_direct_inner_classes,
     },
-    semantic::context::{AccessReceiverKind, CursorLocation, SemanticContext},
-    semantic::types::symbol_resolver::SymbolResolver,
+    semantic::{
+        context::{AccessReceiverKind, CursorLocation, SemanticContext},
+        types::symbol_resolver::SymbolResolver,
+    },
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -111,7 +113,7 @@ impl CompletionProvider for ExpressionProvider {
                     )
                     .with_replacement_mode(ReplacementMode::MemberSegment)
                     .with_filter_text(inner_name.to_string())
-                    .with_detail(source_fqn_of(inner.as_ref(), index))
+                    .with_detail(source_fqn_of_meta(inner.as_ref(), index))
                     .with_score(88.0 + score),
                 );
             }
@@ -302,7 +304,7 @@ impl CompletionProvider for ExpressionProvider {
         let mut results = Vec::with_capacity(seeds.len());
         for (i, seed) in seeds.into_iter().enumerate() {
             maybe_check_cancelled(request, "completion.expression.decorate", i)?;
-            let fqn = source_fqn_of(&seed.meta, index);
+            let fqn = source_fqn_of_meta(&seed.meta, index);
             let direct_name = seed.meta.direct_name();
             let mut candidate = CompletionCandidate::new(
                 Arc::from(direct_name),
@@ -445,7 +447,7 @@ fn provide_qualified_type_prefix(
                 CandidateKind::ClassName,
                 source,
             )
-            .with_detail(source_fqn_of(inner.as_ref(), index))
+            .with_detail(source_fqn_of_meta(inner.as_ref(), index))
             .with_score(85.0 + score),
         );
     }
@@ -547,10 +549,6 @@ fn calculate_boost(pkg: Option<&str>) -> f32 {
         }
     }
     0.0
-}
-
-fn source_fqn_of(meta: &crate::index::ClassMetadata, index: &IndexView) -> String {
-    crate::completion::import_utils::source_fqn_of_meta(meta, index)
 }
 
 #[cfg(test)]
