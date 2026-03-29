@@ -12,7 +12,7 @@ repos:
       - id: cargo-check
         name: cargo check
         description: Check the package for errors
-        entry: cargo check
+        entry: cargo check --all-targets
         language: system
         types: [rust]
         pass_filenames: false
